@@ -29,6 +29,8 @@ Package | Description
 
 > **__NOTE:__** All python files of this repository should be called from the root directory of the project to ensure that the correct (relative) paths are used (.e.g., `python gradiend/training/gradiend_training.py`).
 
+See `demo.ipynb` for a quick overview of the GRADIEND model and the evaluation process.
+
 ### Data
 The `gradiend.data` package provides two purposes:
 - Data access: The relevant datasets can be accessed via the `read_[dataset]()` functions, i.e., `read_genter()`, `read_geneutral()`, `read_namexact()`, `read_namextend()`, and `read_gentypes()`.

@@ -12,7 +12,7 @@ default_accuracy_function = lambda x: x #np.power(x, 10)
 normalization = lambda x: x #np.power(x, 0.1)
 
 
-def init_matplotlib(font_path="/home/drechsel/times.ttf", use_tex=False):
+def init_matplotlib(font_path="/path/to/times.ttf", use_tex=False):
     # Check if the font is already in the font manager
     for font in fm.fontManager.ttflist:
         if font.fname == font_path:
