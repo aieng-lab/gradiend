@@ -92,6 +92,7 @@ def select(model, max_size=None, print=True, force=False, plot=True, accuracy_fu
                     py_print(f'Error: Existing Model {output_path} was not the same as the current model')
                     changed_model.save_pretrained(output_path)
 
+
     if print:
         py_print(f'Evaluation for model {model}')
         py_print('Encoder:')

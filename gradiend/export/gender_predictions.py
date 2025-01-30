@@ -1,3 +1,5 @@
+import os
+
 import numpy as np
 import pandas as pd
 from matplotlib import pyplot as plt
@@ -62,6 +64,8 @@ def plot_all(*data, x_key='male_prob_mean', y_key='female_prob_mean', suffix='')
     x_y_max = max(df[x_key].max(), df[y_key].max())
     init_matplotlib(use_tex=True)
     fig, axes = plt.subplots(1, len(data), figsize=(16, 4), sharey=True)
+    if len(data) == 1:
+        axes = [axes]
 
     # Iterate over each base model and plot on respective axes
     for ax, (base_model, base_model_df) in zip(axes, df.groupby('base_model')):
@@ -129,7 +133,9 @@ def plot_all(*data, x_key='male_prob_mean', y_key='female_prob_mean', suffix='')
 
     # Adjust layout
     plt.tight_layout(rect=[0, 0, 1, 0.9])  # Leave space for the legend
-    plt.savefig(f'results/img/gender_predictions{suffix}.pdf')
+    output_file = f'results/img/gender_predictions{suffix}.pdf'
+    os.makedirs(os.path.dirname(output_file), exist_ok=True)
+    plt.savefig(output_file)
     plt.show()
 
 if __name__ == '__main__':

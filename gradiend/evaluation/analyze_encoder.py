@@ -536,7 +536,9 @@ def plot_encoded_value_distribution(*models, model_names=None):
     # Show the plot
     plt.tight_layout()
     plt.grid()
-    plt.savefig(f'results/img/encoded_values_{total_name}.pdf', bbox_inches='tight')
+    output = f'results/img/encoded_values_{total_name}.pdf'
+    os.makedirs(os.path.dirname(output), exist_ok=True)
+    plt.savefig(output, bbox_inches='tight')
     plt.show()
 
 

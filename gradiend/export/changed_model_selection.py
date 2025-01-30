@@ -43,7 +43,7 @@ table = [[
 for base_model in models:
     model = f'results/models/{base_model}'
 
-    decoder_metrics = default_evaluation(model, accuracy_function=lambda x: x)
+    decoder_metrics = default_evaluation(model, accuracy_function=lambda x: x, plot=True)
 
     # add base entry
     row = [models[base_model], '0.0', '0.0']
