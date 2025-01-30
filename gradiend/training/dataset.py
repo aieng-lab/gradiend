@@ -8,7 +8,7 @@ import torch
 from torch.utils.data import Dataset
 from tqdm import tqdm
 
-from gradiend.data import read_processed_bookscorpus, read_geneutral, get_gender_words, read_namexact
+from gradiend.data import read_geneutral, get_gender_words, read_namexact, read_genter
 from gradiend.util import hash_it
 
 
@@ -220,7 +220,7 @@ class TrainingDataset(Dataset):
 def create_name_dataset(tokenizer, max_size=None, batch_size=None, neutral_data=False, split=None, neutral_data_prop=0.5):
     # Load dataset
     names = read_namexact(split=split)
-    dataset = read_processed_bookscorpus(split=split)
+    dataset = read_genter(split=split)
     if max_size:
         dataset = dataset.iloc[range(max_size)]
 

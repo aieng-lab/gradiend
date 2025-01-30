@@ -1,8 +1,9 @@
+import torch
 from transformers import pipeline
 from tabulate import tabulate
 
 def mlm_predict_top_k(model, top_k=10, text='The man worked as a [MASK].'):
-    unmasker = pipeline('fill-mask', model=model)
+    unmasker = pipeline('fill-mask', model=model, device=torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
     text = text.replace('[MASK]', unmasker.tokenizer.mask_token)
     return unmasker(text, top_k=top_k)
 
@@ -24,7 +25,6 @@ def run(*models, top_k=10, text='The man worked as a [MASK].'):
     first_model_tokens = [pred.split(' (')[0] for pred in results[models[0]]]
 
     # Prepare table data
-    headers = ["Prediction"] + list(models)
     table_data = []
     for i in range(top_k):
         row = [f"{i + 1}"]
@@ -36,18 +36,13 @@ def run(*models, top_k=10, text='The man worked as a [MASK].'):
             row.append(token_entry)
         table_data.append(row)
 
-    # Generate LaTeX table using tabulate
-    latex_table = tabulate(table_data, headers=headers, tablefmt="latex_raw")
-
-    # Print LaTeX table
-    print("\nGenerated LaTeX Table:\n")
-    print(latex_table)
-
     return table_data
 
+def run_for_model(model, suffix=''):
+    print('=' * 80)
+    print(f'Running examples for {model}')
+    print('=' * 80)
 
-
-if __name__ == '__main__':
     texts = [
         'The woman worked as a [MASK].',
         'The man worked as a [MASK].',
@@ -55,40 +50,42 @@ if __name__ == '__main__':
         'Bob worked as a [MASK].',
     ]
 
+    # Example usage
+    table_data = []
+    for text in texts:
+        table_d = run(model,
+                      f"results/changed_models/{model}{suffix}-N",
+                      f"results/changed_models/{model}{suffix}-F",
+                      f"results/changed_models/{model}{suffix}-M",
+                      text=text,
+                      top_k=10,
+                      )
+        table_data.append(table_d)
+
+    header = [r'\textbf{Index}', r'\textbf{' + model + '}', r'\, + \textbf{\gradiendbpi}',
+              r'\, + \textbf{\gradiendfpi}', r'\, + \textbf{\gradiendmpi}']
+    mid_sections = [
+        '\\multicolumn{5}{c}{' + text + '}\n\\\\\\midrule\n ' + "\\\\\n".join([" & ".join(row) for row in table]) for
+        table, text in zip(table_data, texts)]
+    mid_section = "  \\\\ \n \\midrule\n".join(mid_sections)
+
+    tex = f"""
+    \\toprule
+    {' & '.join(header)} \\\\
+    \\midrule
+    {mid_section} \\\\
+    \\bottomrule
+    """
+
+    print(tex)
+
+if __name__ == '__main__':
+
+
     models = ['bert-base-cased', 'bert-large-cased', 'distilbert-base-cased', 'roberta-large']
-    suffix = '-vFinal'
     suffix = ''
 
 
     for model in models:
-        print('=' * 80)
-        print(f'Running examples for {model}')
-        print('=' * 80)
-
-        # Example usage
-        table_data = []
-        for text in texts:
-            table_d = run(model,
-                f"results/changed_models/{model}{suffix}-N",
-                f"results/changed_models/{model}-vFinal-F",
-                f"results/changed_models/{model}-vFinal-M",
-                text=text,
-                top_k=10,
-                )
-            table_data.append(table_d)
-
-        header = [r'\textbf{Index}', r'\textbf{' + model + '}', r'\, + \textbf{\gradiendbpi}', r'\, + \textbf{\gradiendfpi}', r'\, + \textbf{\gradiendmpi}']
-        mid_sections = ['\\multicolumn{5}{c}{' + text + '}\n\\\\\\midrule\n ' +"\\\\\n".join( [" & ".join(row) for row in table]) for table, text in zip(table_data, texts)]
-        mid_section = "  \\\\ \n \\midrule\n".join(mid_sections)
-
-        tex = f"""
-        \\toprule
-        {' & '.join(header)} \\\\
-        \\midrule
-        {mid_section} \\\\
-        \\bottomrule
-        """
-
-        print(tex)
-
+        run_for_model(model, suffix=suffix)
 

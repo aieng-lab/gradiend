@@ -13,7 +13,7 @@ import pandas as pd
 import torch
 from transformers import AutoModelForMaskedLM, AutoTokenizer
 
-from mlm import evaluate_mlm
+from gradiend.evaluation.mlm import evaluate_mlm
 from gradiend.data import read_geneutral, read_gentypes, read_namextend, read_namexact
 from gradiend.model import ModelWithGradiend
 from gradiend.util import hash_model_weights, normalization, default_accuracy_function, init_matplotlib
@@ -124,10 +124,9 @@ def evaluate_gender_bias_name_predictions(model, tokenizer, text_prefix=None, ba
     start = time.time()
     tokenizer_names_id = (tokenizer.name_or_path, hash(tuple(names_df['name'].tolist())))
     if tokenizer_names_id in gender_mapping_cache:
-        gender_mapping_he, gender_mapping_she, names_to_split = gender_mapping_cache[tokenizer_names_id]
+        gender_mapping_he, gender_mapping_she = gender_mapping_cache[tokenizer_names_id]
     else:
         names_df['name_lower'] = names_df['name'].str.lower()
-        names_to_split = names_df.set_index('name_lower')['split'].to_dict()
         gender_mapping_he = names_df[names_df['gender'] == 'M'].set_index('name_lower')['prob_M'].to_dict()
         gender_mapping_she = names_df[names_df['gender'] == 'F'].set_index('name_lower')['prob_F'].to_dict()
 
@@ -135,7 +134,7 @@ def evaluate_gender_bias_name_predictions(model, tokenizer, text_prefix=None, ba
         gender_mapping_he = {k: v for k, v in gender_mapping_he.items() if k.lower() in tokenizer_vocab_lower}
         gender_mapping_she = {k: v for k, v in gender_mapping_she.items() if k.lower() in tokenizer_vocab_lower}
         print(f"Preprocessing names took {time.time() - start:.2f} seconds")
-        gender_mapping_cache[tokenizer_names_id] = (gender_mapping_he, gender_mapping_she, names_to_split)
+        gender_mapping_cache[tokenizer_names_id] = (gender_mapping_he, gender_mapping_she)
 
     if text_prefix is False:
         # the prefix "My Friend, " is removed, i.e., also are suitable gendered predictions
@@ -239,7 +238,6 @@ def evaluate_gender_bias_name_predictions(model, tokenizer, text_prefix=None, ba
 
                 relevant_token_indices = token_indices # [i for i, prob in zip(token_indices, gender_probs) if prob > 0.0001]
                 tokens = [vocab[i] for i in relevant_token_indices]
-                splits = np.array([names_to_split.get(token) for token in tokens])
 
                 n = len(tokens)
                 if df_name:
@@ -250,7 +248,6 @@ def evaluate_gender_bias_name_predictions(model, tokenizer, text_prefix=None, ba
                     gender_data['prob_he'] += n * [prob_he]
                     gender_data['prob_she'] += n * [prob_she]
                     gender_data['most_likely_token'] += n * [most_likely_token]
-                    gender_data['split'] += splits.tolist()
 
                 gender_prob = gender_probs.sum().item()
 
@@ -343,7 +340,7 @@ def evaluate_gender_bias_name_predictions(model, tokenizer, text_prefix=None, ba
 
 
 def evaluate_non_gender_mlm(model, tokenizer, max_size=10000):
-    df = read_geneutral(split='test', max_size=max_size)
+    df = read_geneutral(max_size=max_size)
     texts = df['text'].tolist()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = model.to(device)
@@ -351,16 +348,6 @@ def evaluate_non_gender_mlm(model, tokenizer, max_size=10000):
     return result
 
 
-
-    # todo evaluate mlm
-
-
-# we evaluate the model on different tasks
-# - MLM on non gender data
-# - MLM on gender data with pronouns masked (assuming the model changes preference to one gender, evaluate the success of this approach)
-# - MLM on
-# - evaluate on special data? Sentences with typical gender bias, with the names masked, and evaluate what genders the names have the model predicts
-#       -
 def evaluate_model(model, tokenizer, verbose=True, df_name=None, thorough=True, force=False, only_friend=True, **additional_stats):
     model_hash = hash_model_weights(model)
     model_name = model.name_or_path
@@ -372,8 +359,7 @@ def evaluate_model(model, tokenizer, verbose=True, df_name=None, thorough=True, 
                 data = json.load(f)
 
             # sanitize data
-            if 'apd' in data['gender_bias_names'] and not isinstance(data['gender_bias_names']['apd'], dict):
-                return data
+            return data
         except FileNotFoundError:
             pass
 
@@ -1315,7 +1301,6 @@ def evaluate_all_gender_predictions():
 
 
 if __name__ == '__main__':
-
     model = AutoModelForMaskedLM.from_pretrained('roberta-large')
     tokenizer = AutoTokenizer.from_pretrained('roberta-large')
     results = evaluate_gender_bias_name_predictions(model, tokenizer)

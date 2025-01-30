@@ -5,7 +5,7 @@
 
 logs/
 results/
-data/
+/data
 
 *.pdf
 *.png

@@ -6,7 +6,7 @@ import time
 import numpy as np
 
 from gradiend.evaluation.analyze_encoder import analyze_models, get_model_metrics
-from gradiend.evaluation.analyze_model import analyze
+from gradiend.evaluation.select_models import select
 from gradiend.training import train_all_layers_autoencoder
 
 
@@ -69,12 +69,13 @@ if __name__ == '__main__':
         'bert-large-cased': dict(eval_max_size=0.5, eval_batch_size=4),
         'distilbert-base-cased': dict(),
         'roberta-large': dict(eval_max_size=0.5, eval_batch_size=4),
+        'modern-bert': dict(),
     }
 
     models = []
     for base_model, model_config in model_configs.items():
-        model = train(base_model, model_config, n=3, version='Final', clear_cache=True)
+        model = train(base_model, model_config, n=3, version='', clear_cache=True)
         models.append(model)
 
     for model in models:
-        analyze(model)
+        select(model)

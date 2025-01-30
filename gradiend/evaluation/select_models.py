@@ -3,14 +3,14 @@ import os
 
 import numpy as np
 
-from analyze_decoder import default_evaluation
-from analyze_encoder import get_file_name, analyze_models, get_model_metrics
+from gradiend.evaluation.analyze_decoder import default_evaluation
+from gradiend.evaluation.analyze_encoder import get_file_name, analyze_models, get_model_metrics
 from gradiend.model import ModelWithGradiend
 from gradiend.util import convert_tuple_keys_to_strings
 
 py_print = print
 
-def analyze(model, max_size=None, plot=False, print=True, force=False, accuracy_function=None, output_suffix="", output=True):
+def select(model, max_size=None, print=True, force=False, accuracy_function=lambda x: x, output_suffix="", output=True):
     model_base_name = os.path.basename(model)
     output_result = f'results/models/evaluation_{model_base_name}.json'
     ae = None
@@ -25,7 +25,7 @@ def analyze(model, max_size=None, plot=False, print=True, force=False, accuracy_
             analysis = analyze_models(model, max_size=max_size, split=split, force=force)
         encoder_metrics = get_model_metrics(enc_output)
 
-        decoder_metrics = default_evaluation(model, large=True, plot=True, accuracy_function=accuracy_function) # todo force
+        decoder_metrics = default_evaluation(model, large=True, plot=True, accuracy_function=accuracy_function)
 
         ae = ModelWithGradiend.from_pretrained(model)
 
@@ -111,10 +111,9 @@ def analyze(model, max_size=None, plot=False, print=True, force=False, accuracy_
 
 
 if __name__ == '__main__':
-    acc_function = lambda x: x
     models = ['bert-base-cased', 'bert-large-cased', 'distilbert-base-cased', 'roberta-large']
 
     for model in models:
         print(f'Analyzing model {model}')
-        analyze(f'results/models/{model}', force=False, accuracy_function=acc_function)
+        select(f'results/models/{model}', force=False)
         print(f'Done analyzing model {model}')

@@ -67,9 +67,12 @@ def plot_model_results(encoded_values, title='', y='z_score'):
 
 
 def analyze_model(model_with_gradiend, genter_df, names_df, output, df_no_gender=None, include_B=False, plot=False):
-    if not include_B:
+    if not include_B and 'B' in names_df['gender'].unique():
+        if not 'genders' in names_df:
+            raise ValueError('The names_df must contain the key genders if include_B is False')
         names_df = names_df[names_df['genders'] != 'B']
 
+    model = model_with_gradiend.bert
     model = model_with_gradiend.bert
     tokenizer = model_with_gradiend.tokenizer
     mask_token = tokenizer.mask_token
@@ -137,7 +140,7 @@ def analyze_model(model_with_gradiend, genter_df, names_df, output, df_no_gender
                 encoded = model_with_gradiend.encode(filled_text, label=masked_label)
 
             encoded_values.append(encoded)
-            genders.append(entry['genders'])
+            genders.append(entry['gender'])
             names.append(name)
             token_distances.append(masked_token_distance)
             labels.append([label] * row['pronoun_count'])
@@ -177,9 +180,10 @@ def analyze_model(model_with_gradiend, genter_df, names_df, output, df_no_gender
     results = genter_df['genter'].tolist()
 
     gender_tokens = get_gender_words(tokenizer=tokenizer)
+    torch.manual_seed(42)
     if df_no_gender is not None:
-        if len(df_no_gender) > len(filled_texts):
-            df_no_gender = df_no_gender.sample(n=len(filled_texts)).reset_index(drop=True)
+        if len(df_no_gender) > 10000:
+            df_no_gender = df_no_gender.head(10000).reset_index(drop=True)
         texts = []
         encoded_values = []
         labels = []
@@ -212,7 +216,7 @@ def analyze_model(model_with_gradiend, genter_df, names_df, output, df_no_gender
     encoded_values = []
     labels = []
     default_predictions = {k: [] for k in ['he', 'she', 'most_likely_token', 'label']}
-
+    torch.manual_seed(42)
     for text in tqdm(filled_texts, desc='GENTER data without gender words masked'):
         encoded, masked_text, label = model_with_gradiend.mask_and_encode(text, ignore_tokens=gender_tokens, return_masked_text=True)
         texts.append(text)
@@ -1017,11 +1021,9 @@ def analyze_models(*models, max_size=None, force=False, split='test', prefix=Non
         models = list(models) + get_files_and_folders_with_prefix(prefix, only_folder=True, suffix=best_score)
     print(f'Analyze {len(models)} Models:', models)
 
-    names_df = read_names_data(split=split)
-    names_df.sort_values(by=['gender_agreement'], ascending=[True], inplace=True)
-    names_df.drop_duplicates(subset='name', keep='first', inplace=True)
+    names_df = read_namexact(split=split)
     df = read_genter(split=split)
-    df_no_gender = read_geneutral(split=split)
+    df_no_gender = read_geneutral(max_size=10000)
 
     if max_size:
         df = df.head(max_size)
