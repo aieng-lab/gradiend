@@ -2,15 +2,16 @@ import json
 import os
 
 import numpy as np
+from transformers import AutoModel, AutoModelForMaskedLM
 
 from gradiend.evaluation.analyze_decoder import default_evaluation
 from gradiend.evaluation.analyze_encoder import get_file_name, analyze_models, get_model_metrics
-from gradiend.model import ModelWithGradiend
+from gradiend.model import ModelWithGradiend, GradiendModel
 from gradiend.util import convert_tuple_keys_to_strings
 
 py_print = print
 
-def select(model, max_size=None, print=True, force=False, accuracy_function=lambda x: x, output_suffix="", output=True):
+def select(model, max_size=None, print=True, force=False, plot=True, accuracy_function=lambda x: x, output_suffix="", output=True):
     model_base_name = os.path.basename(model)
     output_result = f'results/models/evaluation_{model_base_name}.json'
     ae = None
@@ -25,7 +26,7 @@ def select(model, max_size=None, print=True, force=False, accuracy_function=lamb
             analysis = analyze_models(model, max_size=max_size, split=split, force=force)
         encoder_metrics = get_model_metrics(enc_output)
 
-        decoder_metrics = default_evaluation(model, large=True, plot=True, accuracy_function=accuracy_function)
+        decoder_metrics = default_evaluation(model, large=True, plot=plot, accuracy_function=accuracy_function)
 
         ae = ModelWithGradiend.from_pretrained(model)
 
@@ -86,8 +87,8 @@ def select(model, max_size=None, print=True, force=False, accuracy_function=lamb
                 py_print(f'Saved {key} model to {output_path}')
             else:
                 # check if saved model is the same
-                saved_model = ModelWithGradiend.from_pretrained(output_path)
-                if not np.allclose(saved_model.bert.bert.embeddings.position_embeddings.weight.cpu().detach(), changed_model.bert.embeddings.position_embeddings.weight.cpu().detach()):
+                saved_model = AutoModelForMaskedLM.from_pretrained(output_path)
+                if not np.allclose(saved_model.bert.embeddings.position_embeddings.weight.cpu().detach(), changed_model.bert.embeddings.position_embeddings.weight.cpu().detach()):
                     py_print(f'Error: Existing Model {output_path} was not the same as the current model')
                     changed_model.save_pretrained(output_path)
 

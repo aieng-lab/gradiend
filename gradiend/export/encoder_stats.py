@@ -1,7 +1,6 @@
 from tabulate import tabulate
 
 from gradiend.evaluation.analyze_encoder import get_model_metrics
-from gradiend.util import get_files_and_folders_with_prefix
 from gradiend.export import models
 
 exported_metrics = {

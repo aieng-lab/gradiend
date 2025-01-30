@@ -61,7 +61,7 @@ def plot_all(*data, x_key='male_prob_mean', y_key='female_prob_mean', suffix='')
     x_y_min = min(df[x_key].min(), df[y_key].min())
     x_y_max = max(df[x_key].max(), df[y_key].max())
     init_matplotlib(use_tex=True)
-    fig, axes = plt.subplots(1, 4, figsize=(16, 4), sharey=True)
+    fig, axes = plt.subplots(1, len(data), figsize=(16, 4), sharey=True)
 
     # Iterate over each base model and plot on respective axes
     for ax, (base_model, base_model_df) in zip(axes, df.groupby('base_model')):

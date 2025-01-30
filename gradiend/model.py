@@ -226,27 +226,6 @@ class GradiendModel(nn.Module):
     def grad_iterations(self):
         return self.kwargs.get('grad_iterations', 1)
 
-    # todo fix
-    def plot_encoded(self, fig=None, text='[NAME] works as software engineer. [MASK] excels at coding.'):
-        names = {
-            'Paul': 'M',
-            'Anna': 'F',
-            'David': 'M',
-            'Emma': 'F',
-        }
-
-        texts = [text.replace('[NAME]', name) for name in names]
-        labels = list(names.values())
-        encoded_values = [self.encode(text, label) for text, label in zip(texts, labels)]
-        colors = ['red' if label == 'M' else 'blue' for label in labels]
-
-        if fig is None:
-            fig = plt.figure(figsize=(12, 6))
-        else:
-            fig.clear()
-        plt.scatter(encoded_values, color=colors)
-        plt.legend()
-        plt.show()
 
     def plot(self, fig=None, bins=50, n=None):
         # Initialize lists to store weights and biases
@@ -614,3 +593,6 @@ def run_mlm_example(model, tokenizer):
     output2 = run_for_text(text2)
 
     print((output1 - output2).abs().sum().item())
+
+if __name__ == '__main__':
+    gradiend = ModelWithGradiend.from_pretrained('results/models/bert-base-cased')
