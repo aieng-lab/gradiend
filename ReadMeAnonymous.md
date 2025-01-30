@@ -86,7 +86,9 @@ Although the experiments mentioned above are based on data provided via HuggingF
 generate the datasets used in the paper.
 
 ### Required Datasets
-If you want to re-create the datasets generated in the paper, you first need to download the following datasets:
+maybe comment something like if you want to re-create the datasets generated in the paper, you can need to download the following datasets:
+
+For the training of GRADIEND, all datasets are automatically retrieved from [HuggingFace](https)
 
 Dataset | Download Link | Notes                                            | Download Directory
 --------|---------------|--------------------------------------------------|-------------------
