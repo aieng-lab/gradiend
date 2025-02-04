@@ -1,0 +1,14 @@
+cff-version: 1.2.0
+message: "If you use this work, please cite it as below."
+authors:
+  - family-names: Drechsel
+    given-names: Jonathan
+  - family-names: Herbold
+    given-names: Steffen
+title: "GRADIEND: Monosemantic Feature Learning within Neural Networks Applied to Gender Debiasing of Transformer Models"
+year: 2025
+doi: 10.48550/arXiv.2502.01406
+url: https://arxiv.org/abs/2502.01406
+type: article
+version: 1.0
+license: CC BY 4.0
