@@ -10,8 +10,8 @@ from gradiend.data.names import *
 from gradiend.data.util import *
 
 
-def load_dataset(name, split=None):
-    dataset = load_dataset_hf(name, split=sanitize_split(split))
+def load_dataset(name, split=None, trust_remote_code=False):
+    dataset = load_dataset_hf(name, split=sanitize_split(split), trust_remote_code=trust_remote_code)
 
     if split is None:
         return pd.concat([ds.to_pandas() for ds in dataset.values()])
@@ -25,10 +25,10 @@ def read_namexact(split=None):
     return load_dataset('aieng-lab/namexact', split=split)
 
 def read_genter(split=None):
-    return load_dataset('aieng-lab/genter', split=split)
+    return load_dataset('aieng-lab/genter', split=split, trust_remote_code=True)
 
 def read_geneutral(max_size=None):
-    df = load_dataset('aieng-lab/geneutral')
+    df = load_dataset('aieng-lab/geneutral', trust_remote_code=True)
 
     if max_size:
         df = df.head(n=max_size)
@@ -39,7 +39,7 @@ def read_gentypes():
 
 def read_bookcorpus():
     from datasets import load_dataset
-    dataset = load_dataset("bookcorpus")
+    dataset = load_dataset("bookcorpus", trust_remote_code=True)
     return dataset['train']
 
 def get_gender_words(tokenizer=None):

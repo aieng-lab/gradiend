@@ -3,7 +3,7 @@ import os
 import pandas as pd
 from datasets import Dataset
 
-from gradiend.data import read_names_data, read_processed_bookcorpus
+from gradiend.data import read_names_data, read_processed_bookcorpus, read_bookcorpus
 
 org_id = 'aieng-lab'
 token = os.getenv('HF_TOKEN')
@@ -15,11 +15,34 @@ splits = {
 }
 
 def upload_genter():
+    # as we don't have the permission to publish a subset of BookCorpus on Hugging Face, we need to map the text
+    # to indices corresponding to the original dataset
+    bookcorpus = read_bookcorpus()
+    # Map the text in geneutral to indices in the original BookCorpus
+    bookcorpus_mapping = {text: idx for idx, text in enumerate(bookcorpus['text'])}
+
     for split, hf_split in splits.items():
         df = read_processed_bookcorpus(split=split, filter_gender_words=True, threshold=1.0)
         df = df[['text', 'masked', 'label', 'name', 'pronoun', 'pronoun_count']]
-        dataset = Dataset.from_pandas(df)
-        dataset.push_to_hub(f'{org_id}/genter', split=hf_split, token=token)
+
+        # Add the mapped indices to the geneutral DataFrame
+        df['index'] = df['text'].map(bookcorpus_mapping)
+
+        # Check if any text couldn't be mapped
+        unmapped = df[df['index'].isna()]
+        if not unmapped.empty:
+            print(f"Warning: {len(unmapped)} texts could not be mapped to the BookCorpus dataset.")
+
+        # Drop rows with unmapped indices if necessary
+
+        df = df.dropna(subset=['index'])
+
+        df[['index', 'name', 'pronoun']].to_csv(f'data/genter_indices_{split}.csv', index=False)
+        df.to_csv('data/genter_with_indices.csv', index=False)
+
+
+        #dataset = Dataset.from_pandas(df)
+        #dataset.push_to_hub(f'{org_id}/genter', split=hf_split, token=token)
 
 def _read_namexact(split=None):
     return read_names_data(split=split)
@@ -50,8 +73,30 @@ def upload_geneutral():
     # geneutral
     df = pd.read_csv('data/geneutral.csv')
     df = df[['text']]
-    dataset = Dataset.from_pandas(df)
-    dataset.push_to_hub(f'{org_id}/geneutral', token=token)
+
+    # as we don't have the permission to publish a subset of BookCorpus on Hugging Face, we need to map the text
+    # to indices corresponding to the original dataset
+    bookcorpus = read_bookcorpus()
+    # Map the text in geneutral to indices in the original BookCorpus
+    bookcorpus_mapping = {text: idx for idx, text in enumerate(bookcorpus['text'])}
+
+    # Add the mapped indices to the geneutral DataFrame
+    df['index'] = df['text'].map(bookcorpus_mapping)
+
+    # Check if any text couldn't be mapped
+    unmapped = df[df['index'].isna()]
+    if not unmapped.empty:
+        print(f"Warning: {len(unmapped)} texts could not be mapped to the BookCorpus dataset.")
+
+    # Drop rows with unmapped indices if necessary
+
+    df = df.dropna(subset=['index'])
+
+    df[['index']].to_csv('data/geneutral_indices.csv', index=False)
+    df.to_csv('data/geneutral_with_indices.csv', index=False)
+
+    #dataset = Dataset.from_pandas(df)
+    #dataset.push_to_hub(f'{org_id}/geneutral', token=token)
 
 def upload_gentypes():
     # gentypes
