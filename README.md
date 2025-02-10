@@ -1,5 +1,6 @@
 # GRADIEND: Monosemantic Feature Learning within Neural Networks Applied to Gender Debiasing of Transformer Models
 > Jonathan Drechsel, Steffen Herbold
+[![arXiv](https://img.shields.io/badge/arXiv-2502.01406-blue.svg)](https://arxiv.org/abs/2502.01406)
 
 
 This repository contains the official source code for the training and evaluation of [GRADIEND: Monosemantic Feature Learning within Neural Networks Applied to Gender Debiasing](todo).
@@ -104,3 +105,16 @@ GENTER  | `gradiend.data.filtering.generate_genter()`
 GENEUTRAL | `gradiend.data.generate_geneutral()`
 NAMEXACT | `gradiend.data.generate_namexact()`
 NAMEEXTEND | `gradiend.data.generate_namextend()`
+
+## Citation
+```
+@misc{drechsel2025gradiendmonosemanticfeaturelearning,
+      title={{GRADIEND}: Monosemantic Feature Learning within Neural Networks Applied to Gender Debiasing of Transformer Models}, 
+      author={Jonathan Drechsel and Steffen Herbold},
+      year={2025},
+      eprint={2502.01406},
+      archivePrefix={arXiv},
+      primaryClass={cs.LG},
+      url={https://arxiv.org/abs/2502.01406}, 
+}
+```
