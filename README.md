@@ -28,7 +28,7 @@ Package | Description
 `gradiend.evaluation` | Evaluation of GRADIEND
 `gradiend.export` | Export functions for results, e.g., printing LaTeX tables and plotting images
 
-> **__NOTE:__** All python files of this repository should be called from the root directory of the project to ensure that the correct (relative) paths are used (.e.g., `python gradiend/training/gradiend_training.py`).
+> **__NOTE:__** All python files of this repository should be called from the root directory of the project to ensure that the correct (relative) paths are used (e.g., `python gradiend/training/gradiend_training.py`).
 
 See `demo.ipynb` for a quick overview of the GRADIEND model and the evaluation process.
 
