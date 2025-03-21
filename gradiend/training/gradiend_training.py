@@ -71,10 +71,10 @@ def train(base_model, model_config, n=3, metric='pearson_MF', force=False, versi
 
 if __name__ == '__main__':
     model_configs = {
-        #'bert-base-cased': dict(),
-        #'bert-large-cased': dict(eval_max_size=0.5, eval_batch_size=4),
-        #'distilbert-base-cased': dict(),
-        #'roberta-large': dict(eval_max_size=0.5, eval_batch_size=4),
+        'bert-base-cased': dict(),
+        'bert-large-cased': dict(eval_max_size=0.5, eval_batch_size=4),
+        'distilbert-base-cased': dict(),
+        'roberta-large': dict(eval_max_size=0.5, eval_batch_size=4),
         #'answerdotai/ModernBERT-base': dict(), # ModernBert not working with current transformers version!
         #'gpt2': dict(),
         #'gpt2-medium': dict(),
