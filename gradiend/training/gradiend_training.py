@@ -7,7 +7,7 @@ import numpy as np
 
 from gradiend.evaluation.analyze_encoder import analyze_models, get_model_metrics
 from gradiend.evaluation.select_models import select
-from gradiend.training import train_all_layers_autoencoder
+from gradiend.training import train_all_layers_gradiend, train_multiple_layers_gradiend
 
 
 def train(base_model, model_config, n=3, metric='pearson_MF', force=False, version=None, clear_cache=False):
@@ -28,9 +28,15 @@ def train(base_model, model_config, n=3, metric='pearson_MF', force=False, versi
             print(f'Skipping training of {output} as it already exists')
             continue
 
-        print('Training', output)
-        model_config['seed'] = i
-        train_all_layers_autoencoder(model=base_model, output=output, **model_config)
+        if not os.path.exists(output):
+            print('Training', output)
+            model_config['seed'] = i+1
+            if 'layers' in model_config:
+                train_multiple_layers_gradiend(model=base_model, output=output, **model_config)
+            else:
+                train_all_layers_gradiend(model=base_model, output=output, **model_config)
+        else:
+            print('Model', output, 'already exists, skipping training, but evaluate')
 
         analyze_models(output, split='val', force=force)
         model_metrics = get_model_metrics(output, split='val')
@@ -65,16 +71,20 @@ def train(base_model, model_config, n=3, metric='pearson_MF', force=False, versi
 
 if __name__ == '__main__':
     model_configs = {
-        'bert-base-cased': dict(),
-        'bert-large-cased': dict(eval_max_size=0.5, eval_batch_size=4),
-        'distilbert-base-cased': dict(),
-        'roberta-large': dict(eval_max_size=0.5, eval_batch_size=4),
-        'modern-bert': dict(),
+        #'bert-base-cased': dict(),
+        #'bert-large-cased': dict(eval_max_size=0.5, eval_batch_size=4),
+        #'distilbert-base-cased': dict(),
+        #'roberta-large': dict(eval_max_size=0.5, eval_batch_size=4),
+        #'answerdotai/ModernBERT-base': dict(), # ModernBert not working with current transformers version!
+        #'gpt2': dict(),
+        #'gpt2-medium': dict(),
+        #'gpt2-large': dict(),
+        #'gpt2-xl': dict(layers=['*.h.47.*'], eval_max_size=0.1, eval_batch_size=4),
     }
 
     models = []
     for base_model, model_config in model_configs.items():
-        model = train(base_model, model_config, n=3, version='', clear_cache=True)
+        model = train(base_model, model_config, n=3, version='', clear_cache=False)
         models.append(model)
 
     for model in models:

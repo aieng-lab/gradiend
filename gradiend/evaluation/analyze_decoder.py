@@ -13,9 +13,9 @@ import pandas as pd
 import torch
 from transformers import AutoModelForMaskedLM, AutoTokenizer
 
-from gradiend.evaluation.mlm import evaluate_mlm
+from gradiend.evaluation.mlm import evaluate_mlm, evaluate_clm
 from gradiend.data import read_geneutral, read_gentypes, read_namextend, read_namexact
-from gradiend.model import ModelWithGradiend
+from gradiend.model import ModelWithGradiend, AutoModelForLM
 from gradiend.util import hash_model_weights, normalization, default_accuracy_function, init_matplotlib
 
 
@@ -115,6 +115,10 @@ def evaluate_gender_bias_name_predictions(model, tokenizer, text_prefix=None, ba
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = model.to(device)
     model.eval()
+    is_generative = tokenizer.mask_token is None
+    if is_generative:
+        tokenizer.pad_token = tokenizer.eos_token
+        #tokenizer.pad_token_id = tokenizer.eos_token_id
 
     data = read_gentypes()
     names_df = read_namextend()
@@ -171,7 +175,10 @@ def evaluate_gender_bias_name_predictions(model, tokenizer, text_prefix=None, ba
     all_texts = []
     for _, record in data.iterrows():
         text = record['text']
-        if text_prefix:
+        if is_generative:
+            text = f'The person, who {text.removeprefix("My friend, [NAME],").removesuffix(".")}, has the first name'
+            print(text)
+        elif text_prefix:
             if text.startswith('My friend, [NAME],'):
                 text = f'{text_prefix.strip()}, [NAME], {text.removeprefix("My friend, [NAME],").strip()}'
             elif text.startswith('[NAME]'):
@@ -180,8 +187,10 @@ def evaluate_gender_bias_name_predictions(model, tokenizer, text_prefix=None, ba
                 text = f'{text_prefix.strip()} {text}'
         elif text_prefix is False:
             text = text.removeprefix('My friend, [NAME],').strip()
-
-        masked_text = text.replace("[NAME]", tokenizer.mask_token)
+        if is_generative:
+            masked_text = text
+        else:
+            masked_text = text.replace("[NAME]", tokenizer.mask_token)
         all_texts.append(masked_text)
 
     vocab = {v: k for k, v in tokenizer.vocab.items()}
@@ -200,7 +209,10 @@ def evaluate_gender_bias_name_predictions(model, tokenizer, text_prefix=None, ba
         attention_mask = batch_tokenized_text["attention_mask"].to(device)
 
         # Find mask token index in each input
-        mask_token_index = (input_ids == tokenizer.mask_token_id).nonzero(as_tuple=True)
+        if is_generative: # todo
+            mask_token_index = (input_ids.squeeze() != tokenizer.pad_token_id).sum(dim=1) - 1
+        else:
+            mask_token_index = (input_ids == tokenizer.mask_token_id).nonzero(as_tuple=True)[1]
 
         with torch.no_grad():
             outputs = model(input_ids=input_ids, attention_mask=attention_mask)
@@ -212,7 +224,7 @@ def evaluate_gender_bias_name_predictions(model, tokenizer, text_prefix=None, ba
         for i in range(len(batch_texts)):
             text = batch_texts[i]
             text_dict = {key: {} for key in {'M', 'F'}}
-            masked_index = mask_token_index[1][i].item()
+            masked_index = mask_token_index[i].item()
             predictions = logits[i, masked_index]
 
             softmax_probs = softmax(predictions, dim=-1).cpu()
@@ -226,7 +238,7 @@ def evaluate_gender_bias_name_predictions(model, tokenizer, text_prefix=None, ba
                 # print the top 100 tokens
                 top_k = 100
                 top_k_values, top_k_indices = torch.topk(softmax_probs, top_k)
-                top_k_tokens = [vocab[i] for i in top_k_indices]
+                top_k_tokens = [vocab[int(i)] for i in top_k_indices]
                 top_k_probs = top_k_values.tolist()
                 print(f"Top {top_k} tokens:")
                 for token, prob in zip(top_k_tokens, top_k_probs):
@@ -237,7 +249,7 @@ def evaluate_gender_bias_name_predictions(model, tokenizer, text_prefix=None, ba
                 gender_probs = softmax_probs[token_indices] * token_factors
 
                 relevant_token_indices = token_indices # [i for i, prob in zip(token_indices, gender_probs) if prob > 0.0001]
-                tokens = [vocab[i] for i in relevant_token_indices]
+                tokens = [vocab[int(i)] for i in relevant_token_indices]
 
                 n = len(tokens)
                 if df_name:
@@ -250,8 +262,6 @@ def evaluate_gender_bias_name_predictions(model, tokenizer, text_prefix=None, ba
                     gender_data['most_likely_token'] += n * [most_likely_token]
 
                 gender_prob = gender_probs.sum().item()
-
-                text_dict[gender] = {}
                 text_dict[gender] = gender_prob
 
             if isinstance(text_dict[gender], dict): # todo deprecate?
@@ -344,21 +354,27 @@ def evaluate_non_gender_mlm(model, tokenizer, max_size=10000):
     texts = df['text'].tolist()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = model.to(device)
-    result, stats = evaluate_mlm(model, tokenizer, texts, verbose=False)
+    is_generative = tokenizer.mask_token is None
+    if is_generative:
+        result, stats = evaluate_clm(model, tokenizer, texts, verbose=False)
+    else:
+        result, stats = evaluate_mlm(model, tokenizer, texts, verbose=False)
     return result
 
 
-def evaluate_model(model, tokenizer, verbose=True, df_name=None, thorough=True, force=False, only_friend=True, **additional_stats):
+def evaluate_model(model, tokenizer, verbose=True, df_name=None, thorough=True, force=False, only_friend=True, cache_folder='', **additional_stats):
     model_hash = hash_model_weights(model)
     model_name = model.name_or_path
     model_id = os.path.basename(model_name)
-    cache_file = f'results/cache/evaluate_model/{model_id}/{model_hash}.json'
+    if cache_folder and not cache_folder.endswith('/'):
+        cache_folder += '/'
+
+    cache_file = f'results/cache/evaluate_model/{model_id}/{cache_folder}{model_hash}.json'
     if not force:
         try:
             with open(cache_file, 'r') as f:
                 data = json.load(f)
 
-            # sanitize data
             return data
         except FileNotFoundError:
             pass
@@ -422,11 +438,17 @@ def evaluate_model(model, tokenizer, verbose=True, df_name=None, thorough=True, 
 
     return result
 
-def get_evaluation_file(path, gender_factors, lrs, thorough=True, top_k=None):
-    top_k = f'_{top_k}' if top_k else ''
+def get_evaluation_file(path, gender_factors, lrs, thorough=True, top_k=None, part=None, top_k_part=None):
+    top_k = f'_top_k_{top_k}' if top_k is not None else ''
     iter_stats = lambda iterable: f'{min(iterable)}_{max(iterable)}_{len(iterable)}{top_k}'
     not_thorough = '_not_thorough' if not thorough else ''
-    return f'{path}_{thorough}{top_k}_evaluation.json', f'{path}_evaluation_{iter_stats(gender_factors)}_{iter_stats(lrs)}{not_thorough}.json'
+    if part != 'decoder':
+        part = '_part_' + part
+
+    if top_k_part != 'decoder':
+        top_k_part = f'_top_k_{top_k_part}'
+
+    return f'{path}_{thorough}{top_k}{part}{top_k_part}_evaluation.json', f'{path}_evaluation_{iter_stats(gender_factors)}_{iter_stats(lrs)}{not_thorough}{top_k}{part}{top_k_part}.json'
 
 def convert_results_to_dict(list_results):
     dict_result = {}
@@ -444,7 +466,7 @@ def convert_results_to_list(dict_results):
     return [{**dict_result, 'id': (key if isinstance(key, str) else {'gender_factor': key[0], 'lr': key[1]})} for key, dict_result in dict_results.items()]
 
 
-def evaluate_bert_with_ae(path, gender_factors=None, lrs=None, thorough=True, top_k=None, accuracy_function=None):
+def evaluate_bert_with_ae(path, gender_factors=None, lrs=None, thorough=True, top_k=None, accuracy_function=None, part='decoder', top_k_part='decoder'):
     accuracy_function = accuracy_function or default_accuracy_function
     metric_keys = ['bpi', 'fpi', 'mpi']
 
@@ -478,10 +500,10 @@ def evaluate_bert_with_ae(path, gender_factors=None, lrs=None, thorough=True, to
         return relevant_results
 
     bert_with_ae = ModelWithGradiend.from_pretrained(path)
-    base_model = bert_with_ae.bert
+    base_model = bert_with_ae.base_model
     tokenizer = bert_with_ae.tokenizer
     model_id = os.path.basename(path) if path.startswith('results/models') else path
-    base_file, file = get_evaluation_file(f'results/cache/decoder/{model_id}', gender_factors, lrs, thorough=thorough, top_k=top_k)
+    base_file, file = get_evaluation_file(f'results/cache/decoder/{model_id}', gender_factors, lrs, thorough=thorough, top_k=top_k, part=part, top_k_part=top_k_part)
     os.makedirs(os.path.dirname(base_file), exist_ok=True)
     os.makedirs(os.path.dirname(file), exist_ok=True)
 
@@ -546,15 +568,19 @@ def evaluate_bert_with_ae(path, gender_factors=None, lrs=None, thorough=True, to
         relevant_results['base'] = base_results
 
 
-    for gender_factor, lr in tqdm(pairs, desc="Evaluate BERT With AE"):
+    for gender_factor, lr in tqdm(pairs, desc="Evaluate GRADIEND"):
         id = {'gender_factor': gender_factor, 'lr': lr}
         id_key = (gender_factor, lr)
         if id_key in relevant_results:
             print(f"Skipping {id} as it is already evaluated")
             continue
 
-        enhanced_bert = bert_with_ae.modify_bert(lr=lr, gender_factor=gender_factor, top_k=top_k)
-        enhanced_bert_results = evaluate_model(enhanced_bert, tokenizer, df_name=f'results/cache/models/{bert_with_ae.name}_lr_{lr}_gf_{gender_factor}.csv', thorough=thorough)
+        enhanced_bert = bert_with_ae.modify_model(lr=lr, gender_factor=gender_factor, top_k=top_k, part=part, top_k_part=top_k_part)
+        if top_k is None:
+            df_name = f'results/cache/models/{bert_with_ae.name}_lr_{lr}_gf_{gender_factor}.csv'
+        else:
+            df_name = f'results/cache/models/{bert_with_ae.name}/{top_k}/lr_{lr}_gf_{gender_factor}.csv'
+        enhanced_bert_results = evaluate_model(enhanced_bert, tokenizer, df_name=df_name, thorough=thorough, cache_folder=f'{gender_factor}_{lr}') # force=True?
         all_results[id_key] = enhanced_bert_results
         relevant_results[id_key] = enhanced_bert_results
 
@@ -915,7 +941,7 @@ def top_neuron_evaluation(model, bin_size=100, lr=None, gender_factor=None, key=
 
 
     bert_with_ae = ModelWithGradiend.from_pretrained(model)
-    base_model = bert_with_ae.bert
+    base_model = bert_with_ae.base_model
     tokenizer = bert_with_ae.tokenizer
 
     def get_evaluation_file(path, gender_factor, lr, bin_size):
@@ -927,7 +953,7 @@ def top_neuron_evaluation(model, bin_size=100, lr=None, gender_factor=None, key=
     os.makedirs(os.path.dirname(file), exist_ok=True)
 
     # n is number of elements in the GRADIEND model
-    n = bert_with_ae.ae.input_dim
+    n = bert_with_ae.gradiend.input_dim
     borders = [0, 40000]
     borders.append(n-30000)
     borders.append(n)
@@ -1020,7 +1046,7 @@ def top_neuron_evaluation(model, bin_size=100, lr=None, gender_factor=None, key=
 
 default_evaluation_gender_factors = [-10, -2] + [-1, -0.8, -0.6, -0.4, -0.2, 0.0, 0.2, 0.4, 0.6, 0.8, 1.0] + [2, 10]
 default_evaluation_lrs = [-0.5, -1e-1, -5e-2, -1e-2, -5e-3, -1e-3, -5e-4, -1e-4,  1e-4, 5e-4, 1e-3, 5e-3, 1e-2, 5e-2, 1e-1, 0.5] # -5e-5, -1e-5, 1e-5, 5e-5,
-def default_evaluation(model, large=True, plot=True, top_k=None, accuracy_function=None, **kwargs):
+def default_evaluation(model, large=True, plot=True, top_k=None, accuracy_function=None, part='decoder', top_k_part='decoder', **kwargs):
     if large:
         gender_factors = default_evaluation_gender_factors
         lrs = default_evaluation_lrs
@@ -1029,10 +1055,10 @@ def default_evaluation(model, large=True, plot=True, top_k=None, accuracy_functi
         gender_factors = [1, 0, 1]
         lrs = [1e-2, 1e-3, 1e-4, 1e-5]
 
-    data = evaluate_bert_with_ae(model, gender_factors, lrs, thorough=large, top_k=top_k, accuracy_function=accuracy_function)
+    data = evaluate_bert_with_ae(model, gender_factors, lrs, thorough=large, top_k=top_k, accuracy_function=accuracy_function, part=part, top_k_part=top_k_part)
 
     if plot:
-        model = os.path.basename(model.removesuffix('ae'))
+        model = os.path.basename(model.removesuffix('gradiend'))
         plot_bert_with_ae_results(data, model, gender_factors=gender_factors, lrs=lrs, thorough=large, **kwargs)
 
     return data
@@ -1155,12 +1181,17 @@ def evaluate_gender_prediction_metrics(results_df):
 def evaluate_gender_prediction(model_name, tokenizer=None, target=None, target_words=('he', 'she')):
     assert target in {None, 'M', 'F'}
     tokenizer = tokenizer or model_name
-    model = AutoModelForMaskedLM.from_pretrained(model_name)
+    model = AutoModelForLM.from_pretrained(model_name)
     tokenizer = AutoTokenizer.from_pretrained(tokenizer)
     return evaluate_gender_prediction_by_model(model, tokenizer, target=target, target_words=target_words)
 
 def evaluate_gender_prediction_by_model(model, tokenizer, target=None, target_words=('he', 'she'), verbose=False):
     model.eval()
+    is_generative = tokenizer.cls_token is None
+
+    if is_generative:
+        tokenizer.pad_token = tokenizer.eos_token
+
     names = read_namexact()
 
     # Convert male and female tokens to IDs once
@@ -1182,8 +1213,10 @@ def evaluate_gender_prediction_by_model(model, tokenizer, target=None, target_wo
 
         # Collect all the text and gender info for this split
         for _, (name, gender) in split_names[['name', 'gender']].iterrows():
-            text = f'Is {name} a "{target_word_1}" or a "{target_word_2}"? {name} is a [MASK].'
-            text = text.replace('[MASK]', tokenizer.mask_token)
+            text = f'Is {name} a "{target_word_1}" or a "{target_word_2}"? {name} is a'
+            if not is_generative:
+                text = f'{text} {tokenizer.mask_token}.'
+
             split_data.append(text)
             genders.append(gender)
             names_list.append(name)
@@ -1197,17 +1230,19 @@ def evaluate_gender_prediction_by_model(model, tokenizer, target=None, target_wo
             outputs = model(**tokenized_text)
             logits = outputs.logits
 
-        # Get the index of the [MASK] token
-        mask_token_index = (tokenized_text['input_ids'] == tokenizer.mask_token_id).nonzero(as_tuple=True)
+        if is_generative:
+            # get the index of the last token before the padding starts
+            last_token_index = (tokenized_text['input_ids'] != tokenizer.pad_token_id).sum(dim=-1) - 1
+            relevant_logits = logits[range(len(last_token_index)), last_token_index]
+        else:
+            # Get the index of the [MASK] token
+            mask_token_index = (tokenized_text['input_ids'] == tokenizer.mask_token_id).nonzero(as_tuple=True)
 
-        # Extract logits for the [MASK] token positions
-        mask_logits = logits[mask_token_index]
+            # Extract logits for the [MASK] token positions
+            relevant_logits = logits[mask_token_index]
 
         # Calculate probabilities for male and female tokens using softmax over all predictions
-        probabilities = torch.softmax(mask_logits, dim=-1)
-
-        # most likely token
-        most_likely_token = torch.argmax(probabilities, dim=-1)
+        probabilities = torch.softmax(relevant_logits, dim=-1)
 
         # Extract male and female probabilities for each name in the batch
         male_probs = probabilities[:, male_token_id]
@@ -1264,9 +1299,9 @@ def evaluate_gender_prediction_for_models(*models, target_words=('man', 'woman')
     for base_model in models:
         models = [
             base_model,
-            f'results/changed_models/{base_model}-vFinal-N',
-            f'results/changed_models/{base_model}-vFinal-M',
-            f'results/changed_models/{base_model}-vFinal-F',
+            f'results/changed_models/{base_model}-N',
+            f'results/changed_models/{base_model}-M',
+            f'results/changed_models/{base_model}-F',
         ]
 
         results = []
@@ -1301,6 +1336,8 @@ def evaluate_all_gender_predictions():
 
 
 if __name__ == '__main__':
+    evaluate_gender_prediction_for_models('gpt2')
+
     model = AutoModelForMaskedLM.from_pretrained('roberta-large')
     tokenizer = AutoTokenizer.from_pretrained('roberta-large')
     results = evaluate_gender_bias_name_predictions(model, tokenizer)

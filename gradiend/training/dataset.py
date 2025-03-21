@@ -31,16 +31,19 @@ class TrainingDataset(Dataset):
     different random texts). At the end of the training, each entry of data will be paired exactly batch_size many times with a name.
     This behavior is made deterministic and is automatically applied when using __getitem__.
      """
-    def __init__(self, data, names, tokenizer, batch_size=None, neutral_data=None, neutral_data_prop=0.0, gender_words=None, max_token_length=48):
+    def __init__(self, data, names, tokenizer, batch_size=None, neutral_data=None, neutral_data_prop=0.0, gender_words=None, max_token_length=48, is_generative=False):
         self.data = data
         self.names = names
         self.names = self.names[self.names['gender'].isin(['M', 'F'])]
         self.tokenizer = tokenizer
+        if is_generative:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
         self.mask_token_id = self.tokenizer.mask_token_id
         self.mask_token = self.tokenizer.mask_token
         self.batch_size = None if not batch_size else batch_size
         self.neutral_data = neutral_data if neutral_data_prop > 0 else None
         self.neutral_data_prop = neutral_data_prop
+        self.is_generative = is_generative
         self.gender_pronoun_tokens = {(gender, upper): self.tokenizer.encode(pronoun[0].upper() + pronoun[1:] if upper else pronoun, add_special_tokens=False)[0] for gender, pronoun in [('M', 'he'), ('F', 'she')] for upper in [True, False]}
         self._analyze_name_tokens()
 
@@ -179,22 +182,33 @@ class TrainingDataset(Dataset):
             random_name = self.get_random_name(gender, batch_size_offset)
 
             def fill(text, name):
-                return text.replace('[NAME]', name).replace('[PRONOUN]', self.mask_token)
+                filled_text = text.replace('[NAME]', name)
+                if self.is_generative:
+                    return filled_text.split('[PRONOUN]')[0]
+                else:
+                    return filled_text.replace('[PRONOUN]', self.mask_token)
             gender_text = fill(masked, random_name['name'])
-            #inv_gender_text = fill(masked, inv_gender_name)
 
             item = self.tokenize(gender_text)
             gender_labels = item['input_ids'].clone()
-            mask_token_mask = gender_labels == self.mask_token_id
-            gender_labels[~mask_token_mask] = -100 # only compute loss on masked tokens
-
             inv_gender_labels = gender_labels.clone()
 
-            # check if the pronoun start with an uppercase letter since it appears at the beginning of the sentence
-            gender_text_no_white_spaces = gender_text.replace(' ', '')
-            mask_index = gender_text_no_white_spaces.index(self.mask_token)
-            upper = mask_index == 0 or mask_index > 2 and gender_text_no_white_spaces[mask_index - 1] in {'.', '!', '?'} and gender_text_no_white_spaces[mask_index - 2] != '.' # avoid "..."
+            sentence_delimiter = {'.', '!', '?'}
+            if self.is_generative:
+                upper = any([gender_text.strip().endswith(x) for x in sentence_delimiter])
+                mask_token_mask = torch.zeros_like(gender_labels, dtype=torch.bool)
+                last_idx = (gender_labels != self.tokenizer.pad_token_id).nonzero()[-1].item()
+                mask_token_mask[last_idx] = True
+            else:
+                mask_token_mask = gender_labels == self.mask_token_id
+
+                # check if the pronoun start with an uppercase letter since it appears at the beginning of the sentence
+                gender_text_no_white_spaces = gender_text.replace(' ', '')
+                mask_index = gender_text_no_white_spaces.index(self.mask_token)
+                upper = mask_index == 0 or mask_index > 2 and gender_text_no_white_spaces[mask_index - 1] in sentence_delimiter and gender_text_no_white_spaces[mask_index - 2] != '.' # avoid "..."
+            gender_labels[~mask_token_mask] = -100 # only compute loss on masked tokens
             gender_labels[mask_token_mask] = self.gender_pronoun_tokens[(gender, upper)] # set masked tokens to the
+            inv_gender_labels[~mask_token_mask] = -100 # only compute loss on masked tokens
             inv_gender_labels[mask_token_mask] = self.gender_pronoun_tokens[(inverse_gender, upper)] # set masked tokens to the
 
             inv_item = item.copy()
@@ -206,6 +220,8 @@ class TrainingDataset(Dataset):
         else:
             # this dataset is used for general knowledge data (not gender-specific)
             text = entry['text']
+
+
             item = self.tokenize(text)
             masked_input, labels = self.mask_tokens(item['input_ids'])
             item['input_ids'] = masked_input
@@ -213,11 +229,16 @@ class TrainingDataset(Dataset):
             inv_item = item
             label = ''
 
+        # todo check for caching?
+        # this might speed up the training if the input gradients are cached
+        # if we can recognize here that this entry is already cached (as input gradients), we can save the computation and return only the cache id
+        # however, this is not straightforward possible since the caching depends on the base model (which is unknown to the Training Dataset)
+
         return {True: item, False: inv_item, 'text': text, 'label': label}
 
 
 
-def create_name_dataset(tokenizer, max_size=None, batch_size=None, neutral_data=False, split=None, neutral_data_prop=0.5):
+def create_training_dataset(tokenizer, max_size=None, batch_size=None, neutral_data=False, split=None, neutral_data_prop=0.5, is_generative=False):
     # Load dataset
     names = read_namexact(split=split)
     dataset = read_genter(split=split)
@@ -229,15 +250,15 @@ def create_name_dataset(tokenizer, max_size=None, batch_size=None, neutral_data=
     gender_words = get_gender_words()
 
     # Create custom dataset
-    return TrainingDataset(dataset, names, tokenizer, batch_size=batch_size, neutral_data=neutral_data, gender_words=gender_words, neutral_data_prop=neutral_data_prop)
+    return TrainingDataset(dataset, names, tokenizer, batch_size=batch_size, neutral_data=neutral_data, gender_words=gender_words, neutral_data_prop=neutral_data_prop, is_generative=is_generative)
 
 
-def create_eval_dataset(bert_with_ae, max_size=None, split='val', source='gradient', save_layer_files=False):
+def create_eval_dataset(gradiend, max_size=None, split='val', source='gradient', save_layer_files=False, is_generative=False):
     if not source in {'gradient', 'inv_gradient', 'diff'}:
         raise ValueError(f'Invalid source {source}')
 
     start = time.time()
-    dataset = create_name_dataset(bert_with_ae.tokenizer, split=split)
+    dataset = create_training_dataset(gradiend.tokenizer, split=split)
     names = dataset.names
     names = names[names['gender'] != 'B']
     texts = dataset.data['masked'].values
@@ -245,7 +266,7 @@ def create_eval_dataset(bert_with_ae, max_size=None, split='val', source='gradie
         if 0.0 <= max_size < 1.0:
             max_size = int(max_size * len(texts))
         texts = texts[:max_size]
-    mask_token = bert_with_ae.tokenizer.mask_token
+    mask_token = gradiend.tokenizer.mask_token
 
     female_names = itertools.cycle(names[names['gender'] == 'F'].iterrows())
     male_names = itertools.cycle(names[names['gender'] == 'M'].iterrows())
@@ -253,32 +274,44 @@ def create_eval_dataset(bert_with_ae, max_size=None, split='val', source='gradie
     filled_texts = {}
     for text in texts:
         for _, name in [next(female_names), next(male_names)]:
-            filled_text = text.replace('[NAME]', name['name']).replace('[PRONOUN]', mask_token)
+
+            filled_text = text.replace('[NAME]', name['name'])
+            if is_generative:
+                filled_text = filled_text.split('[PRONOUN]')[0]
+            else:
+                filled_text = filled_text.replace('[PRONOUN]', mask_token)
             filled_texts[filled_text] = name['gender']
 
     # calculate the gradients in advance, if not already cached?
-    base_model = bert_with_ae.bert.name_or_path
+    base_model = gradiend.base_model.name_or_path
     base_model = os.path.basename(base_model)
-    cache_dir = f'data/cache/gradients/{base_model}/{source}'
+    layers_hash = gradiend.layers_hash
+    cache_dir = f'data/cache/gradients/{base_model}/{source}/{layers_hash}'
     gradients = defaultdict(dict) # maps texts to the gradients
     if not os.path.exists(cache_dir):
         os.makedirs(cache_dir)
 
     text_iterator = tqdm(filled_texts, desc=f'Loading cached evaluation data', leave=False)
-    layers_hash = hash_it(bert_with_ae.ae.layers)
+    layers_hash = hash_it(gradiend.gradiend.layers)
     for i, filled_text in enumerate(text_iterator):
         text_hash = hash_it(filled_text)
         def create_layer_file(layer):
             return f'{cache_dir}/{text_hash}/{layer}.pt'
 
-        cached_tensor_file = f'{cache_dir}/tensor_{text_hash}_{layers_hash}.pt'
+        cached_tensor_file = f'{cache_dir}/tensor_{text_hash}.pt'
         if os.path.exists(cached_tensor_file):
-            gradient = torch.load(cached_tensor_file)
-            gradients[filled_text] = gradient.half().cpu()
+            gradient = torch.load(cached_tensor_file).half().cpu()
+            #if isinstance(gradiend.gradiend.layers, dict):
+            #    mask = torch.concat(
+            #        [gradiend.gradiend.layers[k].flatten() for k in gradients[filled_text].keys()], dim=0
+            #    ).cpu()
+            #    gradient = gradient[mask]
+
+            gradients[filled_text] = gradient
             continue
 
         # first check whether we need to calculate the gradients
-        requires_grad = any(not os.path.exists(create_layer_file(layer)) for layer in bert_with_ae.ae.layers)
+        requires_grad = any(not os.path.exists(create_layer_file(layer)) for layer in gradiend.gradiend.layers)
 
         # only compute the gradients (computationally expensive) if really needed
         if requires_grad:
@@ -287,18 +320,18 @@ def create_eval_dataset(bert_with_ae, max_size=None, split='val', source='gradie
             if source == 'diff':
                 label_factual = 'he' if label == 'M' else 'she'
                 label_counter_factual = 'she' if label == 'M' else 'he'
-                inputs_factual = bert_with_ae.create_inputs(filled_text, label_factual)
-                grads_factual = bert_with_ae.forward_pass(inputs_factual, return_dict=True)
-                inputs_counter_factual = bert_with_ae.create_inputs(filled_text, label_counter_factual)
-                grads_counter_factual = bert_with_ae.forward_pass(inputs_counter_factual, return_dict=True)
-                grads = {layer: grads_factual[layer] - grads_counter_factual[layer] for layer in bert_with_ae.ae.layers}
+                inputs_factual = gradiend.create_inputs(filled_text, label_factual)
+                grads_factual = gradiend.forward_pass(inputs_factual, return_dict=True)
+                inputs_counter_factual = gradiend.create_inputs(filled_text, label_counter_factual)
+                grads_counter_factual = gradiend.forward_pass(inputs_counter_factual, return_dict=True)
+                grads = {layer: grads_factual[layer] - grads_counter_factual[layer] for layer in gradiend.gradiend.layers}
             else:
                 if source == 'gradient':
                     label = 'he' if label == 'M' else 'she'
                 elif source == 'inv_gradient':
                     label = 'she' if label == 'M' else 'he'
-                inputs = bert_with_ae.create_inputs(filled_text, label)
-                grads = bert_with_ae.forward_pass(inputs, return_dict=True)
+                inputs = gradiend.create_inputs(filled_text, label)
+                grads = gradiend.forward_pass(inputs, return_dict=True)
 
             if save_layer_files:
                 # create the directory
@@ -307,10 +340,10 @@ def create_eval_dataset(bert_with_ae, max_size=None, split='val', source='gradie
         else:
             grads = None
 
-        for layer in bert_with_ae.ae.layers:
+        for layer in gradiend.gradiend.layers:
             layer_file = create_layer_file(layer)
             if not os.path.exists(layer_file):
-                weights = grads[layer].half().flatten()
+                weights = grads[layer].half().flatten().cpu()
                 if save_layer_files:
                     # Saving individual layer files doubles the necessary storage, but is more efficient when working with different layer subsets
                     torch.save(weights, layer_file)
@@ -321,7 +354,14 @@ def create_eval_dataset(bert_with_ae, max_size=None, split='val', source='gradie
             gradients[filled_text][layer] = weights
 
         # convert layer dict to single tensor
-        gradient = torch.concat([v for v in gradients[filled_text].values()], dim=0).half().cpu()
+        full_gradient = torch.concat([v for v in gradients[filled_text].values()], dim=0).half()
+        gradient = full_gradient
+        if isinstance(gradiend.gradiend.layers, dict):
+            mask = torch.concat(
+                [gradiend.gradiend.layers[k].flatten() for k in gradients[filled_text].keys()], dim=0
+            ).cpu()
+            gradient = full_gradient[mask]
+
         gradients[filled_text] = gradient
         torch.save(gradient, cached_tensor_file)
 
@@ -335,4 +375,3 @@ def create_eval_dataset(bert_with_ae, max_size=None, split='val', source='gradie
     print(f'Loaded the evaluation data with {len(gradients)} entries in {time.time() - start:.2f}s')
 
     return result
-

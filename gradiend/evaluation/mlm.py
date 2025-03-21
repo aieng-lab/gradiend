@@ -7,6 +7,101 @@ from sklearn.metrics import precision_score, recall_score, f1_score
 import pandas as pd
 
 
+def evaluate_clm(model, tokenizer, text_data, file=None, verbose=True, batch_size=128):
+    random.seed(42)
+    model.eval()
+    device = model.device
+
+    correct_predictions = 0
+    total_predictions = 0
+    true_labels = []
+    predicted_labels = []
+    stats_data = []
+
+    start = time.time()
+    n = len(text_data)
+    
+    for start_idx in range(0, n, batch_size):
+        end_idx = min(start_idx + batch_size, n)
+        batch_sentences = text_data[start_idx:end_idx]
+
+        if verbose:
+            print(f'Processing batch {start_idx + 1}-{end_idx}/{n}')
+
+        batch_tokenized_input = tokenizer(batch_sentences, return_tensors="pt", padding=True, truncation=True,
+                                          add_special_tokens=True)
+        input_ids = batch_tokenized_input["input_ids"].to(device)
+        attention_mask = batch_tokenized_input["attention_mask"].to(device)
+
+        target_positions = []
+        for i in range(input_ids.size(0)):
+            token_positions = torch.where(attention_mask[i] != 0)[0].tolist()
+            
+            if len(token_positions) > 1:
+                chosen_pos = random.choice(token_positions[len(token_positions)//2:])
+                target_positions.append(chosen_pos)
+            else:
+                target_positions.append(None)
+
+        with torch.no_grad():
+            outputs = model(input_ids=input_ids, attention_mask=attention_mask)
+            logits = outputs.logits if hasattr(outputs, 'logits') else outputs
+            predictions = logits.argmax(dim=-1)
+
+        for i in range(input_ids.size(0)):
+            sentence = batch_sentences[i]
+            target_pos = target_positions[i]
+
+            if target_pos is not None:
+                predicted_token = tokenizer.decode([predictions[i, target_pos]], skip_special_tokens=True)
+                true_token = tokenizer.decode([input_ids[i, target_pos]], skip_special_tokens=True)
+                correct = predicted_token.lower() == true_token.lower()
+
+                if correct:
+                    correct_predictions += 1
+                total_predictions += 1
+
+                true_labels.append(true_token.lower())
+                predicted_labels.append(predicted_token.lower())
+
+                stats_data.append({
+                    'sentence': sentence,
+                    'token_index': target_pos,
+                    'true': true_token,
+                    'predicted': predicted_token,
+                    'correct': correct,
+                    'score': logits[i, target_pos].max().item()
+                })
+
+    stats = pd.DataFrame(stats_data)
+    accuracy = correct_predictions / total_predictions if total_predictions != 0 else 0
+    precision = precision_score(true_labels, predicted_labels, average="weighted", zero_division=0)
+    recall = recall_score(true_labels, predicted_labels, average="weighted", zero_division=0)
+    f1 = f1_score(true_labels, predicted_labels, average="weighted")
+
+    if verbose:
+        print(f"Evaluated {n} sentences in {time.time() - start:.2f} seconds")
+        print("Accuracy:", accuracy)
+        print("Precision:", precision)
+        print("Recall:", recall)
+        print("F1 Score:", f1)
+
+    result = {
+        'accuracy': accuracy,
+        'precision': precision,
+        'recall': recall,
+        'f1': f1
+    }
+
+    if file:
+        stats.to_csv(file + '.csv', index=False)
+        with open(file + '.json', 'w+', encoding='utf8') as f:
+            json.dump(result, f, indent=2)
+
+    return result, stats
+
+
+
 def evaluate_mlm(model, tokenizer, text_data, file=None, verbose=True, batch_size=128):
     random.seed(42)
     model.eval()

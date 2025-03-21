@@ -188,3 +188,4 @@ xxhash @ file:///home/conda/feedstock_root/build_artifacts/python-xxhash_1725272
 yarl @ file:///home/conda/feedstock_root/build_artifacts/yarl_1727511145583/work
 zipp @ file:///home/conda/feedstock_root/build_artifacts/zipp_1726248574750/work
 zstandard==0.23.0
+humanize

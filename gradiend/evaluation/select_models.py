@@ -6,7 +6,7 @@ from transformers import AutoModel, AutoModelForMaskedLM
 
 from gradiend.evaluation.analyze_decoder import default_evaluation
 from gradiend.evaluation.analyze_encoder import get_file_name, analyze_models, get_model_metrics
-from gradiend.model import ModelWithGradiend, GradiendModel
+from gradiend.model import ModelWithGradiend, GradiendModel, AutoModelForLM
 from gradiend.util import convert_tuple_keys_to_strings
 
 py_print = print
@@ -33,13 +33,13 @@ def select(model, max_size=None, print=True, force=False, plot=True, accuracy_fu
         result = {
             'encoder': encoder_metrics,
             'decoder': decoder_metrics,
-            'training': ae.ae.kwargs['training']
+            'training': ae.gradiend.kwargs['training']
         }
 
         # create biased models
         base_model_output = f'results/changed_models/{model_base_name}'
         if force or accuracy_function is not None or not os.path.isdir(base_model_output):
-            ae.bert.save_pretrained(base_model_output)
+            ae.base_model.save_pretrained(base_model_output)
             ae.tokenizer.save_pretrained(base_model_output)
 
             version_map = {
@@ -53,7 +53,7 @@ def select(model, max_size=None, print=True, force=False, plot=True, accuracy_fu
                 lr = key_metrics['lr']
                 gender_factor = key_metrics['gender_factor']
 
-                changed_model = ae.modify_bert(lr=lr, gender_factor=gender_factor)
+                changed_model = ae.modify_model(lr=lr, gender_factor=gender_factor)
                 version = version_map[key]
                 key_output = f'{base_model_output}-{version}{output_suffix}'
                 changed_model.save_pretrained(key_output)
@@ -78,7 +78,7 @@ def select(model, max_size=None, print=True, force=False, plot=True, accuracy_fu
             key_metrics = decoder_metrics[key]
             lr = key_metrics['lr']
             gender_factor = key_metrics['gender_factor']
-            changed_model = ae.modify_bert(lr=lr, gender_factor=gender_factor)
+            changed_model = ae.modify_model(lr=lr, gender_factor=gender_factor)
 
             output_path = f'results/changed_models/{model_base_name}-{version_map[key]}{output_suffix}'
             if not os.path.isdir(output_path):
@@ -87,8 +87,9 @@ def select(model, max_size=None, print=True, force=False, plot=True, accuracy_fu
                 py_print(f'Saved {key} model to {output_path}')
             else:
                 # check if saved model is the same
-                saved_model = AutoModelForMaskedLM.from_pretrained(output_path)
-                if not np.allclose(saved_model.bert.embeddings.position_embeddings.weight.cpu().detach(), changed_model.bert.embeddings.position_embeddings.weight.cpu().detach()):
+                saved_model = AutoModelForLM.from_pretrained(output_path)
+                # todo adjust for generative models!
+                if not np.allclose(saved_model.base_model.embeddings.position_embeddings.weight.cpu().detach(), changed_model.base_model.embeddings.position_embeddings.weight.cpu().detach()):
                     py_print(f'Error: Existing Model {output_path} was not the same as the current model')
                     changed_model.save_pretrained(output_path)
 
@@ -114,6 +115,7 @@ def select(model, max_size=None, print=True, force=False, plot=True, accuracy_fu
 
 if __name__ == '__main__':
     models = ['bert-base-cased', 'bert-large-cased', 'distilbert-base-cased', 'roberta-large']
+    select('results/experiments/gradiend/gpt2/v/0')
 
     for model in models:
         print(f'Analyzing model {model}')

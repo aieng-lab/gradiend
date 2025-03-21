@@ -16,10 +16,13 @@ from torch.utils.data import DataLoader
 import torch
 
 from gradiend.model import ModelWithGradiend
-from gradiend.training.dataset import create_name_dataset, create_eval_dataset
+from gradiend.training.dataset import create_training_dataset, create_eval_dataset
 
 import datetime
 import os
+
+from gradiend.util import hash_it
+
 
 # Create a unique directory for each run based on the current time
 def get_log_dir(base_dir="logs", output=''):
@@ -191,44 +194,23 @@ def train(model_with_gradiend,
           eval_batch_size=32,
           eps=1e-8,
           normalized=True,
+          use_cached_gradients=False,
           ):
     # Load pre-trained BERT model and tokenizer
     tokenizer = model_with_gradiend.tokenizer
-
+    is_generative = model_with_gradiend.is_generative
 
     # Create a dataset and dataloader for BERT inputs
 
     if batch_size_data is True:
         batch_size_data = batch_size
-    dataset = create_name_dataset(tokenizer, max_size=None, split='train', neutral_data=neutral_data, batch_size=batch_size_data, neutral_data_prop=neutral_data_prop)
+
+    # todo generative?
+    dataset = create_training_dataset(tokenizer, max_size=None, split='train', neutral_data=neutral_data, batch_size=batch_size_data, neutral_data_prop=neutral_data_prop, is_generative=is_generative)
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
 
-    # Create a SummaryWriter instance
-    writer = SummaryWriter(get_log_dir('logs', output))
-    writer.add_text('Training Configuration', json.dumps({
-        'negative_sampling': negative_sampling,
-        'max_iterations': max_iterations,
-        'batch_size': batch_size,
-        'batch_size_data': batch_size_data,
-        'criterion_ae': str(criterion_ae),
-        'activation': str(model_with_gradiend.ae.activation),
-        'output': output,
-        'base_model': model_with_gradiend.bert.name_or_path,
-        'layers': model_with_gradiend.ae.layers,
-        'neutral_data': neutral_data,
-        'neutral_data_prop': neutral_data_prop,
-        'source': source,
-        'target': target,
-        'epochs': epochs,
-        'n_evaluation': n_evaluation,
-        'lr': lr,
-        'weight_decay': weight_decay,
-        'eval_max_size': eval_max_size,
-    }, indent=4))
-
-
     if do_eval:
-        eval_data = create_eval_dataset(model_with_gradiend, split='val', source=source, max_size=eval_max_size)
+        eval_data = create_eval_dataset(model_with_gradiend, split='val', source=source, max_size=eval_max_size, is_generative=is_generative)
 
         def _evaluate(data):
             start = time.time()
@@ -245,14 +227,14 @@ def train(model_with_gradiend,
                 for i in range(0, len(grads), eval_batch_size):
                     batch = grads[i:min(i + eval_batch_size, len(grads))]
                     batch_on_device = [g.to(device).float() for g in batch]
-                    encoded_values = model_with_gradiend.ae.encoder(torch.stack(batch_on_device))
+                    encoded_values = model_with_gradiend.gradiend.encoder(torch.stack(batch_on_device))
                     encoded.extend(encoded_values.view(-1).tolist())
                     # free memory on device
                     del batch_on_device
                     torch.cuda.empty_cache()  # if using GPU, it helps clear memory
             else:
                 for grads in gradients.values():
-                    encoded_value = model_with_gradiend.ae.encoder(grads.to(device))
+                    encoded_value = model_with_gradiend.gradiend.encoder(grads.to(device))
                     encoded.append(encoded_value.item())
 
             score = -pearsonr(list(labels.values()), encoded).correlation
@@ -279,8 +261,6 @@ def train(model_with_gradiend,
 
         def evaluate():
             score_ = _evaluate(eval_data)
-            #score_train = _evaluate(eval_data_train_split)
-            #print('Val Score', score_, 'Train Score', score_train)
             return score_
     else:
         if normalized:
@@ -307,15 +287,21 @@ def train(model_with_gradiend,
     convergence = None
     best_score_checkpoint = None
     score = 0.0
+    total_training_time_start = time.time()
+    training_data_prep_time = 0.0
+    training_gradiend_time = 0.0
+    eval_time = 0.0
+    cache_dir = ''
+    if use_cached_gradients:
+        model_id = os.path.basename(model_with_gradiend.base_model.name_or_path)
+        layers_hash = model_with_gradiend.layers_hash()
+        cache_dir = f'results/cache/training/gradiend/{model_id}/{layers_hash}'
 
-
-    optimizer_ae = torch.optim.AdamW(model_with_gradiend.ae.parameters(), lr=lr, weight_decay=weight_decay, eps=eps)
-
-    #torch.nn.utils.clip_grad_norm_(model_with_gradiend.bert.parameters(), max_norm=1.0)
+    optimizer_ae = torch.optim.AdamW(model_with_gradiend.gradiend.parameters(), lr=lr, weight_decay=weight_decay, eps=eps)
 
     if plot:
         fig = plt.figure(figsize=(12, 6))
-        model_with_gradiend.ae.plot(fig=fig)
+        model_with_gradiend.gradiend.plot(fig=fig)
         plt.pause(0.1)
     else:
         fig = None
@@ -325,23 +311,35 @@ def train(model_with_gradiend,
         dataloader_iterator = tqdm(dataloader, desc=f'Epoch {epoch + 1}/{epochs}', leave=False)
 
         for i, batch in enumerate(dataloader_iterator):
-            inputs = batch[True]
-            inv_inputs = batch[False]
 
-            gradients = None
-            inv_gradients = None
+            ####### Data Preparation ########
+            cache_file = ''
+            if use_cached_gradients:
+                hash = hash_it(batch['text'])
+                cache_file = f'{cache_dir}/{hash}.pt'
 
-            gradients_keywords = {'gradient', 'diff'}
-            inv_gradients_keywords = {'inv_gradient', 'diff'}
+            if use_cached_gradients and os.path.exists(cache_file):
+                gradients, inv_gradients = torch.load(cache_file)
+            else:
+                data_prep_start = time.time()
 
-            source = source.strip()
-            target = target.strip()
+                inputs = batch[True]
+                inv_inputs = batch[False]
 
-            if source in gradients_keywords or target in gradients_keywords:
-                gradients = model_with_gradiend.forward_pass(inputs)
+                gradients = None
+                inv_gradients = None
 
-            if source in inv_gradients_keywords or target in inv_gradients_keywords:
-                inv_gradients = model_with_gradiend.forward_pass(inv_inputs)
+                gradients_keywords = {'gradient', 'diff'}
+                inv_gradients_keywords = {'inv_gradient', 'diff'}
+
+                source = source.strip()
+                target = target.strip()
+
+                if source in gradients_keywords or target in gradients_keywords:
+                    gradients = model_with_gradiend.forward_pass(inputs)
+
+                if source in inv_gradients_keywords or target in inv_gradients_keywords:
+                    inv_gradients = model_with_gradiend.forward_pass(inv_inputs)
 
             if source == 'gradient':
                 source_tensor = gradients
@@ -360,13 +358,17 @@ def train(model_with_gradiend,
                 target_tensor = gradients
             else:
                 raise ValueError(f'Unknown target: {target}')
+            training_data_prep_time += time.time() - data_prep_start
+
+
+            ######## Gradiend Training ########
+            gradiend_start = time.time()
 
             # Forward pass through autoencoder
-            outputs_ae = model_with_gradiend.ae(source_tensor)
+            outputs_ae = model_with_gradiend.gradiend(source_tensor)
 
             # mask some less relevant neurons
             if negative_sampling:
-                # todo prune also in target tensor?
                 outputs_ae, target_tensor = apply_negative_sampling(outputs_ae, gradients, inv_gradients, target_tensor)
 
             # calculate loss
@@ -382,7 +384,7 @@ def train(model_with_gradiend,
             optimizer_ae.step()
 
             loss_ae = loss_ae.item()
-            writer.add_scalar('Loss/Autoencoder', loss_ae, global_step)
+            training_gradiend_time += time.time() - gradiend_start
 
             if len(last_losses) < max_losses:
                 last_losses.append(loss_ae)
@@ -402,34 +404,29 @@ def train(model_with_gradiend,
             global_step += 1
             last_iteration = global_step == max_iterations or (epoch == epochs - 1 and i == len_dataloader - 1)
             if do_eval and (i+1) % n_evaluation == 0 or last_iteration:
+                eval_start = time.time()
                 score, mean_male, mean_female = evaluate()
-                writer.add_scalar('score', score, global_step)
-                writer.add_scalar('abs score', abs(score), global_step)
                 scores.append(score)
                 mean_males.append(mean_male)
                 mean_females.append(mean_female)
+                eval_time += time.time() - eval_start
 
             n_loss_report = n_evaluation if n_evaluation > 0 else 100
             if (i+1) % n_loss_report == 0 or last_iteration:
                 # validate on small validation set
                 mean_loss = sum(last_losses) / len(last_losses)
-                encoder_norm = model_with_gradiend.ae.encoder_norm
-                decoder_norm = model_with_gradiend.ae.decoder_norm
-                avg_grad_norm = model_with_gradiend.ae.avg_gradient_norm
+                encoder_norm = model_with_gradiend.gradiend.encoder_norm
+                decoder_norm = model_with_gradiend.gradiend.decoder_norm
+                avg_grad_norm = model_with_gradiend.gradiend.avg_gradient_norm
                 output_str = f'Epoch [{epoch + 1}/{epochs}], Loss AE: {mean_loss:.10f}, Correlation score: {score:.6f}, encoder {encoder_norm}, decoder {decoder_norm}, avg grad norm {avg_grad_norm}'
-                if hasattr(model_with_gradiend.ae, 'encoder_change'):
-                    encoder_change = model_with_gradiend.ae.encoder_change
-                    decoder_change = model_with_gradiend.ae.decoder_change
-                    writer.add_scalar('encoder_change', encoder_change, global_step)
-                    writer.add_scalar('decoder_change', decoder_change, global_step)
+                if hasattr(model_with_gradiend.gradiend, 'encoder_change'):
+                    encoder_change = model_with_gradiend.gradiend.encoder_change
+                    decoder_change = model_with_gradiend.gradiend.decoder_change
                     output_str += f'encoder change {encoder_change}, decoder change {decoder_change}'
                     encoder_changes.append(encoder_change)
                     decoder_changes.append(decoder_change)
 
                 print(output_str)
-                writer.add_scalar('encoder_norm', encoder_norm, global_step)
-                writer.add_scalar('decoder_norm', decoder_norm, global_step)
-
                 losses.append(mean_loss)
                 encoder_norms.append(encoder_norm)
                 decoder_norms.append(decoder_norm)
@@ -455,10 +452,10 @@ def train(model_with_gradiend,
                         'batch_size': batch_size,
                         'batch_size_data': batch_size_data,
                         'criterion_ae': str(criterion_ae),
-                        'activation': str(model_with_gradiend.ae.activation),
+                        'activation': str(model_with_gradiend.gradiend.activation),
                         'output': output,
-                        'base_model': model_with_gradiend.bert.name_or_path,
-                        'layers': model_with_gradiend.ae.layers,
+                        'base_model': model_with_gradiend.base_model.name_or_path,
+                        'layers': model_with_gradiend.gradiend.layers,
                         'score': score,
                         'scores': scores,
                         'mean_males': mean_males,
@@ -470,7 +467,7 @@ def train(model_with_gradiend,
                         'decoder_norms': decoder_norms,
                         'time': time.time() - start_time,
                         'best_score_checkpoint': best_score_checkpoint,
-                        'bias_decoder': model_with_gradiend.ae.bias_decoder,
+                        'bias_decoder': model_with_gradiend.gradiend.bias_decoder,
                         'epoch': epoch,
                         'n_evaluation': n_evaluation,
                         'lr': lr,
@@ -481,13 +478,17 @@ def train(model_with_gradiend,
                         'eval_max_size': eval_max_size,
                         'eval_batch_size': eval_batch_size,
                         'eps': eps,
+                        'training_data_prep_time': training_data_prep_time,
+                        'training_gradiend_time': training_gradiend_time,
+                        'eval_time': eval_time,
+                        'total_training_time': time.time() - total_training_time_start,
                     }
 
                     model_with_gradiend.save_pretrained(f'{output}_best', training=training_information)
 
             if i > 0:
                 if plot and i % 1000 == 0:
-                    model_with_gradiend.ae.plot(fig=fig, n=i)
+                    model_with_gradiend.gradiend.plot(fig=fig, n=i)
                     plt.pause(0.1)
 
 
@@ -503,10 +504,10 @@ def train(model_with_gradiend,
             'batch_size': batch_size,
             'batch_size_data': batch_size_data,
             'criterion_ae': str(criterion_ae),
-            'activation': str(model_with_gradiend.ae.activation),
+            'activation': str(model_with_gradiend.gradiend.activation),
             'output': output,
-            'base_model': model_with_gradiend.bert.name_or_path,
-            'layers': model_with_gradiend.ae.layers,
+            'base_model': model_with_gradiend.base_model.name_or_path,
+            'layers': model_with_gradiend.gradiend.layers,
             'score': score,
             'scores': scores,
             'mean_males': mean_males,
@@ -518,7 +519,7 @@ def train(model_with_gradiend,
             'decoder_norms': decoder_norms,
             'time': time.time() - start_time,
             'best_score_checkpoint': best_score_checkpoint,
-            'bias_decoder': model_with_gradiend.ae.bias_decoder,
+            'bias_decoder': model_with_gradiend.gradiend.bias_decoder,
             'epoch': epoch,
             'n_evaluation': n_evaluation,
             'lr': lr,
@@ -529,9 +530,30 @@ def train(model_with_gradiend,
             'eval_max_size': eval_max_size,
             'eval_batch_size': eval_batch_size,
             'eps': eps,
+            'training_data_prep_time': training_data_prep_time,
+            'training_gradiend_time': training_gradiend_time,
+            'eval_time': eval_time,
+            'total_training_time': time.time() - total_training_time_start,
         }
 
-        model_with_gradiend.ae.save_pretrained(output, training=training_information)
+        model_with_gradiend.gradiend.save_pretrained(output, training=training_information)
+
+        print('Saved the auto encoder model as', output)
+        print('Best score:', best_score_checkpoint)
+
+        try:
+            import humanize
+            import datetime
+
+            def humanize_time(seconds):
+                return humanize.naturaldelta(datetime.timedelta(seconds=seconds))
+
+            print('Training time:', humanize_time(training_information['total_training_time']))
+            print('Training data preparation time:', humanize_time(training_information['training_data_prep_time']))
+            print('Training Evaluation time:', humanize_time(training_information['eval_time']))
+            print('Training gradient time:', humanize_time(training_information['training_gradiend_time']))
+        except ModuleNotFoundError:
+            print('Please install humanize to get a human-readable training time')
 
     if plot:
         plt.show()
@@ -558,34 +580,34 @@ def train(model_with_gradiend,
     print('Saved the auto encoder model as', output)
     return output
 
-def create_bert_with_ae(model, *layers, activation='tanh', activation_decoder=None, bias_decoder=True, grad_iterations=1, decoder_factor=1.0, seed=0, **kwargs):
+def create_bert_with_ae(model, layers=None, activation='tanh', activation_decoder=None, bias_decoder=True, grad_iterations=1, decoder_factor=1.0, seed=0, **kwargs):
     torch.manual_seed(seed)
     random.seed(seed)
     np.random.seed(seed)
 
-    return ModelWithGradiend.from_pretrained(model, *layers, activation=activation, activation_decoder=activation_decoder, bias_decoder=bias_decoder, grad_iterations=grad_iterations, decoder_factor=decoder_factor), kwargs
+    return ModelWithGradiend.from_pretrained(model, layers, activation=activation, activation_decoder=activation_decoder, bias_decoder=bias_decoder, grad_iterations=grad_iterations, decoder_factor=decoder_factor), kwargs
 
-def train_single_layer_autoencoder(model, layer='bert.encoder.layer.10.output.dense.weight', **kwargs):
-    bert_with_ae, kwargs = create_bert_with_ae(model, layer, **kwargs)
+def train_single_layer_gradiend(model, layer='base_model.encoder.layer.10.output.dense.weight', **kwargs):
+    bert_with_ae, kwargs = create_bert_with_ae(model, [layer], **kwargs)
     return train(bert_with_ae, **kwargs)
 
-def train_multiple_layers_autoencoder(model, layers, **kwargs):
-    bert_with_ae, kwargs = create_bert_with_ae(model, *layers, **kwargs)
+def train_multiple_layers_gradiend(model, layers, **kwargs):
+    bert_with_ae, kwargs = create_bert_with_ae(model, layers, **kwargs)
     return train(bert_with_ae, **kwargs)
 
-def train_all_layers_autoencoder(model='bert-base-uncased', **kwargs):
+def train_all_layers_gradiend(model='bert-base-uncased', **kwargs):
     bert_with_ae, kwargs = create_bert_with_ae(model, **kwargs)
     return train(bert_with_ae, **kwargs)
 
 
 
 if __name__ == '__main__':
-    train_all_layers_autoencoder('bert-base-uncased',
-                                      output='results/models/gradiend',
-                                      checkpoints=False,
-                                      max_iterations=1000000,
-                                      criterion_ae=nn.MSELoss(),
-                                      batch_size=8,
-                                      batch_size_data=None,
-                                      activation='relu',
-                                      )
+    train_all_layers_gradiend('bert-base-uncased',
+                              output='results/models/gradiend',
+                              checkpoints=False,
+                              max_iterations=1000000,
+                              criterion_ae=nn.MSELoss(),
+                              batch_size=8,
+                              batch_size_data=None,
+                              activation='relu',
+                              )

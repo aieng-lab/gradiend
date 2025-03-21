@@ -72,10 +72,10 @@ def analyze_model(model_with_gradiend, genter_df, names_df, output, df_no_gender
             raise ValueError('The names_df must contain the key genders if include_B is False')
         names_df = names_df[names_df['genders'] != 'B']
 
-    model = model_with_gradiend.bert
-    model = model_with_gradiend.bert
+    model = model_with_gradiend.base_model
     tokenizer = model_with_gradiend.tokenizer
     mask_token = tokenizer.mask_token
+    is_generative = model_with_gradiend.is_generative
 
     cache_default_predictions_dict = read_default_predictions(model)
 
@@ -92,7 +92,7 @@ def analyze_model(model_with_gradiend, genter_df, names_df, output, df_no_gender
             modified_cache.append(True)
         return predictions
 
-    source = model_with_gradiend.ae.kwargs['training']['source']
+    source = model_with_gradiend.gradiend.kwargs['training']['source']
 
     male_names = itertools.cycle(names_df[names_df['gender'] == 'M'].iterrows())
     female_names = itertools.cycle(names_df[names_df['gender'] == 'F'].iterrows())
@@ -100,7 +100,10 @@ def analyze_model(model_with_gradiend, genter_df, names_df, output, df_no_gender
     filled_texts = []
 
     def process_entry(row, plot=False):
-        masked = row['masked'].replace('[PRONOUN]', mask_token)
+        if is_generative:
+            masked = row['masked'].split('[PRONOUN]')[0]
+        else:
+            masked = row['masked'].replace('[PRONOUN]', mask_token)
         encoded_values = []
         genders = []
         names = []
@@ -128,7 +131,7 @@ def analyze_model(model_with_gradiend, genter_df, names_df, output, df_no_gender
                 grads_counter_factual = model_with_gradiend.forward_pass(inputs_counter_factual, return_dict=False)
                 grads = grads_factual - grads_counter_factual
                 inputs.append(grads)
-                encoded = model_with_gradiend.ae.encoder(grads).item()
+                encoded = model_with_gradiend.gradiend.encoder(grads).item()
             else:
                 if source == 'gradient':
                     masked_label = label
@@ -264,7 +267,6 @@ def analyze_model(model_with_gradiend, genter_df, names_df, output, df_no_gender
 
         plot_results = total_results[total_results['type'] == 'gender masked'].sort_values(by='state').reset_index(drop=True)
         sns.boxplot(x='state', y='encoded', data=plot_results)
-        #sns.stripplot(x='state', y='encoded', data=plot_results, color='k', alpha=0.5, jitter=True)
         plt.title(model_with_gradiend.name_or_path)
         plt.show()
 
@@ -326,13 +328,14 @@ def read_encoded_values(file):
 
 
 def get_file_name(base_file_name, file_format=None, **kwargs):
-    if '.' in base_file_name[-5:]:
-        current_file_format = base_file_name.split('.')[-1]
-        if current_file_format != file_format:
-            raise ValueError(f'Provided format of file {current_file_format} does not match key word argument {file_format}')
-        output = base_file_name[:-len(file_format) - 1]
-    else:
-        output = base_file_name
+    base_name = os.path.basename(base_file_name)
+    output = base_file_name
+    if '.' in base_name[-5:]:
+        current_file_format = base_name.split('.')[-1]
+        if current_file_format in {'csv', 'json', 'txt', 'tsv'}:
+            if current_file_format != file_format:
+                raise ValueError(f'Provided format of file {current_file_format} does not match key word argument {file_format}: {base_file_name}')
+            output = base_file_name[:-len(file_format) - 1]
 
     first_param = True
     for key, value in sorted(kwargs.items()):
@@ -597,7 +600,7 @@ def analyze_neurons(model, part='encoder', include_he_she=True):
     pprint.pprint(sorted_layers[:10])
 
     layer_map = {k: v for k, v in bert_with_ae.ae_named_parameters(part=part)}
-    word_embeddings = layer_map['bert.embeddings.word_embeddings.weight']
+    word_embeddings = layer_map['base_model.embeddings.word_embeddings.weight']
     token_means = word_embeddings.abs().mean(dim=1)
     tokens = [bert_with_ae.tokenizer.decode(index) for index in range(word_embeddings.shape[0])]
     token_means = {token: mean.cpu().item() for token, mean in zip(tokens, token_means) if not (token.startswith('[') and token.endswith(']'))}
@@ -715,11 +718,11 @@ def analyze_neurons(model, part='encoder', include_he_she=True):
     def cluster(weights):
         clusters = defaultdict(list)
         for name, weight in weights.items():
-            if 'bert.embeddings' in name:
+            if 'base_model.embeddings' in name:
                 cluster = 'embedding'
             elif 'cls.predictions' in name:
                 cluster = 'predictions'
-            elif 'bert.encoder.layer.' in name:
+            elif 'base_model.encoder.layer.' in name:
                 layer = int(name.split('.')[3])
                 cluster = f'layer {layer}'
             else:

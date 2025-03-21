@@ -1,14 +1,26 @@
 import copy
+import re
 
 import numpy as np
 import torch
 import torch.nn as nn
 from matplotlib import pyplot as plt
 from scipy.stats import binned_statistic
-from transformers import AutoModelForMaskedLM, AutoTokenizer
+from transformers import AutoModelForMaskedLM, AutoTokenizer, AutoModelForCausalLM
 import json
 import os
 
+from gradiend.util import hash_it
+
+
+class AutoModelForLM(nn.Module):
+
+    @classmethod
+    def from_pretrained(self, name_or_path):
+        try:
+            return AutoModelForMaskedLM.from_pretrained(name_or_path)
+        except ValueError:
+            return AutoModelForCausalLM.from_pretrained(name_or_path)
 
 def freeze_layers_until_target(model, *target_layer_names):
     assert len(target_layer_names) > 0, 'At least one target layer name must be provided'
@@ -52,8 +64,8 @@ def get_activation(activation: str, encoder=False):
 class GradiendModel(nn.Module):
     def __init__(self, input_dim, latent_dim, layers, intermediate=False, activation='relu', bias_decoder=False, decoder_factor=1.0, activation_decoder=None, **kwargs):
         super(GradiendModel, self).__init__()
-        self.latent_dim = latent_dim
-        self.input_dim = input_dim
+        self.latent_dim = int(latent_dim)
+        self.input_dim = int(input_dim)
         self.intermediate = intermediate
         self.layers = layers
         self.activation = activation.lower()
@@ -111,12 +123,29 @@ class GradiendModel(nn.Module):
     def encoder_norm(self):
         return torch.norm(self.encoder[0].weight, p=2).item()
 
+    @property
+    def layers_hash(self):
+        if isinstance(self.layers, dict):
+            layers_keys_hash = hash_it(list(self.layers.keys()))
+            sparse_layers = torch.concat([self.layers[k].flatten() for k in self.layers], dim=0).cpu().to_sparse()
+            layers_indices = sparse_layers.indices().cpu().numpy()
+            layers_values = sparse_layers.values().cpu().numpy()
+            layers_hash = hash_it((layers_keys_hash, layers_indices, layers_values))
+        else:
+            layers_hash = hash_it(self.layers)
+        return layers_hash
 
-    def extract_gradients(self, bert, return_dict=False):
+    def extract_gradients(self, bert, return_dict=False, ):
         layer_map = {k: v for k, v in bert.named_parameters()}
-        if return_dict:
+        if isinstance(self.layers, dict):
+            if return_dict:
+                return {k: v.grad.detach() * self.layers[k] if v.grad is not None else torch.zeros_like(v) for k, v in layer_map.items() if k in self.layers}
+            else:
+                layer_map = {k: v.grad[self.layers[k]] for k, v in layer_map.items() if k in self.layers}
+        elif return_dict:
             return {layer: layer_map[layer].grad.detach() for layer in self.layers}
-        return torch.concat([layer_map[layer].grad.flatten().detach() for layer in self.layers])
+
+        return torch.concat([layer_map[layer].flatten().detach() for layer in self.layers])
 
     def set_tokenizer(self, tokenizer):
         self.tokenizer = tokenizer
@@ -124,23 +153,39 @@ class GradiendModel(nn.Module):
     def forward(self, x):
         orig_shapes = {}
 
-        if hasattr(x, 'named_parameters'): # todo remove?
+        if hasattr(x, 'named_parameters'):
             grads = []
             layer_map = {k: v for k, v in x.named_parameters()}
-            for layer in self.layers:
-                param = layer_map[layer]
-                grad = param.grad.flatten()
-                grads.append(grad)
-                orig_shapes[layer] = param.shape
+            if isinstance(self.layers, dict):
+                # New behavior: process only masked elements
+                for layer, mask in self.layers.items():
+                    param = layer_map[layer]
+                    grad = param.grad.flatten()
+                    selected_grad = grad[mask.flatten()]  # Extract relevant elements
+                    grads.append(selected_grad)
+                    orig_shapes[layer] = (param.shape, mask)  # Store shape & mask
+            else:
+                for layer in self.layers:
+                    param = layer_map[layer]
+                    grad = param.grad.flatten()
+                    grads.append(grad)
+                    orig_shapes[layer] = param.shape
             x = torch.concat(grads)
         elif isinstance(x, dict):
             grads = []
-            for layer in self.layers:
-                param = x[layer]
-                grad = param.flatten()
-                grads.append(grad)
-                orig_shapes[layer] = param.shape
-
+            if isinstance(self.layers, dict):
+                for layer, mask in self.layers.items():
+                    param = x[layer]
+                    grad = param.flatten()
+                    selected_grad = grad[mask.flatten()]  # Extract relevant elements
+                    grads.append(selected_grad)
+                    orig_shapes[layer] = (param.shape, mask)  # Store shape & mask
+            else:
+                for layer in self.layers:
+                    param = x[layer]
+                    grad = param.flatten()
+                    grads.append(grad)
+                    orig_shapes[layer] = param.shape
             x = torch.concat(grads)
 
         encoded = self.encoder(x)
@@ -153,10 +198,20 @@ class GradiendModel(nn.Module):
         if orig_shapes:
             decoded_params = {}
             start_idx = 0
-            for layer, shape in orig_shapes.items():
-                num_elements = shape.numel()
-                decoded_params[layer] = decoded[start_idx:start_idx + num_elements].reshape(shape)
-                start_idx += num_elements
+            for layer, shape_info in orig_shapes.items():
+                if isinstance(shape_info, tuple):
+                    shape, mask = shape_info  # Extract shape and mask
+                    num_elements = mask.sum().item()
+
+                    # Reconstruct full tensor, placing decoded values only where mask is True
+                    reconstructed = torch.zeros_like(mask, dtype=decoded.dtype)
+                    reconstructed[mask] = decoded[start_idx:start_idx + num_elements]
+                    decoded_params[layer] = reconstructed.reshape(shape)
+                else:
+                    shape = shape_info
+                    num_elements = shape.numel()
+                    decoded_params[layer] = decoded[start_idx:start_idx + num_elements].reshape(shape)
+
             decoded = decoded_params
 
         return decoded
@@ -180,25 +235,44 @@ class GradiendModel(nn.Module):
         os.makedirs(save_directory, exist_ok=True)
         model_path = os.path.join(save_directory, 'pytorch_model.bin')
         config_path = os.path.join(save_directory, 'config.json')
+        layers_path = os.path.join(save_directory, 'layers.pth')
 
         # Save model state dictionary
         torch.save(self.state_dict(), model_path)
 
         self.kwargs.update(kwargs)
 
+        # Save sparse tensor layers separately
+        if isinstance(self.layers, dict):
+            torch.save(self.layers, layers_path)
+
         # Save model configuration
         config = {
             'input_dim': self.input_dim,
             'latent_dim': self.latent_dim,
             'intermediate': self.intermediate,
-            'layers': self.layers,
+            'layers_path': 'layers.pth',  # Reference the separate file
+            'layers': list(self.layers),
             'activation': self.activation,
             'activation_decoder': self.activation_decoder,
             'bias_decoder': self.bias_decoder,
-            **self.kwargs,
+            **self._serialize_kwargs(),
         }
         with open(config_path, 'w') as f:
             json.dump(config, f)
+
+    def _serialize_kwargs(self):
+        kwargs = self.kwargs.copy()
+        training_kwargs = kwargs['training'].copy()
+
+        if isinstance(training_kwargs['layers'], dict):
+            training_kwargs['layers'] = list(training_kwargs['layers'].keys())
+            training_kwargs['layers_path'] = 'layers.pth'
+        kwargs['training'] = training_kwargs
+
+        return kwargs
+
+
 
     @classmethod
     def from_pretrained(cls, load_directory):
@@ -209,7 +283,6 @@ class GradiendModel(nn.Module):
         with open(config_path, 'r') as f:
             config = json.load(f)
 
-
         # Instantiate the model
         model = cls(**config)
 
@@ -219,6 +292,11 @@ class GradiendModel(nn.Module):
         model.load_state_dict(state_dict)
 
         model.name_or_path = load_directory
+
+        if 'layers_path' in config:
+            layers_path = os.path.join(load_directory, config['layers_path'])
+            # Load sparse layers
+            model.layers = torch.load(layers_path)
 
         return model
 
@@ -282,134 +360,234 @@ class GradiendModel(nn.Module):
 
         return fig
 
+def is_generative(model):
+    return hasattr(model, 'lm_head')
 
 class ModelWithGradiend(nn.Module):
 
-    def __init__(self, bert, ae, tokenizer):
+    def __init__(self, base_model, gradiend, tokenizer):
         super().__init__()
-        self.bert = bert
-        self.ae = ae
+        self.base_model = base_model
+        self.gradiend = gradiend
         self.tokenizer = tokenizer
-        self.grad_iterations = ae.grad_iterations
+        self.grad_iterations = gradiend.grad_iterations
 
-        self.layer_map = {k: v for k, v in self.bert.named_parameters()}
+        self.layer_map = {k: v for k, v in self.base_model.named_parameters()}
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.bert.to(self.device)
-        self.ae.to(self.device)
+        self.base_model.to(self.device)
+        self.gradiend.to(self.device)
+
+        self.is_generative = is_generative(self.base_model)
+
+        if self.is_generative:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
 
     @property
     def name(self):
-        return os.path.basename(self.ae.name_or_path)
+        return os.path.basename(self.gradiend.name_or_path)
+
+    def create_gradients(self, text, label, return_dict=False):
+        item = self.create_inputs(text, label)
+
+        outputs = self.base_model(**item)
+        loss_base_model = outputs.loss
+
+        self.base_model.zero_grad()
+        loss_base_model.backward()
+
+        gradients = self.gradiend.extract_gradients(self.base_model, return_dict=return_dict)
+        return gradients
+
 
     def encode(self, text, label):
-        item = self.tokenizer(text, return_tensors="pt", padding=True)
-        item = {k: v.to(self.device) for k, v in item.items()}
-
-        gender_labels = item['input_ids'].clone()
-        mask_token_mask = gender_labels == self.tokenizer.mask_token_id
-        gender_labels[~mask_token_mask] = -100  # only compute loss on masked tokens
-        label_token_id = self.tokenizer(label, add_special_tokens=False)['input_ids']
-        if len(label_token_id) == 1:
-            label_token_id = label_token_id[0]
-        else:
-            label_token_id = torch.LongTensor(label_token_id).to(self.device).flatten()
-        gender_labels[mask_token_mask] = label_token_id
-
-
-        item['labels'] = gender_labels
-
-        outputs = self.bert(**item)
-        loss_bert = outputs.loss
-
-        self.bert.zero_grad()
-        loss_bert.backward()
-
-        gradients = self.ae.extract_gradients(self.bert)
-
-        # print(gradients_flat)
-        encoded = self.ae.encoder(gradients).item()
-
+        gradients = self.create_gradients(text, label)
+        encoded = self.gradiend.encoder(gradients).item()
         return encoded
 
 
-    def modify_bert(self, lr, gender_factor, part='decoder', top_k=None):
-        # returns a bert model with enhanced weights based on the auto encoder, use the learning rate parameter to control the influence of the auto encoder
+    def modify_model(self, lr, gender_factor, part='decoder', top_k=None, top_k_part=None):
+        # returns a base_model model with enhanced weights based on the auto encoder, use the learning rate parameter to control the influence of the auto encoder
+        top_k_part = top_k_part or part
+
         import copy
-        enhanced_bert = copy.deepcopy(self.bert)
+        enhanced_model = copy.deepcopy(self.base_model)
 
         if top_k == 0:
-            return enhanced_bert
+            return enhanced_model
 
-        layer_map = {k: v for k, v in enhanced_bert.named_parameters()}
-        #zero_bias = self.ae.decoder(torch.Tensor([0.0]).to(self.device))
+        layer_map = {k: v for k, v in enhanced_model.named_parameters()}
         if part == 'decoder':
-            enhancer = self.ae.decoder(torch.Tensor([gender_factor]).to(self.device))
+            enhancer = self.gradiend.decoder(torch.Tensor([gender_factor]).to(self.device))
         elif part == 'encoder':
-            enhancer = self.ae.encoder[0].weight.flatten().to(self.device)
+            enhancer = self.gradiend.encoder[0].weight.flatten().to(self.device)
         else:
             raise ValueError('Unsupported part:', part)
 
         if top_k is not None and top_k < len(enhancer):
-                # we set parts of the enhancer to 0 that are not in the top k highest values (wrt absolute value)
-                abs_enhancer = enhancer.abs()
-                top_k_values, top_k_indices = abs_enhancer.topk(top_k, sorted=False, largest=True)
-                # use first k values as indices
-                #top_k_indices = abs_enhancer.argsort(descending=True)[:top_k]
-                #top_k_indices = np.arange(top_k)
-                mask = torch.zeros_like(enhancer, dtype=torch.bool)
-                mask[top_k_indices] = True
-                enhancer[~mask] = 0.0
-                #assert (enhancer != 0.0).sum() == top_k
+            mask = self.get_enhancer_mask(top_k, part=top_k_part)
 
-        #decoded_inv = self.ae.decoder(torch.Tensor([-gender_factor]).to(self.device))
+            if mask.sum() == 0.0:
+                return enhanced_model
+
+            enhancer[~mask] = 0.0
+
         idx = 0
         with torch.no_grad():
-            for layer in self.ae.layers:
-                shape = layer_map[layer].shape
-                number_of_elements = shape.numel()
-                layer_map[layer] += lr * enhancer[idx:idx + number_of_elements].reshape(shape)
-                idx += number_of_elements
+            if isinstance(self.gradiend.layers, dict):
+                for layer, layer_mask in self.gradiend.layers.items():
+                    number_of_elements = layer_mask.sum().item()  # Convert to Python integer if it's a tensor
 
-        return enhanced_bert
+                    # Extract the relevant elements from enhancer
+                    update_values = enhancer[idx:idx + number_of_elements]
 
-    def enhance_bert(self, *args, **kwargs):
-        print('enhance_bert is deprecated, use modify_bert')
-        return self.modify_bert(*args, **kwargs)
+                    # Create an update tensor of the same shape as layer_mask, filling only True positions
+                    update_tensor = torch.zeros_like(layer_mask, dtype=update_values.dtype)
+                    update_tensor[layer_mask] = update_values  # Assign values only to True positions
+
+                    # Apply update
+                    layer_map[layer] += lr * update_tensor
+
+                    # Increment index
+                    idx += number_of_elements
+            else:
+                for layer in self.gradiend.layers:
+                    shape = layer_map[layer].shape
+                    number_of_elements = shape.numel()
+                    layer_map[layer] += lr * enhancer[idx:idx + number_of_elements].reshape(shape)
+                    idx += number_of_elements
+
+        return enhanced_model
+
+    def get_enhancer(self, part='decoder'):
+        # we set parts of the enhancer to 0 that are not in the top k highest values (wrt absolute value)
+        if part == 'decoder':
+            abs_enhancer = self.gradiend.decoder[0].weight.flatten().abs()
+        elif part == 'decoder-bias':
+            abs_enhancer = self.gradiend.decoder[0].bias.abs()
+        elif part == 'decoder-sum':
+            abs_enhancer = (self.gradiend.decoder[0].weight.flatten() + self.gradiend.decoder[0].bias).abs()
+        else:
+            raise ValueError('Unsupported part:', part)
+
+        return abs_enhancer
+
+
+    def get_enhancer_mask(self, top_k, part='decoder'):
+        gradiend_vector = self.gradiend.decoder[0].weight.flatten()
+
+        if 0.0 < top_k <= 1.0:
+            top_k = int(top_k * len(gradiend_vector))
+
+        abs_enhancer = self.get_enhancer(part=part).cpu() # move to cpu to ensure deterministic behavior
+        sorted_indices = torch.argsort(abs_enhancer, stable=True)  # Ensure stable order
+        sorted_enhancer = abs_enhancer[sorted_indices]
+        #with torch.use_deterministic_algorithms(True):
+        top_k_values, top_k_sorted_indices = sorted_enhancer.topk(top_k, sorted=False, largest=True)
+
+        # Convert back to original indices
+        top_k_indices = sorted_indices[top_k_sorted_indices]
+        mask = torch.zeros_like(gradiend_vector, dtype=torch.bool)
+        mask[top_k_indices] = True
+        return mask
+
+    def get_layer_mask(self, top_k, part='decoder'):
+        enhancer_mask = self.get_enhancer_mask(top_k=top_k, part=part)
+        all_layer_map = {k: v for k, v in self.base_model.named_parameters()}
+        layer_map = {}
+
+        idx = 0
+        with torch.no_grad():
+            if isinstance(self.gradiend.layers, dict):
+                raise NotImplementedError()
+                for layer, layer_mask in self.gradiend.layers.items():
+                    shape = layer_map[layer].shape
+                    number_of_elements = layer_mask.sum().item()  # Convert to Python integer if it's a tensor
+
+                    # Extract the relevant elements from enhancer
+                    #update_values = enhancer[idx:idx + number_of_elements]
+
+                    # Create an update tensor of the same shape as layer_mask, filling only True positions
+                    update_tensor = torch.zeros_like(layer_mask, dtype=update_values.dtype)
+                    update_tensor[layer_mask] = update_values  # Assign values only to True positions
+
+                    # Apply update
+                    layer_map[layer] = lr * update_tensor
+
+                    # Increment index
+                    idx += number_of_elements
+            else:
+                for layer in self.gradiend.layers:
+                    shape = all_layer_map[layer].shape
+                    number_of_elements = shape.numel()
+                    layer_map[layer] = enhancer_mask[idx:idx + number_of_elements].reshape(shape) #.to_sparse()
+                    idx += number_of_elements
+
+        return layer_map
+
 
     def mask_and_encode(self, text, ignore_tokens=False, return_masked_text=False, single_mask=True):
         item = self.tokenizer(text, return_tensors="pt")
         item = {k: v.to(self.device) for k, v in item.items()}
-
         labels = item['input_ids'].clone()
 
-        if single_mask:
-            mask = torch.zeros(labels.shape, dtype=torch.bool, device=labels.device)
-            # randomly mask a single entry
-            mask[0, torch.randint(0, labels.shape[1], (1,))] = True
-        else:
-            random_mask = torch.rand(labels.shape, dtype=torch.float, device=labels.device) < 0.15
-            padding_mask = labels == self.tokenizer.pad_token_id
+        if self.is_generative:
 
+            n = labels.shape[1]
+
+            # left shift the labels by one
+            labels = torch.cat([labels[:, 1:], torch.full_like(labels[:, :1], self.tokenizer.pad_token_id)], dim=1)
+
+            # use random idx to predict in the 2nd half of the sequence to ensure enough context
             if ignore_tokens:
-                exclude_mask = (labels.unsqueeze(-1) == torch.Tensor(ignore_tokens).to(labels.device)).any(dim=-1)
+                # Create a mask for valid indices in the second half, excluding the ignore tokens
+                valid_indices_mask = ~torch.isin(labels[0, n // 2:], torch.tensor(ignore_tokens, device=labels.device))
+
+                # Get the indices of the valid tokens
+                valid_indices = torch.nonzero(valid_indices_mask, as_tuple=False).squeeze()
+
+                if valid_indices.numel() > 0:
+                    # Randomly select an index from the valid tokens
+                    random_idx = valid_indices[torch.randint(0, valid_indices.numel(), (1,))] + n // 2
+                else:
+                    # Handle case where no valid indices exist (fallback behavior, could raise an error or select any index)
+                    raise ValueError('No valid indices found in the second half of the sequence', text)
             else:
-                exclude_mask = torch.zeros_like(labels, dtype=torch.bool, device=labels.device)
-            mask = random_mask & ~padding_mask & ~exclude_mask
-        labels[~mask] = -100  # only compute loss on masked tokens
-        item['input_ids'][mask] = self.tokenizer.mask_token_id
-        # print('Mask', mask_token_mask.sum())
+                random_idx = torch.randint(n // 2, n, (1,))
+
+            labels[:, :random_idx-1] = self.tokenizer.pad_token_id
+            labels[:, random_idx:] = self.tokenizer.pad_token_id
+
+            mask = labels != self.tokenizer.pad_token_id
+        else:
+            if single_mask:
+                mask = torch.zeros(labels.shape, dtype=torch.bool, device=labels.device)
+                # randomly mask a single entry
+                mask[0, torch.randint(0, labels.shape[1], (1,))] = True
+            else:
+                random_mask = torch.rand(labels.shape, dtype=torch.float, device=labels.device) < 0.15
+                padding_mask = labels == self.tokenizer.pad_token_id
+
+                if ignore_tokens:
+                    exclude_mask = (labels.unsqueeze(-1) == torch.Tensor(ignore_tokens).to(labels.device)).any(dim=-1)
+                else:
+                    exclude_mask = torch.zeros_like(labels, dtype=torch.bool, device=labels.device)
+                mask = random_mask & ~padding_mask & ~exclude_mask
+            labels[~mask] = -100  # only compute loss on masked tokens
+
+            item['input_ids'][mask] = self.tokenizer.mask_token_id
+
         item['labels'] = labels
 
-        outputs = self.bert(**item)
+        outputs = self.base_model(**item)
         loss_bert = outputs.loss
 
-        self.bert.zero_grad()
+        self.base_model.zero_grad()
         loss_bert.backward()
 
-        gradients = self.ae.extract_gradients(self.bert)
+        gradients = self.gradiend.extract_gradients(self.base_model)
 
-        encoded = self.ae.encoder(gradients).item()
+        encoded = self.gradiend.encoder(gradients).item()
 
         if return_masked_text:
             masked_str = self.tokenizer.decode(item['input_ids'].squeeze())
@@ -422,14 +600,20 @@ class ModelWithGradiend(nn.Module):
     def create_inputs(self, masked_text, label):
         item = self.tokenizer(masked_text, return_tensors="pt")
         item = {k: v.to(self.device) for k, v in item.items()}
-        labels = item['input_ids'].clone()
-        labels[labels != self.tokenizer.mask_token_id] = -100  # only compute loss on masked tokens
         label_token_id = self.tokenizer(label, add_special_tokens=False)['input_ids']
         if not len(label_token_id) == 1:
             raise ValueError('Only a single label token is supported')
         label_token_id = label_token_id[0]
-        labels[labels == self.tokenizer.mask_token_id] = label_token_id
-        item['labels'] = labels
+
+        if self.is_generative:
+            item['labels'] = torch.full_like(item['input_ids'], -100)
+            last_idx = (item['input_ids'].squeeze() != self.tokenizer.pad_token_id).nonzero()[-1].item()
+            item['labels'][:, -last_idx] = label_token_id
+        else:
+            labels = item['input_ids'].clone()
+            labels[labels != self.tokenizer.mask_token_id] = -100  # only compute loss on masked tokens
+            labels[labels == self.tokenizer.mask_token_id] = label_token_id
+            item['labels'] = labels
         return item
 
     def forward_pass(self, inputs, return_dict=False, lr=1e-4): # todo implement batched=True
@@ -439,13 +623,13 @@ class ModelWithGradiend(nn.Module):
         grads = []
 
         if self.grad_iterations > 1:
-            bert = copy.deepcopy(self.bert)
+            base_model = copy.deepcopy(self.base_model)
             for i in range(self.grad_iterations):
-                outputs = bert(**inputs)
+                outputs = base_model(**inputs) # todo CLM
                 loss_bert = outputs.loss
-                bert.zero_grad()
+                base_model.zero_grad()
                 loss_bert.backward()
-                gradients = self.ae.extract_gradients(bert, return_dict=True)
+                gradients = self.gradiend.extract_gradients(base_model, return_dict=True)
                 grads.append(gradients)
 
                 if i < self.grad_iterations - 1:
@@ -453,11 +637,11 @@ class ModelWithGradiend(nn.Module):
                     # Step 6: Update the model's weights
 
                     with torch.no_grad():
-                        for name, param in bert.named_parameters():
+                        for name, param in base_model.named_parameters():
                             if param.grad is not None:
                                 param.add_(-lr * param.grad)
 
-                # todo save memory for now
+                # save only the last gradient (for now, maybe add some advanced logic later)
                 grads = [grads[-1]]
 
             if return_dict:
@@ -466,25 +650,30 @@ class ModelWithGradiend(nn.Module):
             return flatten_gradient
 
         else:
-            outputs = self.bert(**inputs)
+            outputs = self.base_model(**inputs)
             loss_bert = outputs.loss
-            self.bert.zero_grad()
+
+            self.base_model.zero_grad()
             loss_bert.backward()
-            return self.ae.extract_gradients(self.bert, return_dict=return_dict)
+            return self.gradiend.extract_gradients(self.base_model, return_dict=return_dict)
+
+    @property
+    def layers_hash(self):
+        return self.gradiend.layers_hash
 
     # invert the encoded value, i.e. encoded value * (-1), while keeping the decoders value
     def invert_encoding(self):
         with torch.no_grad():
-            self.ae.encoder[0].weight = torch.nn.Parameter(self.ae.encoder[0].weight * -1)
-            self.ae.encoder[0].bias = torch.nn.Parameter(self.ae.encoder[0].bias * -1)
-            self.ae.decoder[0].weight = torch.nn.Parameter(self.ae.decoder[0].weight * -1)
+            self.gradiend.encoder[0].weight = torch.nn.Parameter(self.gradiend.encoder[0].weight * -1)
+            self.gradiend.encoder[0].bias = torch.nn.Parameter(self.gradiend.encoder[0].bias * -1)
+            self.gradiend.decoder[0].weight = torch.nn.Parameter(self.gradiend.decoder[0].weight * -1)
 
     def save_pretrained(self, save_directory, **kwargs):
-        self.ae.save_pretrained(save_directory, bert=self.bert.name_or_path, tokenizer=self.tokenizer.name_or_path, **kwargs)
-
+        self.gradiend.save_pretrained(save_directory, bert=self.base_model.name_or_path, tokenizer=self.tokenizer.name_or_path, **kwargs)
 
     @classmethod
-    def from_pretrained(cls, load_directory, *layers, latent_dim=1, **kwargs):
+    def from_pretrained(cls, load_directory, layers=None, latent_dim=1, **kwargs):
+        layers = layers or []
         if len(layers) == 1 and isinstance(layers[0], list):
             layers = layers[0]
 
@@ -497,26 +686,48 @@ class ModelWithGradiend(nn.Module):
                 layers = ae.layers
 
             base_model_id = ae.kwargs['base_model']
-            base_model = AutoModelForMaskedLM.from_pretrained(base_model_id)
+            base_model = AutoModelForLM.from_pretrained(base_model_id)
             tokenizer = ae.kwargs.get('tokenizer', base_model_id)
             tokenizer = AutoTokenizer.from_pretrained(tokenizer)
         except FileNotFoundError:
             print('No model with auto encoder found in the specified directory:', load_directory, ' -> creating a new auto encoder')
 
             if isinstance(load_directory, str):
-                base_model = AutoModelForMaskedLM.from_pretrained(load_directory)
+                base_model = AutoModelForLM.from_pretrained(load_directory)
                 tokenizer = AutoTokenizer.from_pretrained(load_directory)
             else:
                 base_model = load_directory
                 tokenizer = base_model.tokenizer
 
-            layer_map = {k: v for k, v in base_model.named_parameters()}
+            layer_map = {k: v for k, v in base_model.named_parameters() if 'cls.prediction' not in k.lower()}
 
-            if not layers:
+            if layers:
+                if not isinstance(layers, dict):
+                    # layers information are provided
+                    # check if layer description can be matched with layer_map keys
+                    # layer description could also be "*.layer.10*"
+                    matched_layers = []
+                    for layer in layers:
+                        if layer in layer_map:
+                            matched_layers.append(layer)
+                        else:
+                            # Handle wildcard matching (e.g., "*.layer.10*")
+                            layer_pattern = layer.replace('.', r'\.').replace('*', r'.*')  # Convert to regex pattern
+                            layer_regex = re.compile(layer_pattern)
+
+                            for layer_name in layer_map:
+                                if layer_regex.fullmatch(layer_name):
+                                    matched_layers.append(layer_name)
+
+                    layers = list(sorted(matched_layers, key=lambda x: list(layer_map.keys()).index(x)))
+            else:
                 # no layer provided, i.e. all layers are used that are part of the core model, i.e. all layers that are not part of prediction layers
-                layers = [layer for layer in layer_map if 'cls.prediction' not in layer.lower()]
+                layers = [layer for layer in layer_map]
 
-            input_dim = sum([layer_map[layer].numel() for layer in layers])
+            if isinstance(layers, dict):
+                input_dim = sum([v.sum() for v in layers.values()])
+            else:
+                input_dim = sum([layer_map[layer].numel() for layer in layers])
             ae = GradiendModel(input_dim, layers=layers, latent_dim=latent_dim, base_model=load_directory, **kwargs)
 
         # freeze all layers that do not require gradient calculations
@@ -529,14 +740,14 @@ class ModelWithGradiend(nn.Module):
     def ae_named_parameters(self, part='all'):
         idx = 0
         if part == 'all':
-            yield from self.ae.named_parameters()
+            yield from self.gradiend.named_parameters()
             return
         elif part == 'encoder':
-            layer_map = {k: v for k, v in self.ae.encoder.named_parameters()}
+            layer_map = {k: v for k, v in self.gradiend.encoder.named_parameters()}
             weights = layer_map['0.weight'].squeeze()
 
         elif 'decoder' in part:
-            layer_map = {k: v for k, v in self.ae.decoder.named_parameters()}
+            layer_map = {k: v for k, v in self.gradiend.decoder.named_parameters()}
             if part == 'decoder':
                 weights = layer_map['0.weight'].squeeze()
             elif part == 'decoder-sum':
@@ -548,7 +759,7 @@ class ModelWithGradiend(nn.Module):
         else:
             raise ValueError('Unsupported part:', part)
 
-        for layer in self.ae.layers:
+        for layer in self.gradiend.layers:
             orig_shape = self.layer_map[layer].shape
             num_elements = orig_shape.numel()
             yield layer, weights[idx:idx + num_elements].reshape(orig_shape)
@@ -556,43 +767,6 @@ class ModelWithGradiend(nn.Module):
         if idx != weights.numel():
             raise ValueError(f'Inconsistent number of elements in the weights and expected number of elements in the layers ({idx} vs. {weights.numel()})')
 
-
-def run_mlm_example(model, tokenizer):
-    # Sample text
-    text2 = "Anna was working. [MASK] coded in Python."
-    text1 = "Ben was working. [MASK] coded in Python."
-
-    def run_for_text(text):
-        # Tokenize input
-        inputs = tokenizer(text, return_tensors='pt')
-
-        # Get the index of the [MASK] token
-        mask_token_index = torch.where(inputs["input_ids"] == tokenizer.mask_token_id)[1]
-
-        # Forward pass, get predictions
-        outputs, ae_outputs = model(**inputs)
-        logits = outputs.logits
-
-
-        # Get the predicted token id
-        mask_token_logits = logits[0, mask_token_index, :]
-        predicted_token_id = torch.argmax(mask_token_logits, dim=-1)
-        predicted_token = tokenizer.decode(predicted_token_id)
-
-        print(f"Predicted token: {predicted_token}")
-
-        # Decode the whole sentence with the predicted token
-        input_ids = inputs["input_ids"].tolist()[0]
-        input_ids[mask_token_index] = predicted_token_id[0].item()
-        predicted_sentence = tokenizer.decode(input_ids)
-
-        print(f"Predicted sentence: {predicted_sentence}")
-        return ae_outputs
-
-    output1 = run_for_text(text1)
-    output2 = run_for_text(text2)
-
-    print((output1 - output2).abs().sum().item())
 
 if __name__ == '__main__':
     gradiend = ModelWithGradiend.from_pretrained('results/models/bert-base-cased')

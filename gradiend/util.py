@@ -12,7 +12,7 @@ default_accuracy_function = lambda x: x #np.power(x, 10)
 normalization = lambda x: x #np.power(x, 0.1)
 
 
-def init_matplotlib(font_path="/path/to/times.ttf", use_tex=False):
+def init_matplotlib(font_path="/home/drechsel/times.ttf", use_tex=False):
     # Check if the font is already in the font manager
     for font in fm.fontManager.ttflist:
         if font.fname == font_path:
@@ -50,6 +50,7 @@ def init_matplotlib(font_path="/path/to/times.ttf", use_tex=False):
 \newcommand{\bertlarge}{$\text{BERT}_\text{large}$}
 \newcommand{\roberta}{RoBERTa}
 \newcommand{\distilbert}{DistilBERT}
+\newcommand{\gpttwo}{GPT-2}
 
 \newcommand{\dropout}{\textsc{Dropout}}
 \newcommand{\selfdebias}{\textsc{SelfDebias}}
@@ -133,6 +134,12 @@ def sanitize_filename(filename):
 
 
 def token_distance(tokenizer, text, word1, word2):
+    if word1 is None or word2 is None:
+        return None
+
+    if not (word1 in text and word2 in text):
+        return None
+
     # Tokenize the text
     tokens = tokenizer.tokenize(text)
     word1_tokens = tokenizer.tokenize(word1)
@@ -189,7 +196,11 @@ def evaluate_he_she(model, tokenizer, masked_text):
     inputs = {k: v.to(device) for k, v in inputs.items()}
 
     # Get the index of the masked token
-    mask_token_index = torch.where(inputs["input_ids"] == tokenizer.mask_token_id)[1]
+    is_generative = tokenizer.mask_token_id is None
+    if is_generative:
+        mask_token_index = len(inputs["input_ids"]) - 1
+    else:
+        mask_token_index = torch.where(inputs["input_ids"] == tokenizer.mask_token_id)[1]
 
     # Pass the inputs through the model
     with torch.no_grad():
@@ -214,6 +225,9 @@ def evaluate_he_she(model, tokenizer, masked_text):
             'most_likely_token': []
         }
     else:
+        if is_generative:
+            probabilities = probabilities.unsqueeze(0)
+
         he_probability = probabilities[:, he_token_id].tolist()
         she_probability = probabilities[:, she_token_id].tolist()
 
