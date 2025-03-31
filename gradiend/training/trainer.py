@@ -313,6 +313,7 @@ def train(model_with_gradiend,
         for i, batch in enumerate(dataloader_iterator):
 
             ####### Data Preparation ########
+            data_prep_start = time.time()
             cache_file = ''
             if use_cached_gradients:
                 hash = hash_it(batch['text'])
@@ -320,8 +321,9 @@ def train(model_with_gradiend,
 
             if use_cached_gradients and os.path.exists(cache_file):
                 gradients, inv_gradients = torch.load(cache_file)
+                # todo actually save gradients!
+
             else:
-                data_prep_start = time.time()
 
                 inputs = batch[True]
                 inv_inputs = batch[False]
@@ -390,11 +392,6 @@ def train(model_with_gradiend,
                 last_losses.append(loss_ae)
             else:
                 mean_loss = sum(last_losses) / len(last_losses)
-                threshold = 1e-7
-                if loss_ae / mean_loss > 1000:
-                    print(f'Extraordinary large loss: {loss_ae} vs. mean loss: {mean_loss}')
-                    print(batch['text'])
-
                 last_losses = last_losses[1:] + [loss_ae]
 
             if max_iterations and global_step >= max_iterations:
@@ -403,7 +400,7 @@ def train(model_with_gradiend,
 
             global_step += 1
             last_iteration = global_step == max_iterations or (epoch == epochs - 1 and i == len_dataloader - 1)
-            if do_eval and (i+1) % n_evaluation == 0 or last_iteration:
+            if do_eval and ((i+1) % n_evaluation == 0 or i == 0)or last_iteration:
                 eval_start = time.time()
                 score, mean_male, mean_female = evaluate()
                 scores.append(score)
@@ -412,7 +409,7 @@ def train(model_with_gradiend,
                 eval_time += time.time() - eval_start
 
             n_loss_report = n_evaluation if n_evaluation > 0 else 100
-            if (i+1) % n_loss_report == 0 or last_iteration:
+            if ((i+1) % n_loss_report == 0 or  i == 0) or last_iteration:
                 # validate on small validation set
                 mean_loss = sum(last_losses) / len(last_losses)
                 encoder_norm = model_with_gradiend.gradiend.encoder_norm
@@ -548,10 +545,10 @@ def train(model_with_gradiend,
             def humanize_time(seconds):
                 return humanize.naturaldelta(datetime.timedelta(seconds=seconds))
 
-            print('Training time:', humanize_time(training_information['total_training_time']))
+            print('Total Training time:', humanize_time(training_information['total_training_time']))
             print('Training data preparation time:', humanize_time(training_information['training_data_prep_time']))
             print('Training Evaluation time:', humanize_time(training_information['eval_time']))
-            print('Training gradient time:', humanize_time(training_information['training_gradiend_time']))
+            print('Training GRADIEND time:', humanize_time(training_information['training_gradiend_time']))
         except ModuleNotFoundError:
             print('Please install humanize to get a human-readable training time')
 

@@ -114,8 +114,7 @@ def select(model, max_size=None, print=True, force=False, plot=True, accuracy_fu
 
 
 if __name__ == '__main__':
-    models = ['bert-base-cased', 'bert-large-cased', 'distilbert-base-cased', 'roberta-large']
-    select('results/experiments/gradiend/gpt2/v/0')
+    models = ['bert-base-cased', 'bert-large-cased', 'distilbert-base-cased', 'roberta-large', 'gpt2']
 
     for model in models:
         print(f'Analyzing model {model}')

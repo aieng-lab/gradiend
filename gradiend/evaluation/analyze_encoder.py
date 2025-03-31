@@ -2,6 +2,7 @@ import itertools
 import json
 import os.path
 
+from scipy.stats import stats
 from sklearn.metrics import balanced_accuracy_score
 from tqdm import tqdm
 
@@ -283,10 +284,14 @@ def analyze_model(model_with_gradiend, genter_df, names_df, output, df_no_gender
 
 
 def get_correlation(df, method):
-    # Select only numeric columns
-    numeric_df = df.select_dtypes(include=[np.number])
-    pearson_corr = numeric_df.corr(method=method)
-    return pearson_corr['encoded']['state_value']
+    if method == 'pearson':
+        corr, p_value = stats.pearsonr(df['state_value'], df['encoded'])
+    elif method == 'spearman':
+        corr, p_value = stats.spearmanr(df['state_value'], df['encoded'])
+    else:
+        raise ValueError(f'Unknown method: {method}')
+
+    return {'correlation': corr, 'p_value': p_value}
 
 
 def get_pearson_correlation(df):
@@ -388,6 +393,7 @@ def get_model_metrics(*encoded_values, prefix=None, suffix='.csv', **kwargs):
     df_without_B['z_score_MF'] = z_score(df_without_B, key='encoded', groupby='text')
     df_without_B['global_z_score_MF'] = z_score(df_without_B['encoded'])
 
+    # state_value in text_df still refers to old labeling with M being 1!
     acc_M_positive = np.mean([((text_df['encoded'] >= 0) == text_df['state_value'].astype(bool)).sum() / len(text_df) for text, text_df in df_without_B.groupby('text')])
     acc_M_negative = np.mean([((text_df['encoded'] < 0) == text_df['state_value'].astype(bool)).sum() / len(text_df) for text, text_df in df_without_B.groupby('text')])
     acc_optimized_border_M_pos = np.mean([max(((text_df['encoded'] < threshold) == text_df['state_value'].astype(bool)).sum() / len(text_df) for threshold in np.arange(-1.0, 1.0, 0.1)) for text, text_df in df_without_B.groupby('text')])
@@ -430,22 +436,42 @@ def get_model_metrics(*encoded_values, prefix=None, suffix='.csv', **kwargs):
     balanced_acc_male_pos = balanced_accuracy_score(df_all['predicted_male_pos'], labels)
     acc_total = max(balanced_acc_female_pos, balanced_acc_male_pos)
 
+    pearson_text_cor = df.groupby('text').apply(get_pearson_correlation, include_groups=False)
+    spearman_text_cor = df.groupby('text').apply(get_spearman_correlation, include_groups=False)
+    pearson_text_MF_cor = df_without_B.groupby('text').apply(get_pearson_correlation, include_groups=False)
+    spearman_text_MF_cor = df_without_B.groupby('text').apply(get_spearman_correlation, include_groups=False)
+
+    pearson_total = get_pearson_correlation(df_all)
+    spearman_total = get_spearman_correlation(df_all)
+
+    pearson = get_pearson_correlation(df)
+    spearman = get_spearman_correlation(df)
+
+    pearson_MF = get_pearson_correlation(df_without_B)
+    spearman_MF = get_spearman_correlation(df_without_B)
+
     scores = {
-        'pearson_total': get_pearson_correlation(df_all),
-        'spearman_total': get_spearman_correlation(df_all),
+        'pearson_total': pearson_total['correlation'],
+        'pearson_total_p_value': pearson_total['p_value'],
+        'spearman_total': spearman_total['correlation'],
+        'spearman_total_p_value': spearman_total['p_value'],
         'acc_total': acc_total,
 
-        'pearson': get_pearson_correlation(df),
-        'spearmann': get_spearman_correlation(df),
+        'pearson': pearson['correlation'],
+        'pearson_p_value': pearson['p_value'],
+        'spearmann': spearman,
+        'spearman_p_value': spearman['p_value'],
 
-        'pearson_MF': get_pearson_correlation(df_without_B),
-        'spearman_MF': get_spearman_correlation(df_without_B),
+        'pearson_MF': pearson_MF['correlation'],
+        'pearson_MF_p_value': pearson_MF['p_value'],
+        'spearman_MF': spearman_MF['correlation'],
+        'spearman_MF_p_value': spearman_MF['p_value'],
 
-        'pearson_text': df.groupby('text').apply(get_pearson_correlation, include_groups=False).mean(),
-        'spearman_text': df.groupby('text').apply(get_spearman_correlation, include_groups=False).mean(),
+        'pearson_text': np.mean([p['correlation'] for  p in pearson_text_cor]).item(),
+        'spearman_text': np.mean([p['correlation'] for  p in spearman_text_cor]).item(),
 
-        'pearson_text_MF': df_without_B.groupby('text').apply(get_pearson_correlation, include_groups=False).mean(),
-        'spearman_text_MF': df_without_B.groupby('text').apply(get_spearman_correlation, include_groups=False).mean(),
+        'pearson_text_MF': np.mean([p['correlation'] for  p in pearson_text_MF_cor]).item(),
+        'spearman_text_MF': np.mean([p['correlation'] for  p in spearman_text_MF_cor]).item(),
 
         'acc': max(acc_M_negative, acc_M_positive),
         'acc_zscore': max(acc_M_negative_global, acc_M_positive_global),
@@ -1130,6 +1156,6 @@ def print_all_models(folder='results/models/', *, prefix=None, keys=None, **kwar
 
 
 if __name__ == '__main__':
-    models = ['bert-base-cased', 'bert-large-cased', 'roberta-large', 'distilbert-base-cased']
+    models = ['bert-base-cased', 'bert-large-cased', 'roberta-large', 'distilbert-base-cased', 'gpt2']
     df = analyze_models(*[f'results/models/{model}' for model in models])
     print_all_models()

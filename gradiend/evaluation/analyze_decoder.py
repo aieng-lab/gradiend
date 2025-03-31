@@ -466,7 +466,7 @@ def convert_results_to_list(dict_results):
     return [{**dict_result, 'id': (key if isinstance(key, str) else {'gender_factor': key[0], 'lr': key[1]})} for key, dict_result in dict_results.items()]
 
 
-def evaluate_bert_with_ae(path, gender_factors=None, lrs=None, thorough=True, top_k=None, accuracy_function=None, part='decoder', top_k_part='decoder'):
+def evaluate_bert_with_ae(path_or_model, gender_factors=None, lrs=None, thorough=True, top_k=None, accuracy_function=None, part='decoder', top_k_part='decoder'):
     accuracy_function = accuracy_function or default_accuracy_function
     metric_keys = ['bpi', 'fpi', 'mpi']
 
@@ -499,7 +499,13 @@ def evaluate_bert_with_ae(path, gender_factors=None, lrs=None, thorough=True, to
             }
         return relevant_results
 
-    bert_with_ae = ModelWithGradiend.from_pretrained(path)
+    if isinstance(path_or_model, str):
+        bert_with_ae = ModelWithGradiend.from_pretrained(path_or_model)
+        path = path_or_model
+    else:
+        bert_with_ae = path_or_model
+        path = bert_with_ae.name_or_path
+
     base_model = bert_with_ae.base_model
     tokenizer = bert_with_ae.tokenizer
     model_id = os.path.basename(path) if path.startswith('results/models') else path

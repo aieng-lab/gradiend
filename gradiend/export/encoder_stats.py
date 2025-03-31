@@ -4,14 +4,15 @@ from gradiend.evaluation.analyze_encoder import get_model_metrics
 from gradiend.export import models as default_models
 
 
-
 exported_metrics = {
     'acc_total': r'\accenc',
     'pearson_total': r'\corenc',
+    #'pearson_total_p_value': r'\corenc p value',
     'acc': r'\accmf',
     'pearson_MF': r'\cormf',
+    #'pearson_MF_p_value': r'\cormf p value',
     'encoded_abs_means_gender masked': r'\mamf',
-    'encoded_abs_means_no gender masked': 'masmf',
+    'encoded_abs_means_no gender masked': r'\masmf',
     'encoded_abs_means_no gender': '\man',
 }
 
@@ -23,7 +24,7 @@ def print_encoder_stats(*models):
     else:
         models = {model: model for model in models}
 
-    csv_files = {pretty_model: rf'results/models/{model}_params_spl_test.csv' for model, pretty_model in models.items()}
+    csv_files = {pretty_model: rf'results/models/{model.removeprefix("results/models/")}_params_spl_test.csv' for model, pretty_model in models.items()}
 
     results = {}
     for model, file in csv_files.items():
@@ -46,17 +47,28 @@ def print_encoder_stats(*models):
     for metric in exported_metrics.values():
         headers.append(metric)
 
-
     headers = [rf'\textbf{{{header}}}' for header in headers]
 
 
     table_data = []
     for model, metrics in sorted(results.items()):
-        row = [model] + [metrics.get(header, '') for header in exported_metrics.keys()]
+        row = [model] + [f'{metrics.get(header, -1.0):.16f}' if 'p value' in header else metrics.get(header, '') for header in exported_metrics.keys()]
         table_data.append(row)
 
     # Print using tabulate
     print(tabulate(table_data, headers=headers, tablefmt='latex_raw', floatfmt=".3f"))
 
 if __name__ == '__main__':
-    print_encoder_stats()
+    print_encoder_stats(
+        'bert-base-cased',
+        'bert-large-cased',
+        'distilbert-base-cased',
+        'roberta-large',
+        'gpt2',
+        #'bert-base-cased-v_0.01',
+        #'bert-large-cased-v_0.01',
+        #'distilbert-base-cased-v_0.01',
+        #'bert-base-cased-v_1e-05_decoder',
+        #'bert-large-cased-v_1e-07_decoder-bias',
+        #'distilbert-base-cased-v_1e-07_decoder-bias',
+    )
