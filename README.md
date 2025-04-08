@@ -104,7 +104,7 @@ Dataset | Generation Script
 GENTER  | `gradiend.data.filtering.generate_genter()`
 GENEUTRAL | `gradiend.data.generate_geneutral()`
 NAMEXACT | `gradiend.data.generate_namexact()`
-NAMEEXTEND | `gradiend.data.generate_namextend()`
+NAMEXTEND | `gradiend.data.generate_namextend()`
 
 ## Citation
 ```
