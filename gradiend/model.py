@@ -142,10 +142,12 @@ class GradiendModel(nn.Module):
                 return {k: v.grad.detach() * self.layers[k] if v.grad is not None else torch.zeros_like(v) for k, v in layer_map.items() if k in self.layers}
             else:
                 layer_map = {k: v.grad[self.layers[k]] for k, v in layer_map.items() if k in self.layers}
+            return torch.concat([layer_map[layer].flatten().detach() for layer in self.layers])
         elif return_dict:
             return {layer: layer_map[layer].grad.detach() for layer in self.layers}
 
-        return torch.concat([layer_map[layer].flatten().detach() for layer in self.layers])
+        return torch.concat([layer_map[layer].grad.flatten().detach() for layer in self.layers])
+
 
     def set_tokenizer(self, tokenizer):
         self.tokenizer = tokenizer
@@ -364,7 +366,6 @@ def is_generative(model):
     return hasattr(model, 'lm_head')
 
 class ModelWithGradiend(nn.Module):
-
     def __init__(self, base_model, gradiend, tokenizer):
         super().__init__()
         self.base_model = base_model
