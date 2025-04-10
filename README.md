@@ -10,7 +10,7 @@ Further evaluations of this study can be reproduced using our [expanded version 
 ```bash
 git clone https://github.com/aieng-lab/gradiend.git
 cd gradiend
-conda create --file environment.yml -n gradiend
+conda evn create --file environment.yml
 conda activate gradiend
 ```
 
