@@ -11,11 +11,11 @@ from torch import softmax
 from tqdm import tqdm
 import pandas as pd
 import torch
-from transformers import AutoModelForMaskedLM, AutoTokenizer
+from transformers import AutoModelForMaskedLM
 
-from gradiend.evaluation.mlm import evaluate_mlm, evaluate_clm
+from gradiend.evaluation.mlm import evaluate_mlm, evaluate_clm_perplexity
 from gradiend.data import read_geneutral, read_gentypes, read_namextend, read_namexact
-from gradiend.model import ModelWithGradiend, AutoModelForLM
+from gradiend.model import ModelWithGradiend, AutoModelForLM, AutoTokenizerForLM, InstructTokenizerWrapper
 from gradiend.util import hash_model_weights, normalization, default_accuracy_function, init_matplotlib
 
 
@@ -115,15 +115,19 @@ def evaluate_gender_bias_name_predictions(model, tokenizer, text_prefix=None, ba
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = model.to(device)
     model.eval()
+    is_instruction_model = isinstance(tokenizer, InstructTokenizerWrapper)
     is_generative = tokenizer.mask_token is None
     if is_generative:
         tokenizer.pad_token = tokenizer.eos_token
-        #tokenizer.pad_token_id = tokenizer.eos_token_id
+        #return evaluate_gender_bias_multitoken(model, tokenizer, text_prefix=text_prefix, baseline=baseline)
+
+    if is_instruction_model:
+        tokenizer.system_prompt = tokenizer.system_prompt_name
 
     data = read_gentypes()
     names_df = read_namextend()
     def preprocess(text):
-        return text.lower().replace('ġ', '').strip()
+        return text.lower().replace('ġ', '').replace('Ġ', '').strip()
 
     start = time.time()
     tokenizer_names_id = (tokenizer.name_or_path, hash(tuple(names_df['name'].tolist())))
@@ -175,9 +179,8 @@ def evaluate_gender_bias_name_predictions(model, tokenizer, text_prefix=None, ba
     all_texts = []
     for _, record in data.iterrows():
         text = record['text']
-        if is_generative:
+        if is_generative and not is_instruction_model:
             text = f'The person, who {text.removeprefix("My friend, [NAME],").removesuffix(".")}, has the first name'
-            print(text)
         elif text_prefix:
             if text.startswith('My friend, [NAME],'):
                 text = f'{text_prefix.strip()}, [NAME], {text.removeprefix("My friend, [NAME],").strip()}'
@@ -187,7 +190,7 @@ def evaluate_gender_bias_name_predictions(model, tokenizer, text_prefix=None, ba
                 text = f'{text_prefix.strip()} {text}'
         elif text_prefix is False:
             text = text.removeprefix('My friend, [NAME],').strip()
-        if is_generative:
+        if is_instruction_model or is_generative:
             masked_text = text
         else:
             masked_text = text.replace("[NAME]", tokenizer.mask_token)
@@ -209,7 +212,17 @@ def evaluate_gender_bias_name_predictions(model, tokenizer, text_prefix=None, ba
         attention_mask = batch_tokenized_text["attention_mask"].to(device)
 
         # Find mask token index in each input
-        if is_generative: # todo
+        if is_instruction_model:
+            #mask_token_index = (input_ids.squeeze() != tokenizer.pad_token_id).nonzero()[-1].item() - 1
+
+            mask_token_index = (input_ids.squeeze() != tokenizer.pad_token_id).sum(dim=1) + 1
+
+            #pad_id = tokenizer.pad_token_id
+            #last_non_pad_indices = (input_ids != pad_id).int().flip(dims=[1]).argmax(dim=1)
+            #last_non_pad_indices = input_ids.size(1) - 1 - last_non_pad_indices
+            #mask_token_index = last_non_pad_indices
+
+        elif is_generative:
             mask_token_index = (input_ids.squeeze() != tokenizer.pad_token_id).sum(dim=1) - 1
         else:
             mask_token_index = (input_ids == tokenizer.mask_token_id).nonzero(as_tuple=True)[1]
@@ -330,6 +343,8 @@ def evaluate_gender_bias_name_predictions(model, tokenizer, text_prefix=None, ba
 
     he_prob = compute_gender_preference_accuracy(gender_probabilities)
 
+    print(f'P(M)= {avg_prob_m:.4f}, P(F)={avg_prob_f:.4f}, APD={apd:.4f}, BPI={_bpi:.4f}, MPI={_mpi:.4f}, FPI={_fpi:.4f}')
+
     result = {
         'apd': apd,
         'pq': prediction_quality,
@@ -348,6 +363,128 @@ def evaluate_gender_bias_name_predictions(model, tokenizer, text_prefix=None, ba
 
     return result
 
+# todo currently not used but may be useful in the future
+def evaluate_gender_bias_multitoken(
+    model,
+    tokenizer,
+    text_prefix=None,
+    baseline=None,
+):
+    """
+    Same interface & output as `evaluate_gender_bias_name_predictions`,
+    but supports multi-token names with exact sequence probability.
+    """
+    #device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    #model = model.to(device)
+    #model.eval()
+
+    is_instruction_model = hasattr(tokenizer, 'system_prompt')
+    is_generative = tokenizer.mask_token is None
+    if is_generative:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    # load data
+    data = read_gentypes()
+    names_df = read_namextend()
+
+    # build name -> ids map and gender factors
+    names_df['ids'] = names_df['name'].apply(
+        lambda nm: tokenizer(nm, add_special_tokens=False).input_ids
+    )
+    # lowercase mapping
+    names_df['name_lower'] = names_df['name'].str.lower()
+    # dicts
+    gender_mapping_he = names_df[names_df['gender']=='M'].set_index('name_lower')['prob_M'].to_dict()
+    gender_mapping_she= names_df[names_df['gender']=='F'].set_index('name_lower')['prob_F'].to_dict()
+
+    # filter only names whose ids are in vocab
+    def valid_name(nm):
+        return all(tok < tokenizer.vocab_size for tok in names_df.loc[names_df['name_lower']==nm, 'ids'].iloc[0])
+    valid_m = {nm: p for nm,p in gender_mapping_he.items() if valid_name(nm)}
+    valid_f = {nm: p for nm,p in gender_mapping_she.items() if valid_name(nm)}
+
+    # final lists
+    male_names = [(nm, names_df.loc[names_df['name_lower']==nm,'ids'].iloc[0], valid_m[nm]) for nm in valid_m]
+    female_names=[(nm, names_df.loc[names_df['name_lower']==nm,'ids'].iloc[0], valid_f[nm]) for nm in valid_f]
+
+    gender_probabilities = {}
+
+    all_texts = []
+    for _, record in data.iterrows():
+        text = record['text']
+        # apply prefix logic as before
+        if is_generative and not is_instruction_model:
+            text = f'The person, who {text.removeprefix("My friend, [NAME],").removesuffix(".")}, has the first name'
+        elif text_prefix:
+            text = f'{text_prefix.strip()} {text}'
+        elif text_prefix is False:
+            text = text.removeprefix('My friend, [NAME],').strip()
+        all_texts.append(text)
+
+    for text in all_texts:
+        # tokenize context only
+        inputs = tokenizer(text, return_tensors='pt', add_special_tokens=False).input_ids.to(model.device)
+
+        # accumulate weighted probs
+        score_M = 0.0
+        score_F = 0.0
+
+        # for each male name
+        for nm, ids, factor in male_names:
+            p = 1.0 # todo this should be the probability of the first token!
+            seq = inputs
+            for tok in ids:
+                with torch.no_grad():
+                    logits = model(seq).logits[:, -1, :]
+                    probs  = softmax(logits, dim=-1)
+                p *= probs[0, tok].item()
+                # append token
+                seq = torch.cat([seq, torch.tensor([[tok]], device=model.device)], dim=1)
+            score_M += p * factor
+
+        # for each female name
+        for nm, ids, factor in female_names:
+            p = 1.0
+            seq = inputs
+            for tok in ids:
+                with torch.no_grad():
+                    logits = model(seq).logits[:, -1, :]
+                    probs  = softmax(logits, dim=-1)
+                p *= probs[0, tok].item()
+                seq = torch.cat([seq, torch.tensor([[tok]], device=model.device)], dim=1)
+            score_F += p * factor
+
+        # normalize
+        total = score_M + score_F
+        P_M = score_M/total if total>0 else 0.0
+        P_F = score_F/total if total>0 else 0.0
+        gender_probabilities[text] = {'M': P_M, 'F': P_F}
+
+    # metrics: APD, BPI, MPI, FPI, PQ, etc.
+    apd = calculate_average_probability_difference(gender_probabilities)
+    _bpi = np.mean([(1 - abs(p['M'] - p['F']))*(p['M']+p['F']) for p in gender_probabilities.values()])
+    _mpi = np.mean([(1 - p['F'])*p['M'] for p in gender_probabilities.values()])
+    _fpi = np.mean([(1 - p['M'])*p['F'] for p in gender_probabilities.values()])
+    pq   = calculate_average_prediction_quality(gender_probabilities)
+    he_prob = compute_gender_preference_accuracy(gender_probabilities)
+
+    result = {
+        'apd': apd,
+        'pq': pq,
+        '_bpi': _bpi,
+        '_mpi': _mpi,
+        '_fpi': _fpi,
+        'avg_prob_m': np.mean([p['M'] for p in gender_probabilities.values()]),
+        'avg_prob_f': np.mean([p['F'] for p in gender_probabilities.values()]),
+        'preference_score': abs(np.mean([p['M']-p['F'] for p in gender_probabilities.values()])),
+        'he_prob': he_prob,
+    }
+
+    if baseline is True:
+        result['baseline_change'] = calculate_baseline_change(gender_probabilities, baseline)
+        return result, gender_probabilities
+    return result
+
 
 def evaluate_non_gender_mlm(model, tokenizer, max_size=10000):
     df = read_geneutral(max_size=max_size)
@@ -355,14 +492,19 @@ def evaluate_non_gender_mlm(model, tokenizer, max_size=10000):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = model.to(device)
     is_generative = tokenizer.mask_token is None
+    is_llama = 'llama' in model.name_or_path.lower()
     if is_generative:
-        result, stats = evaluate_clm(model, tokenizer, texts, verbose=False)
+        result = evaluate_clm_perplexity(model, tokenizer, texts[:1000], verbose=False)
+        # todo gpt
+        #if is_llama:
+        #else:
+        #    result, stats = evaluate_clm(model, tokenizer, texts, verbose=False)
     else:
         result, stats = evaluate_mlm(model, tokenizer, texts, verbose=False)
     return result
 
 
-def evaluate_model(model, tokenizer, verbose=True, df_name=None, thorough=True, force=False, only_friend=True, cache_folder='', **additional_stats):
+def evaluate_model(model, tokenizer, verbose=True, df_name=None, thorough=True, force=False, cache_folder='', **additional_stats):
     model_hash = hash_model_weights(model)
     model_name = model.name_or_path
     model_id = os.path.basename(model_name)
@@ -383,6 +525,7 @@ def evaluate_model(model, tokenizer, verbose=True, df_name=None, thorough=True, 
     total_start_time = time.time()
     result = {}
 
+
     # Evaluate non-gender MLM stats and measure time
     start_time = time.time()
     max_size = 10000 if thorough else 1000
@@ -390,18 +533,11 @@ def evaluate_model(model, tokenizer, verbose=True, df_name=None, thorough=True, 
     non_gender_mlm_time = time.time() - start_time
     result['mlm'] = non_gender_mlm_stats
 
-    if not only_friend:
-        # Evaluate gender bias stats and measure time
-        start_time = time.time()
-        gender_bias_stats = evaluate_gender_bias_name_predictions(model, tokenizer, df_name=df_name)
-        gender_bias_time = time.time() - start_time
-        result['gender_bias'] = gender_bias_stats
-
     # Evaluate gender bias name stats with prefix and measure time
     start_time = time.time()
     if df_name:
         df_name = f'{df_name.replace(".csv", "")}_friend'
-    gender_bias_name_stats = evaluate_gender_bias_name_predictions(model, tokenizer)
+    gender_bias_name_stats = evaluate_gender_bias_name_predictions(model, tokenizer) # todo , df_name=df_name)
     gender_bias_name_time = time.time() - start_time
     result['gender_bias_names'] = gender_bias_name_stats
 
@@ -416,13 +552,8 @@ def evaluate_model(model, tokenizer, verbose=True, df_name=None, thorough=True, 
     if verbose:
         # Print nicely formatted times
         print(f"Total evaluation time: {total_time:.2f} seconds")
-        print(
-            f"Non-gender MLM evaluation time: {non_gender_mlm_time:.2f} seconds ({non_gender_mlm_relative:.2%} of total time)")
-        if not only_friend:
-            gender_bias_relative = gender_bias_time / total_time
-            print(f"Gender bias evaluation time: {gender_bias_time:.2f} seconds ({gender_bias_relative:.2%} of total time)")
-        print(
-            f"Gender bias names evaluation time: {gender_bias_name_time:.2f} seconds ({gender_bias_name_relative:.2%} of total time)")
+        print(f"Non-gender MLM evaluation time: {non_gender_mlm_time:.2f} seconds ({non_gender_mlm_relative:.2%} of total time)")
+        print(f"Gender bias names evaluation time: {gender_bias_name_time:.2f} seconds ({gender_bias_name_relative:.2%} of total time)")
 
     accuracy = non_gender_mlm_stats['accuracy']
     for key in ['bpi', 'mpi', 'fpi']:
@@ -517,6 +648,7 @@ def evaluate_bert_with_ae(path_or_model, gender_factors=None, lrs=None, thorough
     expected_results = len(pairs) + 1 + 3 # 1 because of base, 3 because of bpi, mpi, fpi
 
     try:
+        #raise FileNotFoundError() # todo remove
         relevant_results = json.load(open(file, 'r'))
 
         raw_relevant_results = convert_results_to_dict(relevant_results)
@@ -536,7 +668,9 @@ def evaluate_bert_with_ae(path_or_model, gender_factors=None, lrs=None, thorough
         print(f'Error for {file}')
         raise e
 
+
     try:
+        #raise FileNotFoundError() # todo remove
         all_results = json.load(open(base_file, 'r'))
         raw_all_results = convert_results_to_dict(all_results)
 
@@ -544,8 +678,6 @@ def evaluate_bert_with_ae(path_or_model, gender_factors=None, lrs=None, thorough
         for k, v in raw_all_results.items():
             if 'gender_bias_names' not in v or 'apd' not in v['gender_bias_names'] or not isinstance(v['gender_bias_names']['apd'], dict):
                 all_results[k] = v
-
-        #del all_results['base']
 
         # copy relevant results into relevant_results
         for pair in pairs:
@@ -574,7 +706,7 @@ def evaluate_bert_with_ae(path_or_model, gender_factors=None, lrs=None, thorough
         relevant_results['base'] = base_results
 
 
-    for gender_factor, lr in tqdm(pairs, desc="Evaluate GRADIEND"):
+    for gender_factor, lr in tqdm(pairs, desc=f"Evaluate GRADIEND {path_or_model}"):
         id = {'gender_factor': gender_factor, 'lr': lr}
         id_key = (gender_factor, lr)
         if id_key in relevant_results:
@@ -586,12 +718,17 @@ def evaluate_bert_with_ae(path_or_model, gender_factors=None, lrs=None, thorough
             df_name = f'results/cache/models/{bert_with_ae.name}_lr_{lr}_gf_{gender_factor}.csv'
         else:
             df_name = f'results/cache/models/{bert_with_ae.name}/{top_k}/lr_{lr}_gf_{gender_factor}.csv'
-        enhanced_bert_results = evaluate_model(enhanced_bert, tokenizer, df_name=df_name, thorough=thorough, cache_folder=f'{gender_factor}_{lr}') # force=True?
+
+        enhanced_bert_results = evaluate_model(enhanced_bert, tokenizer, df_name=df_name, thorough=thorough, cache_folder=f'{gender_factor}_{lr}_v2') # force=True?
         all_results[id_key] = enhanced_bert_results
         relevant_results[id_key] = enhanced_bert_results
 
         with open(base_file, 'w+') as f:
             json.dump(convert_results_to_list(all_results), f, indent=2)
+
+        # free memory
+        del enhanced_bert
+        torch.cuda.empty_cache()
 
 
     list_results = convert_results_to_list(relevant_results)
@@ -839,8 +976,8 @@ def plot_bert_with_ae_results(data,
             'xticklabels': lr_tick_labels,
             'yticklabels': gf_tick_labels,
         }
-        heatmap_data_percent = (heatmap_data * 100).round().astype(int)
-        sns.heatmap(heatmap_data_percent, cmap="YlGnBu", cbar_kws=cbar_kws, annot=True, #fmt='02d',
+        heatmap_data_percent = heatmap_data * 100
+        sns.heatmap(heatmap_data_percent, cmap="YlGnBu", cbar_kws=cbar_kws, annot=True, fmt='.0f',
                     annot_kws={"size": 9 if small else 8, "va": "center_baseline"}, ax=ax_single, **kwargs)
         ls = (10 if square else 8) if small else 10
         ax_single.tick_params(axis='x', labelsize=ls)
@@ -872,14 +1009,6 @@ def plot_bert_with_ae_results(data,
         # Map the baseline_value to the corresponding color in the colormap
         baseline_color = cmap(norm(baseline_value))
 
-        #ax_single.set_title(f"{metric_label}", fontsize=15)
-        #ax.text(0.0, 0.05, f"Base Model: {baseline_value:.3f}",
-        #        transform=ax.transAxes,  # Set relative to the axis
-        #        fontsize=12,  # Font size
-        #        ha='center',  # Horizontal alignment
-        #        va='center',  # Vertical alignment
-        #        bbox=dict(facecolor=baseline_color, alpha=0.5, edgecolor='black'))
-
         # Function to compute luminance and decide text color
         def get_text_color(facecolor):
             # Convert color to RGB
@@ -891,7 +1020,6 @@ def plot_bert_with_ae_results(data,
             return 'black' if luminance > 0.5 else 'white'
 
         text_color = get_text_color(baseline_color)
-        #plt.title(f'Base Model: {baseline_value:.3f}', bbox={'facecolor': baseline_color, 'pad': 3, 'edgecolor': 'none'}, color=text_color, fontsize=12)
 
         if small:
             kwargs = {'x': 1.21, 'y': -0.26}
@@ -983,7 +1111,6 @@ def top_neuron_evaluation(model, bin_size=100, lr=None, gender_factor=None, key=
             plt.show()
 
     try:
-        raise FileNotFoundError()
         relevant_results = json.load(open(file, 'r'))
 
         # check if complete
@@ -997,7 +1124,7 @@ def top_neuron_evaluation(model, bin_size=100, lr=None, gender_factor=None, key=
         raise e
 
     try:
-        raise FileNotFoundError()
+        #raise FileNotFoundError()
         all_results = json.load(open(base_file, 'r'))
 
         # copy relevant results into relevant_results
@@ -1058,7 +1185,7 @@ def default_evaluation(model, large=True, plot=True, top_k=None, accuracy_functi
         lrs = default_evaluation_lrs
         #lrs = [-5e-2, -1e-2, -5e-3, -1e-3, -5e-4, -1e-4, -5e-5, -1e-5, 1e-5, 5e-5, 1e-4, 5e-4, 1e-3, 5e-3, 1e-2, 5e-2]
     else:
-        gender_factors = [1, 0, 1]
+        gender_factors = [-1, 0, 1]
         lrs = [1e-2, 1e-3, 1e-4, 1e-5]
 
     data = evaluate_bert_with_ae(model, gender_factors, lrs, thorough=large, top_k=top_k, accuracy_function=accuracy_function, part=part, top_k_part=top_k_part)
@@ -1128,7 +1255,7 @@ def evaluate_models():
     metrics = []
     for model_id in models:
         model = AutoModelForMaskedLM.from_pretrained(model_id)
-        tokenizer = AutoTokenizer.from_pretrained(model_id)
+        tokenizer = AutoTokenizerForLM.from_pretrained(model_id)
         result = evaluate_model(model, tokenizer, verbose=True)
         print(model_id)
         #print(json.dumps(result, indent=2))
@@ -1188,10 +1315,10 @@ def evaluate_gender_prediction(model_name, tokenizer=None, target=None, target_w
     assert target in {None, 'M', 'F'}
     tokenizer = tokenizer or model_name
     model = AutoModelForLM.from_pretrained(model_name)
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer)
+    tokenizer = AutoTokenizerForLM.from_pretrained(tokenizer)
     return evaluate_gender_prediction_by_model(model, tokenizer, target=target, target_words=target_words)
 
-def evaluate_gender_prediction_by_model(model, tokenizer, target=None, target_words=('he', 'she'), verbose=False):
+def evaluate_gender_prediction_by_model(model, tokenizer, target=None, target_words=('he', 'she'), verbose=True):
     model.eval()
     is_generative = tokenizer.cls_token is None
 
@@ -1206,22 +1333,39 @@ def evaluate_gender_prediction_by_model(model, tokenizer, target=None, target_wo
     if target_word_F.lower() in {'he', 'man'}:
         target_word_M, target_word_F = target_word_F, target_word_M
 
-    male_token_id = tokenizer(f' {target_word_M}', add_special_tokens=False)['input_ids'][0]
-    female_token_id = tokenizer(f' {target_word_F}', add_special_tokens=False)['input_ids'][0]
+    target_words_M = [target_word_M]
+    target_words_F = [target_word_F]
+
+    if is_generative:
+        # make the first character upper
+        target_words_M.append(target_word_M.capitalize())
+        target_words_F.append(target_word_F.capitalize())
+
+    if hasattr(tokenizer, 'tokenizer'):
+        raw_tokenizer = tokenizer.tokenizer
+    else:
+        raw_tokenizer = tokenizer
+
+    male_token_ids = [raw_tokenizer(f'{space}{target_word_M}', add_special_tokens=False)['input_ids'][0] for target_word_M in target_words_M for space in ['', ' ']]
+    female_token_ids = [raw_tokenizer(f'{space}{target_word_F}', add_special_tokens=False)['input_ids'][0] for target_word_F in target_words_F for space in ['', ' ']]
+
+    male_token_ids = list(set(male_token_ids))
+    female_token_ids = list(set(female_token_ids))
 
     results = []
 
     for split, split_names in names.groupby('split'):
-
         split_data = []
         genders = []
         names_list = []
 
         # Collect all the text and gender info for this split
         for _, (name, gender) in split_names[['name', 'gender']].iterrows():
-            text = f'Is {name} a "{target_word_1}" or a "{target_word_2}"? {name} is a'
-            if not is_generative:
-                text = f'{text} {tokenizer.mask_token}.'
+            if is_generative:
+                text = f'Classify the following name as either "{target_word_1}" or "{target_word_2}": {name}  \nAnswer:'
+                text = f'Classify the following name as either "man" or "woman". Respond with only one word — either "{target_word_1}" or "{target_word_2}". No explanation. \nName: {name}\nAnswer (respond with only one word - either {target_word_1} or {target_word_2}): "'
+            else:
+                text = f'Is {name} a "{target_word_1}" or a "{target_word_2}"? {name} is a {tokenizer.mask_token}.'
 
             split_data.append(text)
             genders.append(gender)
@@ -1236,9 +1380,14 @@ def evaluate_gender_prediction_by_model(model, tokenizer, target=None, target_wo
             outputs = model(**tokenized_text)
             logits = outputs.logits
 
+        is_instruction_model = 'instruct' in model.name_or_path.lower()
         if is_generative:
             # get the index of the last token before the padding starts
-            last_token_index = (tokenized_text['input_ids'] != tokenizer.pad_token_id).sum(dim=-1) - 1
+            last_token_index = (tokenized_text['input_ids'] != tokenizer.pad_token_id).sum(dim=-1)
+            if is_instruction_model:
+                last_token_index += 1
+            else:
+                last_token_index -= 1
             relevant_logits = logits[range(len(last_token_index)), last_token_index]
         else:
             # Get the index of the [MASK] token
@@ -1251,18 +1400,21 @@ def evaluate_gender_prediction_by_model(model, tokenizer, target=None, target_wo
         probabilities = torch.softmax(relevant_logits, dim=-1)
 
         # Extract male and female probabilities for each name in the batch
-        male_probs = probabilities[:, male_token_id]
-        female_probs = probabilities[:, female_token_id]
+        male_probs = probabilities[:, male_token_ids]
+        female_probs = probabilities[:, female_token_ids]
 
         top_k = 5
         # Get top k predictions for each masked token position
         top_k_probs, top_k_indices = torch.topk(probabilities, top_k, dim=-1)
 
         # Decode the top k token indices to their string representations
-        top_k_tokens = [[tokenizer.decode([i]) for i in indices] for indices in top_k_indices]
+        top_k_tokens = [[raw_tokenizer.decode([i]) for i in indices] for indices in top_k_indices]
 
         # Process the results for each item in the batch
-        for i, (name, gender, male_prob, female_prob, top_tokens, top_probs) in enumerate(zip(names_list, genders, male_probs, female_probs, top_k_tokens, top_k_probs)):
+        for i, (name, gender, male_probs, female_probs, top_tokens, top_probs) in enumerate(zip(names_list, genders, male_probs, female_probs, top_k_tokens, top_k_probs)):
+            male_prob = male_probs.sum()
+            female_prob = female_probs.sum()
+
             # Predicted gender based on the highest probability
             predicted_gender = "M" if male_prob > female_prob else "F"
             if target is None:
@@ -1282,70 +1434,76 @@ def evaluate_gender_prediction_by_model(model, tokenizer, target=None, target_wo
                 'correct': correct_prediction,
                 'male_prob': male_prob.item(),
                 'female_prob': female_prob.item(),
-                'split': split
+                'split': split,
+                'top_tokens': top_tokens,
             })
 
             if verbose:
                 print(f"Name: {name}")
-                print(
-                    f"Top {top_k} Predictions: {', '.join([f'{token} ({prob:.2f})' for token, prob in zip(top_tokens, top_probs)])}")
-                print(
-                    f"True Gender: {gender}, Predicted Gender: {predicted_gender}, Male Prob: {male_prob:.2f}, Female Prob: {female_prob:.2f}")
+                print(f"Top {top_k} Predictions: {', '.join([f'{token} ({prob:.2f})' for token, prob in zip(top_tokens, top_probs)])}")
+                print(f"True Gender: {gender}, Predicted Gender: {predicted_gender}, Male Prob: {male_prob:.2f}, Female Prob: {female_prob:.2f}")
                 print()
+                verbose = False
 
     # Return the results as a DataFrame
     df = pd.DataFrame(results)
 
     metrics = evaluate_gender_prediction_metrics(df)
 
-    return metrics
+    return metrics, df
 
 
 def evaluate_gender_prediction_for_models(*models, target_words=('man', 'woman')):
+    suffix = '_'.join(target_words)
     for base_model in models:
+        base_model_id = base_model.split('/')[-1]
         models = [
             base_model,
-            f'results/changed_models/{base_model}-N',
-            f'results/changed_models/{base_model}-M',
-            f'results/changed_models/{base_model}-F',
+            f'results/changed_models/{base_model_id}-N',
+            f'results/changed_models/{base_model_id}-M',
+            f'results/changed_models/{base_model_id}-F',
         ]
 
         results = []
         for model in models:
-            df = evaluate_gender_prediction(model, tokenizer=base_model, target_words=target_words)
+            print(f'Evaluating {model} with target words {target_words}')
+            df, df_raw = evaluate_gender_prediction(model, tokenizer=base_model, target_words=target_words)
             df['model'] = model
+            model_id = os.path.basename(model)
+            output_predictions = f'results/gender_prediction/{model_id}_{suffix}_predictions.csv'
+            df_raw.to_csv(output_predictions, index=False)
             results.append(df)
 
         df = pd.concat(results)
-        suffix = '_'.join(target_words)
-        output = f'results/gender_prediction/{base_model}_{suffix}.csv'
+        output = f'results/gender_prediction/{base_model_id}_{suffix}.csv'
         os.makedirs(os.path.dirname(output), exist_ok=True)
         df.to_csv(output, index=False)
 
+
+
 def evaluate_all_gender_predictions():
     evaluate_gender_prediction_for_models(
-        'roberta-large',
         'bert-base-cased',
         'bert-large-cased',
         'distilbert-base-cased',
-        target_words=('man', 'woman')
+        'roberta-large',
+        #'gpt2',
+        #'meta-llama/Llama-3.2-3B',
+        #'meta-llama/Llama-3.2-3B-Instruct',
+        target_words=('man', 'woman'),
     )
 
     evaluate_gender_prediction_for_models(
-        'roberta-large',
         'bert-base-cased',
         'bert-large-cased',
         'distilbert-base-cased',
-        target_words=('woman', 'man')
+        'roberta-large',
+        #'gpt2',
+        #'meta-llama/Llama-3.2-3B',
+        #'meta-llama/Llama-3.2-3B-Instruct',
+        target_words=('woman', 'man'),
     )
-
 
 
 if __name__ == '__main__':
-    evaluate_gender_prediction_for_models('gpt2')
-
-    model = AutoModelForMaskedLM.from_pretrained('roberta-large')
-    tokenizer = AutoTokenizer.from_pretrained('roberta-large')
-    results = evaluate_gender_bias_name_predictions(model, tokenizer)
-    print(results)
-    #evaluate_all_gender_predictions()
+    evaluate_all_gender_predictions()

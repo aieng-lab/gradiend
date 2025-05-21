@@ -2,6 +2,7 @@ import json
 import os
 
 import numpy as np
+import torch
 from transformers import AutoModel, AutoModelForMaskedLM
 
 from gradiend.evaluation.analyze_decoder import default_evaluation
@@ -60,6 +61,11 @@ def select(model, max_size=None, print=True, force=False, plot=True, accuracy_fu
                 ae.tokenizer.save_pretrained(key_output)
                 py_print(f'Saved {key} model to {key_output} with gender factor {gender_factor} and learning rate {lr}')
 
+                del changed_model
+                # release memory
+                torch.cuda.empty_cache()
+
+
         json_compatible_result = convert_tuple_keys_to_strings(result)
         with open(output_result, 'w') as f:
             json.dump(json_compatible_result, f, indent=2)
@@ -89,10 +95,12 @@ def select(model, max_size=None, print=True, force=False, plot=True, accuracy_fu
                 # check if saved model is the same
                 saved_model = AutoModelForLM.from_pretrained(output_path)
                 # todo adjust for generative models!
-                if not np.allclose(saved_model.base_model.embeddings.position_embeddings.weight.cpu().detach(), changed_model.base_model.embeddings.position_embeddings.weight.cpu().detach()):
-                    py_print(f'Error: Existing Model {output_path} was not the same as the current model')
-                    changed_model.save_pretrained(output_path)
-
+                try:
+                    if not np.allclose(saved_model.base_model.embeddings.position_embeddings.weight.cpu().detach(), changed_model.base_model.embeddings.position_embeddings.weight.cpu().detach()):
+                        py_print(f'Error: Existing Model {output_path} was not the same as the current model')
+                        changed_model.save_pretrained(output_path)
+                except AttributeError:
+                    py_print(f'WARNING: Model {output_path} does not have position embeddings, skipping check')
 
     if print:
         py_print(f'Evaluation for model {model}')
@@ -114,9 +122,4 @@ def select(model, max_size=None, print=True, force=False, plot=True, accuracy_fu
 
 
 if __name__ == '__main__':
-    models = ['bert-base-cased', 'bert-large-cased', 'distilbert-base-cased', 'roberta-large', 'gpt2']
-
-    for model in models:
-        print(f'Analyzing model {model}')
-        select(f'results/models/{model}', force=False)
-        print(f'Done analyzing model {model}')
+    pass

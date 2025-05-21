@@ -12,7 +12,7 @@ default_accuracy_function = lambda x: x #np.power(x, 10)
 normalization = lambda x: x #np.power(x, 0.1)
 
 
-def init_matplotlib(font_path="/home/drechsel/times.ttf", use_tex=False):
+def init_matplotlib(font_path="/root/times.ttf", use_tex=False):
     # Check if the font is already in the font manager
     for font in fm.fontManager.ttflist:
         if font.fname == font_path:
@@ -44,13 +44,15 @@ def init_matplotlib(font_path="/home/drechsel/times.ttf", use_tex=False):
 \newcommand{\namexacttest}{\ensuremath{\textsc{NAMExact}_\text{test}}}
 \newcommand{\namextend}{\textsc{NAMExtend}}
 
-\newcommand{\gradae}{\textsc{Gradiend}}
+\newcommand{\gradiend}{\textsc{Gradiend}}
 
 \newcommand{\bertbase}{$\text{BERT}_\text{base}$}
 \newcommand{\bertlarge}{$\text{BERT}_\text{large}$}
 \newcommand{\roberta}{RoBERTa}
 \newcommand{\distilbert}{DistilBERT}
 \newcommand{\gpttwo}{GPT-2}
+\newcommand{\llama}{LLaMA}
+\newcommand{\llamai}{\llama-Instruct}
 
 \newcommand{\dropout}{\textsc{Dropout}}
 \newcommand{\selfdebias}{\textsc{SelfDebias}}
@@ -84,9 +86,9 @@ def init_matplotlib(font_path="/home/drechsel/times.ttf", use_tex=False):
 \newcommand{\fpi}{FPI}
 \newcommand{\mpi}{MPI}
 \newcommand{\bpi}{BPI}
-\newcommand{\gradiendfpi}{$\text{\gradae}_\text{\fpi}$}
-\newcommand{\gradiendmpi}{$\text{\gradae}_\text{\mpi}$}
-\newcommand{\gradiendbpi}{$\text{\gradae}_\text{\bpi}$}
+\newcommand{\gradiendfpi}{$\text{\gradiend}_\text{\fpi}$}
+\newcommand{\gradiendmpi}{$\text{\gradiend}_\text{\mpi}$}
+\newcommand{\gradiendbpi}{$\text{\gradiend}_\text{\bpi}$}
         """
 
 
@@ -112,6 +114,32 @@ def get_total_memory_usage(data):
     # Add other iterable types if needed
     return total_size
 
+def recursive_gpu_size(obj, seen=None):
+    if seen is None:
+        seen = set()
+    size = 0
+    if id(obj) in seen:
+        return 0
+    seen.add(id(obj))
+
+    if torch.is_tensor(obj):
+        if obj.is_cuda:
+            size += obj.element_size() * obj.nelement()
+    elif isinstance(obj, dict):
+        for v in obj.values():
+            size += recursive_gpu_size(v, seen)
+        for k in obj.keys():
+            size += recursive_gpu_size(k, seen)
+    elif hasattr(obj, '__dict__'):
+        size += recursive_gpu_size(vars(obj), seen)
+    elif hasattr(obj, '__iter__') and not isinstance(obj, (str, bytes)):
+        for i in obj:
+            size += recursive_gpu_size(i, seen)
+
+    return size
+
+def get_gpu_usage_gb(obj):
+    return recursive_gpu_size(obj) / (1024 ** 3)
 
 
 def sanitize_filename(filename):
@@ -212,8 +240,9 @@ def evaluate_he_she(model, tokenizer, masked_text):
     probabilities = torch.softmax(mask_token_logits, dim=-1)
 
     # Get the token IDs for "he" and "she"
-    he_token_id = tokenizer.convert_tokens_to_ids("he")
-    she_token_id = tokenizer.convert_tokens_to_ids("she")
+    raw_tokenizer = tokenizer.tokenizer if hasattr(tokenizer, 'tokenizer') else tokenizer
+    he_token_id = raw_tokenizer.convert_tokens_to_ids("he")
+    she_token_id = raw_tokenizer.convert_tokens_to_ids("she")
 
     # Get the probabilities for "he" and "she"
     shape = probabilities.shape
@@ -255,6 +284,22 @@ def evaluate_he_she(model, tokenizer, masked_text):
 import fnmatch
 
 
+def list_depth_1_entries(folder_path):
+    entries = []
+
+    # Top-level files and folders
+    for entry in os.listdir(folder_path):
+        full_path = os.path.join(folder_path, entry)
+        if os.path.isfile(full_path):
+            entries.append(full_path)
+        elif os.path.isdir(full_path):
+            # Add files in subfolder (depth 1)
+            for sub_entry in os.listdir(full_path):
+                sub_path = os.path.join(full_path, sub_entry)
+                if os.path.isfile(sub_path):
+                    entries.append(sub_path)
+
+    return entries
 
 def get_files_and_folders_with_prefix(folder_path_prefix, suffix='', only_folder=False, only_files=False, **kwargs):
     assert not (only_folder and only_files), "only_folder and only_files cannot both be True"
@@ -263,25 +308,22 @@ def get_files_and_folders_with_prefix(folder_path_prefix, suffix='', only_folder
     folder_path, prefix = os.path.split(folder_path_prefix)
 
     # Get a list of all entries (files and folders) in the directory
-    all_entries = os.listdir(folder_path)
+    all_entries = list_depth_1_entries(folder_path)
 
     # Filter the list of entries to include only those that start with the prefix and suffix
     matching_entries = fnmatch.filter(all_entries, f"{prefix}*{suffix}")
 
-    # Create the full path for each matching entry
-    matching_entries_full_path = [os.path.join(folder_path, entry) for entry in matching_entries]
-
     # Filter entries based on the only_folder flag
     if only_folder:
-        matching_entries_full_path = [entry for entry in matching_entries_full_path if os.path.isdir(entry)]
+        matching_entries = [entry for entry in matching_entries if os.path.isdir(entry)]
     elif only_files:
-        matching_entries_full_path = [entry for entry in matching_entries_full_path if os.path.isfile(entry)]
+        matching_entries = [entry for entry in matching_entries if os.path.isfile(entry)]
 
     for key, value in kwargs.items():
         key = f'{key[:3]}_{value}'
-        matching_entries_full_path = [entry for entry in matching_entries_full_path if key in entry]
+        matching_entries = [entry for entry in matching_entries if key in entry]
 
-    return matching_entries_full_path
+    return matching_entries
 
 import hashlib
 import torch

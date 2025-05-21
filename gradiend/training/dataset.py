@@ -12,7 +12,6 @@ from gradiend.data import read_geneutral, get_gender_words, read_namexact, read_
 from gradiend.util import hash_it
 
 
-
 class TrainingDataset(Dataset):
 
     """Initializes the GRADIEND training dataset.
@@ -44,7 +43,11 @@ class TrainingDataset(Dataset):
         self.neutral_data = neutral_data if neutral_data_prop > 0 else None
         self.neutral_data_prop = neutral_data_prop
         self.is_generative = is_generative
-        self.gender_pronoun_tokens = {(gender, upper): self.tokenizer.encode(pronoun[0].upper() + pronoun[1:] if upper else pronoun, add_special_tokens=False)[0] for gender, pronoun in [('M', 'he'), ('F', 'she')] for upper in [True, False]}
+        self.is_instruct_model = 'instruct' in self.tokenizer.name_or_path.lower()
+        if self.is_instruct_model:
+            self.gender_pronoun_tokens = {(gender, upper): self.tokenizer.encode(pronoun[0].upper() + pronoun[1:] if upper else pronoun, add_special_tokens=False)[0] for gender, pronoun in [('M', ' he'), ('F', ' she')] for upper in [True, False]}
+        else:
+            self.gender_pronoun_tokens = {(gender, upper): self.tokenizer.encode(pronoun[0].upper() + pronoun[1:] if upper else pronoun, add_special_tokens=False)[0] for gender, pronoun in [('M', 'he'), ('F', 'she')] for upper in [True, False]}
         self._analyze_name_tokens()
 
         gender_words = gender_words or []
@@ -221,7 +224,6 @@ class TrainingDataset(Dataset):
             # this dataset is used for general knowledge data (not gender-specific)
             text = entry['text']
 
-
             item = self.tokenize(text)
             masked_input, labels = self.mask_tokens(item['input_ids'])
             item['input_ids'] = masked_input
@@ -229,16 +231,19 @@ class TrainingDataset(Dataset):
             inv_item = item
             label = ''
 
-        # todo check for caching?
-        # this might speed up the training if the input gradients are cached
-        # if we can recognize here that this entry is already cached (as input gradients), we can save the computation and return only the cache id
-        # however, this is not straightforward possible since the caching depends on the base model (which is unknown to the Training Dataset)
-
         return {True: item, False: inv_item, 'text': text, 'label': label}
 
 
 
-def create_training_dataset(tokenizer, max_size=None, batch_size=None, neutral_data=False, split=None, neutral_data_prop=0.5, is_generative=False):
+def create_training_dataset(tokenizer,
+                            max_size=None,
+                            batch_size=None,
+                            neutral_data=False,
+                            split=None,
+                            neutral_data_prop=0.5,
+                            is_generative=False,
+                            dtype=torch.float32,
+                            ):
     # Load dataset
     names = read_namexact(split=split)
     dataset = read_genter(split=split)
@@ -250,7 +255,17 @@ def create_training_dataset(tokenizer, max_size=None, batch_size=None, neutral_d
     gender_words = get_gender_words()
 
     # Create custom dataset
-    return TrainingDataset(dataset, names, tokenizer, batch_size=batch_size, neutral_data=neutral_data, gender_words=gender_words, neutral_data_prop=neutral_data_prop, is_generative=is_generative)
+    max_token_length = 128 if 'llama' in tokenizer.name_or_path.lower() else 48
+    return TrainingDataset(dataset,
+                           names,
+                           tokenizer,
+                           batch_size=batch_size,
+                           neutral_data=neutral_data,
+                           gender_words=gender_words,
+                           neutral_data_prop=neutral_data_prop,
+                           is_generative=is_generative,
+                           max_token_length=max_token_length
+                           )
 
 
 def create_eval_dataset(gradiend, max_size=None, split='val', source='gradient', save_layer_files=False, is_generative=False):
@@ -291,8 +306,9 @@ def create_eval_dataset(gradiend, max_size=None, split='val', source='gradient',
     if not os.path.exists(cache_dir):
         os.makedirs(cache_dir)
 
+    is_instruction_model = gradiend.is_instruction_model
+
     text_iterator = tqdm(filled_texts, desc=f'Loading cached evaluation data', leave=False)
-    layers_hash = hash_it(gradiend.gradiend.layers)
     for i, filled_text in enumerate(text_iterator):
         text_hash = hash_it(filled_text)
         def create_layer_file(layer):
@@ -301,12 +317,6 @@ def create_eval_dataset(gradiend, max_size=None, split='val', source='gradient',
         cached_tensor_file = f'{cache_dir}/tensor_{text_hash}.pt'
         if os.path.exists(cached_tensor_file):
             gradient = torch.load(cached_tensor_file).half().cpu()
-            #if isinstance(gradiend.gradiend.layers, dict):
-            #    mask = torch.concat(
-            #        [gradiend.gradiend.layers[k].flatten() for k in gradients[filled_text].keys()], dim=0
-            #    ).cpu()
-            #    gradient = gradient[mask]
-
             gradients[filled_text] = gradient
             continue
 
@@ -320,6 +330,9 @@ def create_eval_dataset(gradiend, max_size=None, split='val', source='gradient',
             if source == 'diff':
                 label_factual = 'he' if label == 'M' else 'she'
                 label_counter_factual = 'she' if label == 'M' else 'he'
+                if is_instruction_model:
+                    label_factual = f' {label_factual}'
+                    label_counter_factual = f' {label_counter_factual}'
                 inputs_factual = gradiend.create_inputs(filled_text, label_factual)
                 grads_factual = gradiend.forward_pass(inputs_factual, return_dict=True)
                 inputs_counter_factual = gradiend.create_inputs(filled_text, label_counter_factual)

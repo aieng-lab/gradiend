@@ -43,7 +43,11 @@ table = [[
 for base_model in models:
     model = f'results/models/{base_model}'
 
-    decoder_metrics = default_evaluation(model, accuracy_function=lambda x: x, plot=True)
+    try:
+        decoder_metrics = default_evaluation(model, plot=True)
+    except OSError:
+        print(f'Skipping model {model} since file does not exist')
+        continue
 
     # add base entry
     row = [models[base_model], '0.0', '0.0']

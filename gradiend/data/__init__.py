@@ -48,7 +48,8 @@ def get_gender_words(tokenizer=None):
     gender_words += names['name'].str.lower().unique().tolist()
     gender_words += gender_pronouns
     if tokenizer:
-        gender_words = list(set(token for word in gender_words for token in tokenizer(word, add_special_tokens=False)['input_ids']))
+        raw_tokenizer = tokenizer.tokenizer if hasattr(tokenizer, 'tokenizer') else tokenizer
+        gender_words = list(set(token for word in gender_words for token in raw_tokenizer(word, add_special_tokens=False)['input_ids']))
 
     return gender_words
 

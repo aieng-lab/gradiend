@@ -18,6 +18,7 @@ import pandas as pd
 from gradiend.data import read_bookcorpus, read_gender_data, gender_pronouns, read_processed_bookscorpus, read_namexact, \
     read_namextend
 from gradiend.data.split import split
+from gradiend.model import AutoTokenizerForLM
 from gradiend.util import evaluate_he_she
 
 
@@ -273,7 +274,7 @@ def filter_gender_text():
     #filtered_dataset = dataset.filter(lambda row: row['text'] in text_set)
 
     #dataset = Dataset.from_pandas(read_wikipedia_gender_data())
-    #dataset.to_csv('data/wiki.csv', index=False)
+    #dataset.to_csv('data/wiki.csv', index=False)n
 
     # note that wikipedia data seems to be prune to more errors than the bookscorpus dataset, as typically last names
     # are used to write about persons, so no gender information is available
@@ -342,7 +343,7 @@ def filter_by_model_confidence(model='bert-base-uncased', threshold=1.0, df=None
     else:
         assert df_name is not None, 'If a custom dataframe is provided, the name of the dataframe must be provided as well'
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    tokenizer = AutoTokenizer.from_pretrained(model)
+    tokenizer = AutoTokenizerForLM.from_pretrained(model)
     mask_token = tokenizer.mask_token
     model = AutoModelForMaskedLM.from_pretrained(model).to(device)
 

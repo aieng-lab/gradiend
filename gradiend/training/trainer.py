@@ -1,5 +1,4 @@
 import gc
-import json
 import random
 import shutil
 
@@ -9,7 +8,6 @@ from matplotlib import pyplot as plt
 import time
 import torch.nn as nn
 from scipy.stats import pearsonr
-from torch.utils.tensorboard import SummaryWriter
 
 from tqdm import tqdm
 from torch.utils.data import DataLoader
@@ -46,99 +44,24 @@ class CombinedLoss(nn.Module):
     def __str__(self):
         return f'CombinedLoss(alpha={self.alpha})'
 
+class PolarFeatureLoss(nn.Module):
+    def __init__(self, alpha=0.001):
+        super(PolarFeatureLoss, self).__init__()
+        self.mse = nn.MSELoss()
+        self.alpha = alpha
 
-
-
-def apply_negative_sampling(model_outputs, grad, inv_grad, target_tensor, negative_sample_ratio=0.9):
-    """
-    Masks the least relevant weights in the model outputs and target tensor based on provided scores.
-
-    Args:
-    - model_outputs (dict): Dictionary of parameter names to their values (tensors).
-    - grad (dict): Dictionary of parameter names to their gradients.
-    - inv_grad (dict): Dictionary of parameter names to their inverted gradients.
-    - target_tensor (dict): Dictionary of parameter names to their target values.
-    - negative_sample_ratio (float): Ratio of least relevant weights to be masked.
-
-    Returns:
-    - masked_model_outputs (dict): Dictionary of parameter names to their masked values.
-    - masked_target_tensor (dict): Dictionary of parameter names to their masked target values.
-    """
-
-    layer = 'layer'
-    if not isinstance(model_outputs, dict):
-        model_outputs = {layer: model_outputs}
-        grad = {layer: grad}
-        inv_grad = {layer: inv_grad}
-        target_tensor = {layer: target_tensor}
-
-    all_scores = []
-    all_values = []
-    all_targets = []
-    shapes = {}
-    param_names = []
-
-    # Flatten all scores, values, and targets, and store shapes for reshaping later
-    for param_name, param_values in model_outputs.items():
-        scores = torch.max((grad[param_name] - inv_grad[param_name]).abs(), grad[param_name].abs()).view(-1)
-        values = param_values.view(-1)
-        targets = target_tensor[param_name].view(-1)
-
-        shapes[param_name] = param_values.shape
-        param_names.append(param_name)
-        all_scores.append(scores)
-        all_values.append(values)
-        all_targets.append(targets)
-
-    # Concatenate all scores, values, and targets into single tensors
-    all_scores = torch.cat(all_scores)
-    all_values = torch.cat(all_values)
-    all_targets = torch.cat(all_targets)
-
-    # Determine the number of weights to mask
-    num_weights = all_scores.numel()
-    num_samples = int(negative_sample_ratio * num_weights)
-
-    # Get the indices of the least relevant weights
-    _, indices = torch.topk(all_scores, k=num_samples, largest=False)
-
-    # Create a mask with the same shape as all_values and all_targets
-    mask = torch.ones_like(all_values)
-    mask[indices] = 0
-
-    # Apply the mask to the values and targets
-    masked_all_values = all_values * mask
-    masked_all_targets = all_targets * mask
-
-    # Initialize the result dictionaries
-    masked_model_outputs = {}
-    masked_target_tensor = {}
-    start_idx = 0
-
-    # Reshape the masked values and targets back to their original shapes
-    for param_name in param_names:
-        shape = shapes[param_name]
-        num_elements = torch.prod(torch.tensor(shape)).item()
-
-        masked_param_values = masked_all_values[start_idx:start_idx + num_elements].view(shape)
-        masked_param_targets = masked_all_targets[start_idx:start_idx + num_elements].view(shape)
-
-        masked_model_outputs[param_name] = masked_param_values
-        masked_target_tensor[param_name] = masked_param_targets
-
-        start_idx += num_elements
-
-    if layer in masked_model_outputs:
-        return masked_model_outputs[layer], masked_target_tensor[layer]
-
-    return masked_model_outputs, masked_target_tensor
-
+    def forward(self, output, target, encoded_value):
+        mse_loss = self.mse(output, target)
+        reg_term = 1.0 - torch.abs(encoded_value)
+        loss = mse_loss + self.alpha * reg_term * mse_loss
+        print(f'MSE Loss: {mse_loss.item()}, Regularization Term: {reg_term.item()}, Encoded Value: {encoded_value.item()}')
+        return loss
 
 
 """
 Function: train
 
-Trains a BERT-based autoencoder model using gradient-based input representations with optional negative sampling, evaluation, and logging functionalities.
+Trains a BERT-based autoencoder model using gradient-based input representations with evaluation, and logging functionalities.
 
 Parameters:
 
@@ -172,7 +95,6 @@ Returns:
 output (str): Path where the trained model is saved.
 """
 def train(model_with_gradiend,
-          negative_sampling=False,
           output='results/models/gradiend',
           checkpoints=False,
           max_iterations=None,
@@ -195,7 +117,17 @@ def train(model_with_gradiend,
           eps=1e-8,
           normalized=True,
           use_cached_gradients=False,
+          torch_dtype=torch.float32,
           ):
+
+    print('Training GRADIEND model')
+    print('Output:', output)
+    print('Batch size:', batch_size)
+    print('Learning rate:', lr)
+
+    if model_with_gradiend.base_model.dtype != torch_dtype:
+        model_with_gradiend = model_with_gradiend.to(dtype=torch_dtype)
+
     # Load pre-trained BERT model and tokenizer
     tokenizer = model_with_gradiend.tokenizer
     is_generative = model_with_gradiend.is_generative
@@ -205,8 +137,15 @@ def train(model_with_gradiend,
     if batch_size_data is True:
         batch_size_data = batch_size
 
-    # todo generative?
-    dataset = create_training_dataset(tokenizer, max_size=None, split='train', neutral_data=neutral_data, batch_size=batch_size_data, neutral_data_prop=neutral_data_prop, is_generative=is_generative)
+    dataset = create_training_dataset(tokenizer,
+                                      max_size=None,
+                                      split='train',
+                                      neutral_data=neutral_data,
+                                      batch_size=batch_size_data,
+                                      neutral_data_prop=neutral_data_prop,
+                                      is_generative=is_generative,
+                                      dtype=torch_dtype,
+                                      )
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
 
     if do_eval:
@@ -218,7 +157,7 @@ def train(model_with_gradiend,
             gradients = data['gradients']
             labels = data['labels']
 
-            device = model_with_gradiend.device
+            device = model_with_gradiend.gradiend.device_encoder
             encoded = []
 
             grads = list(gradients.values())
@@ -226,7 +165,7 @@ def train(model_with_gradiend,
             if eval_batch_size > 1:
                 for i in range(0, len(grads), eval_batch_size):
                     batch = grads[i:min(i + eval_batch_size, len(grads))]
-                    batch_on_device = [g.to(device).float() for g in batch]
+                    batch_on_device = [g.to(device, dtype=torch_dtype) for g in batch]
                     encoded_values = model_with_gradiend.gradiend.encoder(torch.stack(batch_on_device))
                     encoded.extend(encoded_values.view(-1).tolist())
                     # free memory on device
@@ -234,7 +173,7 @@ def train(model_with_gradiend,
                     torch.cuda.empty_cache()  # if using GPU, it helps clear memory
             else:
                 for grads in gradients.values():
-                    encoded_value = model_with_gradiend.gradiend.encoder(grads.to(device))
+                    encoded_value = model_with_gradiend.gradiend.encoder(grads.to(device, dtype=torch_dtype))
                     encoded.append(encoded_value.item())
 
             score = -pearsonr(list(labels.values()), encoded).correlation
@@ -246,6 +185,7 @@ def train(model_with_gradiend,
             mean_female_encoded_value = np.mean(female_encoded_values)
 
             if normalized and mean_female_encoded_value < -0.5 and mean_male_encoded_value > 0.5:
+                print(f'Invert encoding since female encoded value is {mean_female_encoded_value}<-0.5 and male encoded value is {mean_male_encoded_value}>0.5')
                 model_with_gradiend.invert_encoding()
                 score = -score
                 mean_male_encoded_value = -mean_male_encoded_value
@@ -256,6 +196,8 @@ def train(model_with_gradiend,
 
             end = time.time()
             print(f'Evaluated in {(end - start):.2f}s, mean male {mean_male_encoded_value:.6f}, mean female {mean_female_encoded_value:.6f}')
+            print('male encoded values', male_encoded_values[:10])
+            print('female encoded values', female_encoded_values[:10])
             return score, mean_male_encoded_value, mean_female_encoded_value
 
 
@@ -275,15 +217,18 @@ def train(model_with_gradiend,
     start_time = time.time()
     global_step = 0
     last_losses = []
+    last_losses2 = []
     scores = []
     losses = []
+    losses2 = []
     encoder_changes = []
     decoder_changes = []
     encoder_norms = []
     decoder_norms = []
     mean_males = []
     mean_females = []
-    max_losses = 1000
+    max_losses = 100
+    max_losses2 = 1000 # keep track of a 2nd moving average for compatibility reasons
     convergence = None
     best_score_checkpoint = None
     score = 0.0
@@ -320,16 +265,16 @@ def train(model_with_gradiend,
                 cache_file = f'{cache_dir}/{hash}.pt'
 
             if use_cached_gradients and os.path.exists(cache_file):
-                gradients, inv_gradients = torch.load(cache_file)
+                factual_gradients, counterfactual_gradients = torch.load(cache_file)
                 # todo actually save gradients!
 
             else:
 
-                inputs = batch[True]
-                inv_inputs = batch[False]
+                factual_inputs = batch[True]
+                counterfactual_inputs = batch[False]
 
-                gradients = None
-                inv_gradients = None
+                factual_gradients = None
+                counterfactual_gradients = None
 
                 gradients_keywords = {'gradient', 'diff'}
                 inv_gradients_keywords = {'inv_gradient', 'diff'}
@@ -338,51 +283,67 @@ def train(model_with_gradiend,
                 target = target.strip()
 
                 if source in gradients_keywords or target in gradients_keywords:
-                    gradients = model_with_gradiend.forward_pass(inputs)
+                    factual_gradients = model_with_gradiend.forward_pass(factual_inputs)
 
                 if source in inv_gradients_keywords or target in inv_gradients_keywords:
-                    inv_gradients = model_with_gradiend.forward_pass(inv_inputs)
+                    counterfactual_gradients = model_with_gradiend.forward_pass(counterfactual_inputs)
+
+                del factual_inputs
+                del counterfactual_inputs
 
             if source == 'gradient':
-                source_tensor = gradients
+                source_tensor = factual_gradients
             elif source == 'diff':
-                source_tensor = gradients - inv_gradients
+                source_tensor = factual_gradients - counterfactual_gradients
             elif source == 'inv_gradient':
-                source_tensor = inv_gradients
+                source_tensor = counterfactual_gradients
             else:
                 raise ValueError(f'Unknown source: {source}')
 
+            target_tensor = factual_gradients
             if target == 'inv_gradient':
-                target_tensor = inv_gradients
+                target_tensor = counterfactual_gradients
             elif target == 'diff':
-                target_tensor = gradients - inv_gradients
+                target_tensor -= counterfactual_gradients
             elif target == 'gradient':
-                target_tensor = gradients
+                break # target_tensor is already set
             else:
                 raise ValueError(f'Unknown target: {target}')
             training_data_prep_time += time.time() - data_prep_start
 
 
+            del factual_gradients
+            del counterfactual_gradients
+
             ######## Gradiend Training ########
             gradiend_start = time.time()
 
             # Forward pass through autoencoder
-            outputs_ae = model_with_gradiend.gradiend(source_tensor)
+            if source_tensor.device != model_with_gradiend.gradiend.device_encoder:
+                source_tensor = source_tensor.to(model_with_gradiend.gradiend.device_encoder)
 
-            # mask some less relevant neurons
-            if negative_sampling:
-                outputs_ae, target_tensor = apply_negative_sampling(outputs_ae, gradients, inv_gradients, target_tensor)
+            outputs_ae, encoded_value = model_with_gradiend.gradiend(source_tensor, return_encoded=True)
+            del source_tensor
 
             # calculate loss
-            loss_ae = criterion_ae(outputs_ae, target_tensor)
+            if target_tensor.device != outputs_ae.device:
+                target_tensor = target_tensor.to(outputs_ae.device)
 
-            del gradients
-            del inv_gradients
+            # release memory
+            torch.cuda.empty_cache()
+            gc.collect()
+
+
+            if isinstance(criterion_ae, PolarFeatureLoss):
+                loss_ae = criterion_ae(outputs_ae, target_tensor, encoded_value)
+            else:
+                loss_ae = criterion_ae(outputs_ae, target_tensor)
             del target_tensor
-            del source_tensor
 
             optimizer_ae.zero_grad()
             loss_ae.backward()
+            #gc.collect()  # Run Python garbage collection
+            #torch.cuda.empty_cache()  # Release unused memory back to CUDA driver
             optimizer_ae.step()
 
             loss_ae = loss_ae.item()
@@ -391,8 +352,12 @@ def train(model_with_gradiend,
             if len(last_losses) < max_losses:
                 last_losses.append(loss_ae)
             else:
-                mean_loss = sum(last_losses) / len(last_losses)
                 last_losses = last_losses[1:] + [loss_ae]
+
+            if len(last_losses2) < max_losses2:
+                last_losses2.append(loss_ae)
+            else:
+                last_losses2 = last_losses2[1:] + [loss_ae]
 
             if max_iterations and global_step >= max_iterations:
                 convergence = f'max iterations ({max_iterations}) reached'
@@ -412,6 +377,7 @@ def train(model_with_gradiend,
             if ((i+1) % n_loss_report == 0 or  i == 0) or last_iteration:
                 # validate on small validation set
                 mean_loss = sum(last_losses) / len(last_losses)
+                mean_loss2 = sum(last_losses2) / len(last_losses2)
                 encoder_norm = model_with_gradiend.gradiend.encoder_norm
                 decoder_norm = model_with_gradiend.gradiend.decoder_norm
                 avg_grad_norm = model_with_gradiend.gradiend.avg_gradient_norm
@@ -425,6 +391,7 @@ def train(model_with_gradiend,
 
                 print(output_str)
                 losses.append(mean_loss)
+                losses2.append(mean_loss2)
                 encoder_norms.append(encoder_norm)
                 decoder_norms.append(decoder_norm)
 
@@ -443,7 +410,6 @@ def train(model_with_gradiend,
                     }
                     # save checkpoint
                     training_information = {
-                        'negative_sampling': negative_sampling,
                         'max_iterations': max_iterations,
                         'convergence': convergence,
                         'batch_size': batch_size,
@@ -458,6 +424,7 @@ def train(model_with_gradiend,
                         'mean_males': mean_males,
                         'mean_females': mean_females,
                         'losses': losses,
+                        'losses_1000': losses2,
                         'encoder_changes': encoder_changes,
                         'decoder_changes': decoder_changes,
                         'encoder_norms': encoder_norms,
@@ -495,7 +462,6 @@ def train(model_with_gradiend,
                     print('Saved intermediate result')
 
         training_information = {
-            'negative_sampling': negative_sampling,
             'max_iterations': max_iterations,
             'convergence': convergence,
             'batch_size': batch_size,
@@ -510,6 +476,7 @@ def train(model_with_gradiend,
             'mean_males': mean_males,
             'mean_females': mean_females,
             'losses': losses,
+            'losses_1000': losses2,
             'encoder_changes': encoder_changes,
             'decoder_changes': decoder_changes,
             'encoder_norms': encoder_norms,
@@ -534,9 +501,12 @@ def train(model_with_gradiend,
         }
 
         model_with_gradiend.gradiend.save_pretrained(output, training=training_information)
-
         print('Saved the auto encoder model as', output)
         print('Best score:', best_score_checkpoint)
+        if epochs > 1:
+            output_epoch = f'{output}_epoch_{epoch + 1}'
+            model_with_gradiend.save_pretrained(output_epoch, training=training_information)
+
 
         try:
             import humanize
@@ -544,7 +514,7 @@ def train(model_with_gradiend,
 
             def humanize_time(seconds):
                 return humanize.naturaldelta(datetime.timedelta(seconds=seconds))
-
+            print(f'Epoch {epoch + 1}/{epochs} finished')
             print('Total Training time:', humanize_time(training_information['total_training_time']))
             print('Training data preparation time:', humanize_time(training_information['training_data_prep_time']))
             print('Training Evaluation time:', humanize_time(training_information['eval_time']))
@@ -577,12 +547,13 @@ def train(model_with_gradiend,
     print('Saved the auto encoder model as', output)
     return output
 
-def create_bert_with_ae(model, layers=None, activation='tanh', activation_decoder=None, bias_decoder=True, grad_iterations=1, decoder_factor=1.0, seed=0, **kwargs):
+def create_bert_with_ae(model, layers=None, activation='tanh', activation_decoder=None, bias_decoder=True, grad_iterations=1, decoder_factor=1.0, seed=0, torch_dtype=torch.float32, **kwargs):
     torch.manual_seed(seed)
     random.seed(seed)
     np.random.seed(seed)
 
-    return ModelWithGradiend.from_pretrained(model, layers, activation=activation, activation_decoder=activation_decoder, bias_decoder=bias_decoder, grad_iterations=grad_iterations, decoder_factor=decoder_factor), kwargs
+    kwargs['torch_dtype'] = torch_dtype
+    return ModelWithGradiend.from_pretrained(model, layers, activation=activation, activation_decoder=activation_decoder, bias_decoder=bias_decoder, grad_iterations=grad_iterations, decoder_factor=decoder_factor, torch_dtype=torch_dtype), kwargs
 
 def train_single_layer_gradiend(model, layer='base_model.encoder.layer.10.output.dense.weight', **kwargs):
     bert_with_ae, kwargs = create_bert_with_ae(model, [layer], **kwargs)
@@ -592,14 +563,14 @@ def train_multiple_layers_gradiend(model, layers, **kwargs):
     bert_with_ae, kwargs = create_bert_with_ae(model, layers, **kwargs)
     return train(bert_with_ae, **kwargs)
 
-def train_all_layers_gradiend(model='bert-base-uncased', **kwargs):
+def train_all_layers_gradiend(model='bert-base-cased', **kwargs):
     bert_with_ae, kwargs = create_bert_with_ae(model, **kwargs)
     return train(bert_with_ae, **kwargs)
 
 
 
 if __name__ == '__main__':
-    train_all_layers_gradiend('bert-base-uncased',
+    train_all_layers_gradiend('bert-base-cased',
                               output='results/models/gradiend',
                               checkpoints=False,
                               max_iterations=1000000,

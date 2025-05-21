@@ -65,10 +65,6 @@ if __name__ == '__main__':
         'distilbert-base-cased',
         'roberta-large',
         'gpt2',
-        #'bert-base-cased-v_0.01',
-        #'bert-large-cased-v_0.01',
-        #'distilbert-base-cased-v_0.01',
-        #'bert-base-cased-v_1e-05_decoder',
-        #'bert-large-cased-v_1e-07_decoder-bias',
-        #'distilbert-base-cased-v_1e-07_decoder-bias',
+        'Llama-3.2-3B',
+        'Llama-3.2-3B-Instruct',
     )

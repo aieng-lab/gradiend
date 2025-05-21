@@ -6,6 +6,28 @@
 This repository contains the official source code for the training and evaluation of [GRADIEND: Monosemantic Feature Learning within Neural Networks Applied to Gender Debiasing of Transformer Models](https://arxiv.org/abs/2502.01406).
 Further evaluations of this study can be reproduced using our [expanded version of bias-bench](https://github.com/aieng-lab/bias-bench).
 
+## Quick Links
+- [GRADIEND Paper](https://arxiv.org/abs/2502.01406)
+- GRADIEND Training Datasets:
+  - [GENTER](https://huggingface.co/datasets/aieng-lab/genter)
+  - [GENEUTRAL](https://huggingface.co/datasets/aieng-lab/geneutral)
+  - [GENTYPES](https://huggingface.co/datasets/aieng-lab/gentypes)
+  - [NAMEXACT](https://huggingface.co/datasets/aieng-lab/namexact)
+  - [NAMEXTEND](https://huggingface.co/datasets/aieng-lab/namextend)
+- GRADIEND Gender Debiased Models:
+  - [`aieng-lab/bert-base-cased-gradiend-gender-debiased`](https://huggingface.co/aieng-lab/bert-base-cased-gradiend-gender-debiased)
+  - [`aieng-lab/bert-large-cased-gradiend-gender-debiased`](https://huggingface.co/aieng-lab/bert-large-cased-gradiend-gender-debiased)
+  - [`aieng-lab/distilbert-base-cased-gradiend-gender-debiased`](https://huggingface.co/aieng-lab/distilbert-base-cased-gradiend-gender-debiased)
+  - [`aieng-lab/roberta-large-gradiend-gender-debiased`](https://huggingface.co/aieng-lab/roberta-large-gradiend-gender-debiased)
+  - [`aieng-lab/gpt2-gradiend-gender-debiased`](https://huggingface.co/aieng-lab/gpt2-gradiend-gender-debiased)
+  - [`aieng-lab/Llama-3.2-3B-gradiend-gender-debiased`](https://huggingface.co/aieng-lab/Llama-3.2-3B-gradiend-gender-debiased)
+  - [`aieng-lab/Llama-3.2-3B-Instruct-gradiend-gender-debiased`](https://huggingface.co/aieng-lab/Llama-3.2-3B-Instruct-gradiend-gender-debiased)
+- Relevant Repositories:
+  - [`aieng-lab/bias-bench`](https://github.com/aieng-lab/bias-bench) for evaluation
+  - [`aieng-lab/lm-eval-harness`](https://github.com/aieng-lab/lm-eval-harness) for GLUE zero-shot evaluation
+
+
+
 ## Install
 ```bash
 git clone https://github.com/aieng-lab/gradiend.git
@@ -17,6 +39,8 @@ conda activate gradiend
 Download [Gendered Words](https://github.com/ecmonsen/gendered_words) and copy the file into the `data/` directory of this repository.
 
 Optional: Install [`aieng-lab/bias-bench`](https://github.com/aieng-lab/bias-bench) for further evaluations and comparison to other debiasing techniques.
+
+In order to use Llama-based models, you must first accept the Llama 3.2 Community License Agreement (see e.g., [here](https://huggingface.co/meta-llama/Llama-3.2-3B)). Further, you need to export a variable `HF_TOKEN` with a HF access token associated to your HF account (alternatively, but not recommended, you could insert your HF token in `gradiend/model.py#HF_TOKEN`).
 
 ## Overview
 
@@ -86,7 +110,7 @@ Script | Description
 
 ## Dataset Generation
 
-Although the experiments mentioned above are based on data provided via HuggingFace by now, we also provide the code to 
+Although the experiments mentioned above are based on data published on Hugging Face by now, we also provide the code to 
 generate the datasets used in the paper.
 
 ### Required Datasets

@@ -524,7 +524,9 @@ def plot_encoded_value_distribution(*models, model_names=None):
     combined_df = pd.concat(processed_dfs, ignore_index=True)
 
     # Initialize the plot
-    plt.figure(figsize=(9, 4))
+    #plt.figure(figsize=(9, 4))
+    plt.figure(figsize=(13, 3.5))
+
     rename_type_dict = {
         'gender masked': r'\genter', # todo write genter with \textsc?
         'no gender masked': r'\genterzero',
@@ -549,12 +551,12 @@ def plot_encoded_value_distribution(*models, model_names=None):
     # Customize the plot
     #plt.title('Distribution of Encoded Values by Type and Model')
     plt.xlabel('Model', fontsize=font_size)
-    plt.ylabel('Encoded Value', fontsize=font_size)
+    plt.ylabel('Encoded Value $h$', fontsize=font_size)
     plt.xticks(fontsize=font_size-4)
     plt.yticks(fontsize=font_size-4)
 
     # make legend horizontal
-    plt.legend(loc='upper center', bbox_to_anchor=(0.5, 1.17), title_fontsize='large', fontsize=font_size-2, ncol=3)
+    plt.legend(loc='upper center', bbox_to_anchor=(0.5, 1.3), title_fontsize='large', fontsize=font_size-2, ncol=3)
 
     # Rotate x-axis labels for better readability
     if not model_names:
@@ -628,7 +630,7 @@ def analyze_neurons(model, part='encoder', include_he_she=True):
     layer_map = {k: v for k, v in bert_with_ae.ae_named_parameters(part=part)}
     word_embeddings = layer_map['base_model.embeddings.word_embeddings.weight']
     token_means = word_embeddings.abs().mean(dim=1)
-    tokens = [bert_with_ae.tokenizer.decode(index) for index in range(word_embeddings.shape[0])]
+    tokens = [bert_with_ae.raw_tokenizer.decode(index) for index in range(word_embeddings.shape[0])]
     token_means = {token: mean.cpu().item() for token, mean in zip(tokens, token_means) if not (token.startswith('[') and token.endswith(']'))}
     names_df = read_names_data(filter_excluded_words=True, minimum_count=0, max_entries=None)
     training_names_df = read_namexact(split='train')
@@ -1156,6 +1158,15 @@ def print_all_models(folder='results/models/', *, prefix=None, keys=None, **kwar
 
 
 if __name__ == '__main__':
-    models = ['bert-base-cased', 'bert-large-cased', 'roberta-large', 'distilbert-base-cased', 'gpt2']
+    models = [
+        'bert-base-cased',
+        'bert-large-cased',
+        'roberta-large',
+        'distilbert-base-cased',
+        'gpt2',
+        'meta-llama/Llama-3.2-3B',
+        'meta-llama/Llama-3.2-3B-Instruct'
+    ]
+
     df = analyze_models(*[f'results/models/{model}' for model in models])
     print_all_models()

@@ -4,10 +4,9 @@ from gradiend.util import init_matplotlib
 
 
 
-def plot(models=None):
+def plot(models=None, suffix=''):
     if not models:
         models = default_models
-        suffix = ''
         models = {f'results/models/{model}{suffix}': name for model, name in models.items()}
     elif isinstance(models, str):
         models = {models: models}

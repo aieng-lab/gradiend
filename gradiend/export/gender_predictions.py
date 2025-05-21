@@ -6,6 +6,7 @@ from matplotlib import pyplot as plt
 from matplotlib.lines import Line2D
 
 from gradiend.util import init_matplotlib
+from gradiend.export import models as model_mapping
 
 
 def plot_all(*data, x_key='male_prob_mean', y_key='female_prob_mean', suffix=''):
@@ -49,13 +50,6 @@ def plot_all(*data, x_key='male_prob_mean', y_key='female_prob_mean', suffix='')
         'test': 's',
     }
 
-
-    model_mapping = {
-        'bert-base-cased': r'\bertbase',
-        'bert-large-cased': r'\bertlarge',
-        'distilbert-base-cased': r'\distilbert',
-        'roberta-large': r'\roberta',
-    }
     df['model_pretty_name'] = df['base_model'].apply(lambda x: model_mapping[x])
 
     df = df[df['split'] != 'total']
@@ -68,7 +62,10 @@ def plot_all(*data, x_key='male_prob_mean', y_key='female_prob_mean', suffix='')
         axes = [axes]
 
     # Iterate over each base model and plot on respective axes
-    for ax, (base_model, base_model_df) in zip(axes, df.groupby('base_model')):
+    for base_model, base_model_df in df.groupby('base_model'):
+        index = list(model_mapping.keys()).index(base_model)
+        ax = axes[index]
+
         # Scatter plot
         for split, sub_df in base_model_df.groupby('split'):
         #for split, sub_df in base_model_df.groupby('type'):
@@ -83,6 +80,9 @@ def plot_all(*data, x_key='male_prob_mean', y_key='female_prob_mean', suffix='')
                 s=30,
             )
 
+        #x_y_min = min(sub_df[x_key].min(), sub_df[y_key].min())
+        #x_y_max = max(sub_df[x_key].max(), sub_df[y_key].max())
+
         # Add identity line
         ax.plot([x_y_min, x_y_max], [x_y_min, x_y_max], color='gray', linestyle='--')
 
@@ -91,14 +91,15 @@ def plot_all(*data, x_key='male_prob_mean', y_key='female_prob_mean', suffix='')
         ax.set_xlabel(r'$\mathbb{P}(man)$', fontsize=14)
         ax.set_ylabel(r'$\mathbb{P}(woman)$', fontsize=14)
 
-        ticks = np.arange(0.0, 1.0, 0.1)  # Generate ticks from 0.0 to 0.9
+        ticks = np.arange(0.0, x_y_max + 0.01, 0.1)  # Generate ticks from 0.0 to 0.9
         ax.set_yticks(ticks)
         ax.set_yticklabels([f'{tick:.1f}' for tick in ticks])
         ax.tick_params(axis='y', labelleft=True)
 
-        ticks = np.arange(0.0, 1.0, 0.1)  # Generate ticks from 0.0 to 0.9
+        ticks = np.arange(0.0, x_y_max + 0.01, 0.1)  # Generate ticks from 0.0 to 0.9
         ax.set_xticks(ticks)
         ax.set_xticklabels([f'{tick:.1f}' for tick in ticks])
+
 
         ax.grid(True, linestyle='--', alpha=0.6)
 
@@ -149,5 +150,8 @@ if __name__ == '__main__':
                  f'results/gender_prediction/bert-large-cased{suffix}.csv',
                  f'results/gender_prediction/distilbert-base-cased{suffix}.csv',
                  f'results/gender_prediction/roberta-large{suffix}.csv',
-                suffix=suffix,
+                 #f'results/gender_prediction/gpt2{suffix}.csv',
+                 #f'results/gender_prediction/Llama-3.2-3B{suffix}.csv',
+                 #f'results/gender_prediction/Llama-3.2-3B-Instruct{suffix}.csv',
+                 suffix=suffix,
                  )

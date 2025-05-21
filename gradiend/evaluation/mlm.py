@@ -6,11 +6,90 @@ import random
 from sklearn.metrics import precision_score, recall_score, f1_score
 import pandas as pd
 
+from gradiend.model import InstructTokenizerWrapper
+
+import torch
+import torch.nn.functional as F
+import time
+import math
+import pandas as pd
+import json
+import random
+
+def evaluate_clm_perplexity(model, tokenizer, text_data, file=None, verbose=True, batch_size=32):
+    print('Evaluating CLM Perplexity')
+    model.eval()
+    device = model.device
+    total_log_likelihood = 0.0
+    total_token_count = 0
+    stats_data = []
+
+    start = time.time()
+
+    for start_idx in range(0, len(text_data), batch_size):
+        end_idx = min(start_idx + batch_size, len(text_data))
+        batch_sentences = text_data[start_idx:end_idx]
+
+        if verbose:
+            print(f"Processing batch {start_idx + 1}-{end_idx}/{len(text_data)}")
+
+        encoded = tokenizer(batch_sentences, return_tensors='pt', padding=True, truncation=True)
+        input_ids = encoded["input_ids"].to(device)
+        attention_mask = encoded["attention_mask"].to(device)
+
+        # Shift input and labels for causal LM
+        labels = input_ids.clone()
+        labels[attention_mask == 0] = -100  # ignore padding in loss computation
+
+        with torch.no_grad():
+            outputs = model(input_ids=input_ids, attention_mask=attention_mask)
+            logits = outputs.logits  # [batch_size, seq_len, vocab_size]
+
+            # Flatten for loss
+            loss = F.cross_entropy(
+                logits.view(-1, logits.size(-1)),
+                labels.view(-1),
+                reduction='sum',  # sum log probs over tokens
+                ignore_index=-100
+            )
+
+        # Count actual tokens (not padding)
+        non_pad_tokens = (labels != -100).sum().item()
+        total_log_likelihood += loss.item()
+        total_token_count += non_pad_tokens
+
+    avg_neg_log_likelihood = total_log_likelihood / total_token_count
+    perplexity = math.exp(avg_neg_log_likelihood)
+
+    if verbose:
+        print(f"Evaluated {len(text_data)} sentences in {time.time() - start:.2f}s")
+        print(f"Perplexity: {perplexity:.2f}")
+
+    lms = 1 / (1 + avg_neg_log_likelihood)
+
+    result = {
+        "accuracy": lms, # todo deprecate
+        "perplexity": perplexity,
+        "total_log_likelihood": total_log_likelihood,
+        "total_tokens": total_token_count
+    }
+
+    if file:
+        with open(file + '.json', 'w+', encoding='utf8') as f:
+            json.dump(result, f, indent=2)
+
+    return result
+
+
 
 def evaluate_clm(model, tokenizer, text_data, file=None, verbose=True, batch_size=128):
     random.seed(42)
     model.eval()
     device = model.device
+    is_instruction_tokenizer = isinstance(tokenizer, InstructTokenizerWrapper)
+
+    if is_instruction_tokenizer:
+        return _evaluate_clm_instruction(model, tokenizer, text_data, file=file, verbose=verbose, batch_size=32)
 
     correct_predictions = 0
     total_predictions = 0
@@ -20,7 +99,8 @@ def evaluate_clm(model, tokenizer, text_data, file=None, verbose=True, batch_siz
 
     start = time.time()
     n = len(text_data)
-    
+
+
     for start_idx in range(0, n, batch_size):
         end_idx = min(start_idx + batch_size, n)
         batch_sentences = text_data[start_idx:end_idx]
@@ -36,8 +116,9 @@ def evaluate_clm(model, tokenizer, text_data, file=None, verbose=True, batch_siz
         target_positions = []
         for i in range(input_ids.size(0)):
             token_positions = torch.where(attention_mask[i] != 0)[0].tolist()
-            
+
             if len(token_positions) > 1:
+                # use a random token in the 2nd half of the sentence to ensure enough context
                 chosen_pos = random.choice(token_positions[len(token_positions)//2:])
                 target_positions.append(chosen_pos)
             else:
@@ -54,6 +135,7 @@ def evaluate_clm(model, tokenizer, text_data, file=None, verbose=True, batch_siz
 
             if target_pos is not None:
                 predicted_token = tokenizer.decode([predictions[i, target_pos]], skip_special_tokens=True)
+                # todo check gpt
                 true_token = tokenizer.decode([input_ids[i, target_pos]], skip_special_tokens=True)
                 correct = predicted_token.lower() == true_token.lower()
 
@@ -101,6 +183,116 @@ def evaluate_clm(model, tokenizer, text_data, file=None, verbose=True, batch_siz
     return result, stats
 
 
+def _evaluate_clm_instruction(model, tokenizer, text_data, file=None, verbose=True, batch_size=1):
+    device = model.device
+    correct_predictions = 0
+    total_predictions = 0
+    true_labels = []
+    predicted_labels = []
+    stats_data = []
+
+    start = time.time()
+    n = len(text_data)
+
+    end_header_token_id = tokenizer.tokenizer.convert_tokens_to_ids(tokenizer.tokenizer.END)
+
+    for start_idx in range(0, n, batch_size):
+        end_idx = min(start_idx + batch_size, n)
+        batch_sentences = text_data[start_idx:end_idx]
+
+        if verbose:
+            print(f'Processing batch {start_idx + 1}-{end_idx}/{n}')
+
+        batch_tokenized_input = tokenizer(batch_sentences, return_tensors="pt", padding=True, truncation=True,
+                                          add_special_tokens=True)
+        input_ids = batch_tokenized_input["input_ids"].to(device)
+        attention_mask = batch_tokenized_input["attention_mask"].to(device)
+
+        target_positions = []
+        for i in range(input_ids.size(0)):
+            token_positions = torch.where(attention_mask[i] != 0)[0].tolist()
+            ids = input_ids[i].tolist()
+            #start_of_user_prompt = len(ids) - 1 - ids[::-1].index(end_header_token_id) + 1
+            matches = [j for j, token_id in enumerate(ids) if token_id == end_header_token_id]
+            if len(matches) >= 2:
+                second_last_index = matches[-2]  # second last occurrence
+                start_of_user_prompt = second_last_index + 1
+            else:
+                start_of_user_prompt = 0
+
+            remaining_token_count = len(token_positions) - start_of_user_prompt
+            if remaining_token_count > 1:
+                # use a random token in the 2nd half of the user prompt to ensure enough context
+                # step 1: determine start of user prompt
+                chosen_pos = random.choice(token_positions[start_of_user_prompt + remaining_token_count//2:]) - 1
+                target_positions.append(chosen_pos)
+            else:
+                target_positions.append(None)
+
+        with torch.no_grad():
+            outputs = model(input_ids=input_ids, attention_mask=attention_mask)
+            logits = outputs.logits if hasattr(outputs, 'logits') else outputs
+            predictions = logits.argmax(dim=-1)
+
+        for i in range(input_ids.size(0)):
+            sentence = batch_sentences[i]
+            target_pos = target_positions[i]
+
+            if target_pos is not None:
+                predicted_token = tokenizer.decode([predictions[i, target_pos]], skip_special_tokens=True)
+                true_token = tokenizer.decode([input_ids[i, target_pos+1]], skip_special_tokens=True)
+                correct = predicted_token.lower() == true_token.lower()
+
+                if correct:
+                    correct_predictions += 1
+                total_predictions += 1
+
+                true_labels.append(true_token.lower())
+                predicted_labels.append(predicted_token.lower())
+
+                stats_data.append({
+                    'sentence': sentence,
+                    'token_index': target_pos,
+                    'true': true_token,
+                    'predicted': predicted_token,
+                    'correct': correct,
+                    'score': logits[i, target_pos].max().item()
+                })
+
+        del input_ids
+        del attention_mask
+        del batch_tokenized_input
+        # release GPU memory
+        torch.cuda.empty_cache()
+        # Collect garbage
+        torch.cuda.synchronize()
+
+    stats = pd.DataFrame(stats_data)
+    accuracy = correct_predictions / total_predictions if total_predictions != 0 else 0
+    precision = precision_score(true_labels, predicted_labels, average="weighted", zero_division=0)
+    recall = recall_score(true_labels, predicted_labels, average="weighted", zero_division=0)
+    f1 = f1_score(true_labels, predicted_labels, average="weighted")
+
+    if verbose:
+        print(f"Evaluated {n} sentences in {time.time() - start:.2f} seconds")
+        print("Accuracy:", accuracy)
+        print("Precision:", precision)
+        print("Recall:", recall)
+        print("F1 Score:", f1)
+
+    result = {
+        'accuracy': accuracy,
+        'precision': precision,
+        'recall': recall,
+        'f1': f1
+    }
+
+    if file:
+        stats.to_csv(file + '.csv', index=False)
+        with open(file + '.json', 'w+', encoding='utf8') as f:
+            json.dump(result, f, indent=2)
+
+    return result, stats
 
 def evaluate_mlm(model, tokenizer, text_data, file=None, verbose=True, batch_size=128):
     random.seed(42)

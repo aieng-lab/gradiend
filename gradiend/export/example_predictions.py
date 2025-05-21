@@ -1,19 +1,25 @@
 import re
 
 import torch
-from transformers import pipeline, GPT2LMHeadModel, GPT2Tokenizer
+from transformers import pipeline, GPT2LMHeadModel, GPT2Tokenizer, AutoTokenizer, AutoModelForCausalLM
 
 import torch
 
+from gradiend.model import AutoTokenizerForLM
 
-def gpt_generate_top_k(model_name="gpt2", text="The scientist studied quantum", max_new_tokens=1):
+
+def decoder_generate_top_k(model_name="gpt2", text="The scientist studied quantum", max_new_tokens=1):
     # Set random seed for complete reproducibility
     torch.manual_seed(42)  # Ensures deterministic behavior
     torch.cuda.manual_seed_all(42)  # If using GPU
 
-    # Load GPT-2 model and tokenizer
-    tokenizer = GPT2Tokenizer.from_pretrained(model_name)
-    model = GPT2LMHeadModel.from_pretrained(model_name)
+    tokenizer = AutoTokenizerForLM.from_pretrained(model_name)
+    if 'gpt' in model_name:
+        model = GPT2LMHeadModel.from_pretrained(model_name)
+    elif 'llama' in model_name.lower():
+        model = AutoModelForCausalLM.from_pretrained(model_name)
+    else:
+        raise ValueError(f"Unsupported model type: {model_name}")
 
     # Input text
     input_text = text
@@ -44,7 +50,7 @@ def gpt_generate_top_k(model_name="gpt2", text="The scientist studied quantum", 
 
 def mlm_predict_top_k(model, top_k=10, text='The man worked as a [MASK].'):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    if 'gpt' in model:
+    if 'gpt' in model.lower() or 'llama' in model.lower():
         text = text.removesuffix(' [MASK].')
         #torch.manual_seed(42)  # Ensures deterministic behavior
         #torch.cuda.manual_seed_all(42)  # If using GPU
@@ -52,7 +58,7 @@ def mlm_predict_top_k(model, top_k=10, text='The man worked as a [MASK].'):
         #results = generator(text, max_new_tokens=1, num_return_sequences=top_k, truncation=True)
         #return results
         #return [{'token': generated}]
-        return gpt_generate_top_k(model, text)
+        return decoder_generate_top_k(model, text)
     else:
         unmasker = pipeline('fill-mask', model=model, device=device)
         text = text.replace('[MASK]', unmasker.tokenizer.mask_token)
@@ -108,11 +114,12 @@ def run_for_model(model, suffix=''):
 
     # Example usage
     table_data = []
+    model_id = model.split('/')[-1]
     for text in texts:
         table_d = run(model,
-                      f"results/changed_models/{model}{suffix}-N",
-                      f"results/changed_models/{model}{suffix}-F",
-                      f"results/changed_models/{model}{suffix}-M",
+                      f"results/changed_models/{model_id}{suffix}-N",
+                      f"results/changed_models/{model_id}{suffix}-F",
+                      f"results/changed_models/{model_id}{suffix}-M",
                       text=text,
                       top_k=10,
                       )
@@ -134,16 +141,22 @@ def run_for_model(model, suffix=''):
     """
 
     # escape special characters
-    #tex = re.sub(r"[^a-zA-Z0-9.,'’\"!?_\\ ]", "", tex)  # Keeps only normal characters
     tex = tex.replace('_', '\_').replace("\u00A0", " ")
     print(tex)
 
 if __name__ == '__main__':
 
 
-    models = ['bert-base-cased', 'bert-large-cased', 'distilbert-base-cased', 'roberta-large']
+    models = [
+        'bert-base-cased',
+        'bert-large-cased',
+        'distilbert-base-cased',
+        'roberta-large',
+        'gpt2',
+        'meta-llama/Llama-3.2-3B',
+        'meta-llama/Llama-3.2-3B-Instruct',
+        ]
 
-    models = ['gpt2']
     suffix = ''
 
 
