@@ -114,7 +114,7 @@ dependencies:
   - httpcore=1.0.6=pyhd8ed1ab_0
   - httpx=0.27.2=pyhd8ed1ab_0
   - huggingface_hub=0.25.2=pyh0610db2_0
-  - humanize
+  - humanize=4.12.3=pyhd8ed1ab_0
   - hyperframe=6.0.1=pyhd8ed1ab_0
   - icu=75.1=he02047a_0
   - idna=3.10=pyhd8ed1ab_0
@@ -206,6 +206,7 @@ dependencies:
   - libjpeg-turbo=3.0.0=hd590300_1
   - liblapack=3.9.0=16_linux64_mkl
   - libllvm19=19.1.1=ha7bfdaf_0
+  - liblzma=5.8.1=hb9d3cd8_0
   - libnghttp2=1.58.0=h47da74e_1
   - libnpp=12.2.5.2=hd3aeb46_0
   - libnsl=2.0.1=hd590300_0

@@ -1,8 +1,8 @@
 name: gradiend
 channels:
-  - defaults
-  - conda-forge
   - pytorch
+  - conda-forge
+  - defaults
 dependencies:
   - _libgcc_mutex=0.1
   - _openmp_mutex=4.5
@@ -49,11 +49,11 @@ dependencies:
   - brotli-python=1.1.0
   - bzip2=1.0.8
   - c-ares=1.34.1
-  - ca-certificates=2025.1.31
+  - ca-certificates=2024.12.14
   - cached-property=1.5.2
   - cached_property=1.5.2
   - cairo=1.18.0
-  - certifi=2025.1.31
+  - certifi=2024.12.14
   - cffi=1.17.1
   - charset-normalizer=3.4.0
   - click=8.1.7
@@ -114,7 +114,7 @@ dependencies:
   - httpcore=1.0.6
   - httpx=0.27.2
   - huggingface_hub=0.25.2
-  - humanize=4.12.1
+  - humanize=4.12.3
   - hyperframe=6.0.1
   - icu=75.1
   - idna=3.10
@@ -206,6 +206,7 @@ dependencies:
   - libjpeg-turbo=3.0.0
   - liblapack=3.9.0
   - libllvm19=19.1.1
+  - liblzma=5.8.1
   - libnghttp2=1.58.0
   - libnpp=12.2.5.2
   - libnsl=2.0.1
@@ -275,7 +276,7 @@ dependencies:
   - openh264=2.3.1
   - openjpeg=2.5.2
   - openldap=2.6.8
-  - openssl=3.4.1
+  - openssl=3.4.0
   - optuna=4.0.0
   - orc=2.0.2
   - overrides=7.7.0
@@ -319,7 +320,7 @@ dependencies:
   - python_abi=3.9
   - pytorch=2.4.1
   - pytorch-cuda=12.4
-  - pytorch-lightning=2.5.0.post0
+  - pytorch-lightning=2.4.0
   - pytorch-mutex=1.0
   - pytz=2024.1
   - pyyaml=6.0.2
