@@ -934,7 +934,7 @@ class ModelWithGradiend(nn.Module):
             item['labels'] = labels
         return item
 
-    def forward_pass(self, inputs, return_dict=False, lr=1e-4, verbose=True): # todo implement batched=True
+    def forward_pass(self, inputs, return_dict=False, lr=1e-4, verbose=False): # todo implement batched=True
 
         inputs = {k: v.to(self.base_model_device) for k, v in inputs.items()}
 

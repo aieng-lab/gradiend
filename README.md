@@ -8,7 +8,7 @@ Further evaluations of this study can be reproduced using our [expanded version 
 
 ## Quick Links
 - [GRADIEND Paper](https://arxiv.org/abs/2502.01406)
-- GRADIEND Training Datasets:
+- GRADIEND Training and Evaluation Datasets:
   - [GENTER](https://huggingface.co/datasets/aieng-lab/genter)
   - [GENEUTRAL](https://huggingface.co/datasets/aieng-lab/geneutral)
   - [GENTYPES](https://huggingface.co/datasets/aieng-lab/gentypes)
@@ -25,7 +25,6 @@ Further evaluations of this study can be reproduced using our [expanded version 
 - Relevant Repositories:
   - [`aieng-lab/bias-bench`](https://github.com/aieng-lab/bias-bench) for evaluation
   - [`aieng-lab/lm-eval-harness`](https://github.com/aieng-lab/lm-eval-harness) for GLUE zero-shot evaluation
-
 
 
 ## Install
