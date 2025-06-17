@@ -656,7 +656,7 @@ class ModelWithGradiend(nn.Module):
         self.tokenizer = tokenizer
         self.grad_iterations = gradiend.grad_iterations
 
-        self.base_model_device = base_model_device or torch.device('cuda:1') # todo cuda:1
+        self.base_model_device = base_model_device or torch.device('cuda')
         self.base_model.to(self.base_model_device)
         self.layer_map = {k: v for k, v in self.base_model.named_parameters()}
 
