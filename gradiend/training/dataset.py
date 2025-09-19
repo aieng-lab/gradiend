@@ -2,275 +2,189 @@ import itertools
 import os
 import time
 from collections import defaultdict
-import random
 
 import torch
-from torch.utils.data import Dataset
+from torch.nn.utils.rnn import pad_sequence
 from tqdm import tqdm
 
-from gradiend.data import read_geneutral, get_gender_words, read_namexact, read_genter
 from gradiend.util import hash_it
 
 
-class TrainingDataset(Dataset):
+factual_computation_required_keywords = {'factual', 'diff'}
+counterfactual_computation_required_keywords = {'counterfactual', 'diff'}
+source_target_keywords = {None} | factual_computation_required_keywords | counterfactual_computation_required_keywords
 
-    """Initializes the GRADIEND training dataset.
+class ModelFeatureTrainingDataset:
 
-    Args:
-    - data (pd.DataFrame): The GENTER template training data.
-    - names (pd.DataFrame): The names dataset.
-    - tokenizer (transformers.PreTrainedTokenizer): The tokenizer used for tokenization.
-    - batch_size (int): The batch size used for the training. Each data entry will be paired with batch_size random names.
-    - neutral_data (pd.DataFrame): The neutral data used for the training between the gender-related maskings. If None, no neutral data is used (default).
-     - neutral_data_prop (float): The proportion of neutral data used in the training. If 0, no neutral data is used (default).
-     - gender_words (list): A list of gender specific words that are excluded for masking of neutral_data.
-    - max_token_length (int): The maximum token length of the input (48 are sufficient for most of the GENTER data)
+    def __init__(self,
+                 training_data,
+                 tokenizer,
+                 feature_creator, # function that creates features from the training data, e.g., model_with_gradiend.forward_pass_create_gradients to create gradients from the training data
+                 feature_creator_id, # id of the feature creator, used for caching
+                 source='factual',
+                 target='diff',
+                 cache_dir=None,
+                 use_cached_gradients=True,
+                 dtype=torch.float32,
+                 device=None,
+                 return_metadata=False
+                 ):
+        super().__init__()
+        
+        assert source in source_target_keywords, f'Invalid source {source}, must be one of {source_target_keywords}'
+        assert target in source_target_keywords, f'Invalid target {target}, must be one of {source_target_keywords}'
 
-    In each batch, a random gender is chosen and only this names of this gender are used for the entire batch (with
-    different random texts). At the end of the training, each entry of data will be paired exactly batch_size many times with a name.
-    This behavior is made deterministic and is automatically applied when using __getitem__.
-     """
-    def __init__(self, data, names, tokenizer, batch_size=None, neutral_data=None, neutral_data_prop=0.0, gender_words=None, max_token_length=48, is_generative=False):
-        self.data = data
-        self.names = names
-        self.names = self.names[self.names['gender'].isin(['M', 'F'])]
+        device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+        self.training_data = training_data
         self.tokenizer = tokenizer
-        if is_generative:
-            self.tokenizer.pad_token = self.tokenizer.eos_token
-        self.mask_token_id = self.tokenizer.mask_token_id
-        self.mask_token = self.tokenizer.mask_token
-        self.batch_size = None if not batch_size else batch_size
-        self.neutral_data = neutral_data if neutral_data_prop > 0 else None
-        self.neutral_data_prop = neutral_data_prop
-        self.is_generative = is_generative
-        self.is_instruct_model = 'instruct' in self.tokenizer.name_or_path.lower()
-        if self.is_instruct_model:
-            self.gender_pronoun_tokens = {(gender, upper): self.tokenizer.encode(pronoun[0].upper() + pronoun[1:] if upper else pronoun, add_special_tokens=False)[0] for gender, pronoun in [('M', ' he'), ('F', ' she')] for upper in [True, False]}
-        else:
-            self.gender_pronoun_tokens = {(gender, upper): self.tokenizer.encode(pronoun[0].upper() + pronoun[1:] if upper else pronoun, add_special_tokens=False)[0] for gender, pronoun in [('M', 'he'), ('F', 'she')] for upper in [True, False]}
-        self._analyze_name_tokens()
+        self.batch_size = self.training_data.batch_size if self.training_data.batch_size else 1
+        self.feature_creator = feature_creator
+        self.source = source
+        self.target = target
+        self.cache_dir = cache_dir + f'/{feature_creator_id}' if cache_dir else None
+        if self.cache_dir is not None:
+            os.makedirs(self.cache_dir, exist_ok=True)
+        self.use_cached_gradients = use_cached_gradients # if True, gradients will be cached if the cache_dir is set
+        self.dtype = dtype
+        self.device = device
+        self.return_metadata = return_metadata
+        self.feature_creator_id = feature_creator_id
 
-        gender_words = gender_words or []
-        self.gender_token_ids = list(set(token for word in gender_words for token in self.tokenizer(word, add_special_tokens=False)['input_ids']))
-
-        deterministic_random = random.Random(42)
-        self.index_sampling = deterministic_random.sample(range(self.len_without_batch()), self.len_without_batch())
-        self.full_index_sampling = deterministic_random.sample(range(self.__len__()), len(self))
-        self.max_token_length = max_token_length
-
-    """Returns the number of raw entries in the dataset. If the neutral data is used,
-    the length is calculated as if the neutral data was part of the main data."""
-    def len_without_batch(self):
-        n = len(self.data)
-        if self.neutral_data is not None:
-            n = int(n / (1 - self.neutral_data_prop))
-        return n
-
-    """Returns the number of entries in the dataset, considering the batch size."""
     def __len__(self):
-        n = self.len_without_batch()
+        return len(self.training_data) // self.batch_size
 
-        if self.batch_size == None:
-            return n
-        else:
-            return n * self.batch_size
-
-    def get_data(self, index):
-        is_gender_data = True
-        data = self.data
-        offset = index % self.batch_size if self.batch_size is not None else 0
-        idx = index // self.batch_size if self.batch_size is not None else index
-        random_idx = self.index_sampling[idx]
-
-        if self.neutral_data is not None and random_idx >= len(self.data):
-            is_gender_data = False
-            data = self.neutral_data
-            random_index = random_idx - len(self.data)
-        else:
-            random_index = self.full_index_sampling[random_idx]
-
-        final_index = (random_index + offset) % len(data)
-
-        entry = data.iloc[final_index]
-        return entry, is_gender_data, idx, offset
-
-
-    def _analyze_name_tokens(self):
-        self.gender_name_tokens = {}
-
-        for gender, df in self.names.groupby('gender'):
-            # Dictionary to store the mapping
-            token_dict = defaultdict(dict)
-            names = df['name'].unique()
-
-            # Tokenize each name and store in the dictionary
-            for name in names:
-                # Tokenize the name
-                tokens = self.tokenizer.encode(name, add_special_tokens=False)
-                token_count = len(tokens)
-
-                # Add the name to the dictionary based on the number of tokens
-                token_dict[token_count][name] = tokens
-            self.gender_name_tokens[gender] = token_dict
-
-        # sanitize, i.e. make sure that the token counts are available for each gender
-        # Find common token counts across all genders
-        common_token_counts = set(self.gender_name_tokens[next(iter(self.gender_name_tokens))].keys())
-        for gender in self.gender_name_tokens:
-            common_token_counts.intersection_update(self.gender_name_tokens[gender].keys())
-
-        # Filter the token dictionaries to only include common token counts
-        for gender in self.gender_name_tokens:
-            self.gender_name_tokens[gender] = {token_count: names
-                                          for token_count, names in self.gender_name_tokens[gender].items()
-                                          if token_count in common_token_counts}
-
-        self.token_count_distribution = {count: min(len(self.gender_name_tokens[gender][count]) for gender in self.gender_name_tokens)
-                                         for count in self.gender_name_tokens['M']}
-
-    def get_random_name(self, gender, seed):
-        names = [(k, v) for names in self.gender_name_tokens[gender].values() for k, v in names.items()]
-        random_name = random.Random(seed).choice(names)
-        return {'name': random_name[0], 'tokens': random_name[1]}
-
-    def tokenize(self, text):
-        item = self.tokenizer(text, truncation=True, padding='max_length', max_length=self.max_token_length, return_tensors="pt")
-        item = {k: v.squeeze(0) for k, v in item.items()}
-        return item
-
-    def mask_tokens(self, inputs, mask_probability=0.15):
-        """
-        Mask tokens in the input tensor for MLM, excluding certain tokens.
-
-        Args:
-        - inputs (torch.Tensor): The tokenized inputs.
-        - mask_probability (float): The probability of masking a token.
-
-        Returns:
-        - masked_inputs (torch.Tensor): The inputs with some tokens masked.
-        - labels (torch.Tensor): The labels for the MLM task.
-        """
-        labels = inputs.clone()
-
-        # Create a mask to exclude certain token IDs from masking
-        exclude_mask = (inputs.unsqueeze(-1) == torch.Tensor(self.gender_token_ids)).any(dim=-1)
-
-        # Create a random mask for the inputs with the given probability
-        random_mask = torch.rand(inputs.shape, dtype=torch.float) < mask_probability
-
-        padding_mask = inputs == self.tokenizer.pad_token_id
-
-        # Apply the exclusion mask to ensure excluded tokens are not masked
-        mask = random_mask & ~exclude_mask & ~padding_mask
-
-        # Mask the tokens in the inputs
-        masked_inputs = inputs.clone()
-        masked_inputs[mask] = self.mask_token_id
-
-        # For labels, we only want to compute loss on masked tokens
-        labels[~mask] = -100
-
-        return masked_inputs, labels
-
+    def __iter__(self):
+        for i in range(self.__len__()):
+            yield self[i]
 
     def __getitem__(self, index):
-        entry, is_gender_data, batch_size_index, batch_size_offset = self.get_data(index)
+        indices = list(range(index * self.batch_size, (index + 1) * self.batch_size))
 
-        if is_gender_data:
-            masked = entry['masked']
-
-            gender = random.Random(batch_size_index).choice(['M', 'F'])
-            inverse_gender = 'F' if gender == 'M' else 'M'
-
-            random_name = self.get_random_name(gender, batch_size_offset)
-
-            def fill(text, name):
-                filled_text = text.replace('[NAME]', name)
-                if self.is_generative:
-                    return filled_text.split('[PRONOUN]')[0]
-                else:
-                    return filled_text.replace('[PRONOUN]', self.mask_token)
-            gender_text = fill(masked, random_name['name'])
-
-            item = self.tokenize(gender_text)
-            gender_labels = item['input_ids'].clone()
-            inv_gender_labels = gender_labels.clone()
-
-            sentence_delimiter = {'.', '!', '?'}
-            if self.is_generative:
-                upper = any([gender_text.strip().endswith(x) for x in sentence_delimiter])
-                mask_token_mask = torch.zeros_like(gender_labels, dtype=torch.bool)
-                last_idx = (gender_labels != self.tokenizer.pad_token_id).nonzero()[-1].item()
-                mask_token_mask[last_idx] = True
-            else:
-                mask_token_mask = gender_labels == self.mask_token_id
-
-                # check if the pronoun start with an uppercase letter since it appears at the beginning of the sentence
-                gender_text_no_white_spaces = gender_text.replace(' ', '')
-                mask_index = gender_text_no_white_spaces.index(self.mask_token)
-                upper = mask_index == 0 or mask_index > 2 and gender_text_no_white_spaces[mask_index - 1] in sentence_delimiter and gender_text_no_white_spaces[mask_index - 2] != '.' # avoid "..."
-            gender_labels[~mask_token_mask] = -100 # only compute loss on masked tokens
-            gender_labels[mask_token_mask] = self.gender_pronoun_tokens[(gender, upper)] # set masked tokens to the
-            inv_gender_labels[~mask_token_mask] = -100 # only compute loss on masked tokens
-            inv_gender_labels[mask_token_mask] = self.gender_pronoun_tokens[(inverse_gender, upper)] # set masked tokens to the
-
-            inv_item = item.copy()
-            item['labels'] = gender_labels
-            inv_item['labels'] = inv_gender_labels
-
-            label = int(gender == 'M') # 1 -> M, 0 -> F
-            text = gender_text
+        if len(indices) == 1:
+            batch = self.training_data[indices[0]]
         else:
-            # this dataset is used for general knowledge data (not gender-specific)
-            text = entry['text']
+            batch = {}
+            for index in indices:
+                data = self.training_data[index]
+                for key in data:
+                    if key not in batch:
+                        batch[key] = []
+                    batch[key].append(data[key])
 
-            item = self.tokenize(text)
-            masked_input, labels = self.mask_tokens(item['input_ids'])
-            item['input_ids'] = masked_input
-            item['labels'] = labels
-            inv_item = item
-            label = ''
+            # convert lists of dicts with tensors to dict of tensors
+            for key in batch:
+                if isinstance(batch[key], list) and all(isinstance(d, dict) for d in batch[key]):
+                    first = batch[key][0]
+                    first_key = next(iter(first))
+                    if not hasattr(first[first_key], 'shape'):
+                        raise NotImplementedError('TODO')
+                    else:
+                        needs_padding = any(
+                            any(d[subkey].shape != first[subkey].shape for d in batch[key])
+                            for subkey in first
+                        )
 
-        return {True: item, False: inv_item, 'text': text, 'label': label}
+                    if needs_padding:
+                        padded = {}
+                        for subkey in first:
+                            tensors = [d[subkey] for d in batch[key]]
+                            padding_value = self.tokenizer.pad_token_id if 'input_ids' in subkey else 0
+                            padded[subkey] = pad_sequence(tensors, batch_first=True, padding_value=padding_value)
+                        batch[key] = padded
+                    else:
+                        batch[key] = {subkey: torch.stack([d[subkey] for d in batch[key]]) for subkey in first}
 
-
-
-def create_training_dataset(tokenizer,
-                            max_size=None,
-                            batch_size=None,
-                            neutral_data=False,
-                            split=None,
-                            neutral_data_prop=0.5,
-                            is_generative=False,
-                            dtype=torch.float32,
-                            ):
-    # Load dataset
-    names = read_namexact(split=split)
-    dataset = read_genter(split=split)
-    if max_size:
-        dataset = dataset.iloc[range(max_size)]
-
-    neutral_data = read_geneutral(max_size=len(dataset), split=split) if neutral_data else None
-
-    gender_words = get_gender_words()
-
-    # Create custom dataset
-    max_token_length = 128 if 'llama' in tokenizer.name_or_path.lower() else 48
-    return TrainingDataset(dataset,
-                           names,
-                           tokenizer,
-                           batch_size=batch_size,
-                           neutral_data=neutral_data,
-                           gender_words=gender_words,
-                           neutral_data_prop=neutral_data_prop,
-                           is_generative=is_generative,
-                           max_token_length=max_token_length
-                           )
+        cache_file_factual = ''
+        cache_file_counterfactual = ''
+        if self.use_cached_gradients:
+            hash = hash_it([batch['text'], self.dtype])
+            cache_file_factual = f'{self.cache_dir}/factual_{hash}.pt'
+            cache_file_counterfactual = f'{self.cache_dir}/counterfactual_{hash}.pt'
 
 
-def create_eval_dataset(gradiend, max_size=None, split='val', source='gradient', save_layer_files=False, is_generative=False):
-    if not source in {'gradient', 'inv_gradient', 'diff'}:
+        factual_gradients = None
+        counterfactual_gradients = None
+
+        if self.use_cached_gradients:
+            if os.path.exists(cache_file_factual):
+                factual_gradients = torch.load(cache_file_factual, weights_only=True)
+
+            if os.path.exists(cache_file_counterfactual):
+                counterfactual_gradients = torch.load(cache_file_counterfactual, weights_only=True)
+
+        requires_factual = self.source in factual_computation_required_keywords or self.target in factual_computation_required_keywords
+        if factual_gradients is None and requires_factual:
+            factual_inputs = batch[True]
+            factual_gradients = self.feature_creator(factual_inputs)
+            del factual_inputs
+            factual_gradients = factual_gradients.to(dtype=self.dtype, device=self.device)
+
+            # save the factual gradients to cache if caching is enabled
+            if self.use_cached_gradients and self.cache_dir is not None:
+                os.makedirs(self.cache_dir, exist_ok=True)
+                torch.save(factual_gradients, cache_file_factual)
+
+        requires_counterfactual = self.source in counterfactual_computation_required_keywords or self.target in counterfactual_computation_required_keywords
+        if counterfactual_gradients is None and requires_counterfactual:
+            counterfactual_inputs = batch[False]
+            counterfactual_gradients = self.feature_creator(counterfactual_inputs)
+            del counterfactual_inputs
+
+            counterfactual_gradients = counterfactual_gradients.to(dtype=self.dtype, device=self.device)
+
+            # save the counterfactual gradients to cache if caching is enabled
+            if self.use_cached_gradients and self.cache_dir is not None:
+                os.makedirs(self.cache_dir, exist_ok=True)
+                torch.save(counterfactual_gradients, cache_file_counterfactual)
+
+        # determine the source and target tensors based on the source and target keywords in a memory-efficient way
+        if self.source == 'factual':
+            source_tensor = factual_gradients
+        elif self.source == 'diff':
+            source_tensor = factual_gradients - counterfactual_gradients
+        elif self.source == 'counterfactual':
+            source_tensor = counterfactual_gradients
+        elif self.source is None:
+            source_tensor = None
+        else:
+            raise ValueError(f'Unknown source: {self.source}')
+
+        target_tensor = factual_gradients
+        if self.target == 'counterfactual':
+            target_tensor = counterfactual_gradients
+        elif self.target == 'diff':
+            target_tensor -= counterfactual_gradients
+        elif self.target == 'factual':
+            pass  # target_tensor is already set
+        elif self.target is None:
+            target_tensor = None
+        else:
+            raise ValueError(f'Unknown target: {self.target}')
+
+        del factual_gradients
+        del counterfactual_gradients
+
+        output = {
+            'source': source_tensor,
+            'target': target_tensor,
+        }
+
+        for key in batch:
+            if key not in output and key != 'metadata':
+                output[key] = batch[key]
+
+        if self.return_metadata and 'metadata' in batch:
+            output['metadata'] = batch['metadata']
+
+        return output
+
+
+def create_eval_dataset_v1(gradiend, max_size=None, split='val', source='factual', save_layer_files=False, is_generative=False):
+    if not source in {'factual', 'counterfactual', 'diff'}:
         raise ValueError(f'Invalid source {source}')
+
+
 
     start = time.time()
     dataset = create_training_dataset(gradiend.tokenizer, split=split)
@@ -301,7 +215,7 @@ def create_eval_dataset(gradiend, max_size=None, split='val', source='gradient',
     base_model = gradiend.base_model.name_or_path
     base_model = os.path.basename(base_model)
     layers_hash = gradiend.layers_hash
-    cache_dir = f'data/cache/gradients/{base_model}/{source}/{layers_hash}'
+    cache_dir = f'results/cache/gradients/{base_model}/{source}/{layers_hash}'
     gradients = defaultdict(dict) # maps texts to the gradients
     if not os.path.exists(cache_dir):
         os.makedirs(cache_dir)
@@ -334,17 +248,17 @@ def create_eval_dataset(gradiend, max_size=None, split='val', source='gradient',
                     label_factual = f' {label_factual}'
                     label_counter_factual = f' {label_counter_factual}'
                 inputs_factual = gradiend.create_inputs(filled_text, label_factual)
-                grads_factual = gradiend.forward_pass(inputs_factual, return_dict=True)
+                grads_factual = gradiend.forward_pass_create_gradients(inputs_factual, return_dict=True)
                 inputs_counter_factual = gradiend.create_inputs(filled_text, label_counter_factual)
-                grads_counter_factual = gradiend.forward_pass(inputs_counter_factual, return_dict=True)
+                grads_counter_factual = gradiend.forward_pass_create_gradients(inputs_counter_factual, return_dict=True)
                 grads = {layer: grads_factual[layer] - grads_counter_factual[layer] for layer in gradiend.gradiend.layers}
             else:
-                if source == 'gradient':
+                if source == 'factual':
                     label = 'he' if label == 'M' else 'she'
-                elif source == 'inv_gradient':
+                elif source == 'counterfactual':
                     label = 'she' if label == 'M' else 'he'
                 inputs = gradiend.create_inputs(filled_text, label)
-                grads = gradiend.forward_pass(inputs, return_dict=True)
+                grads = gradiend.forward_pass_create_gradients(inputs, return_dict=True)
 
             if save_layer_files:
                 # create the directory

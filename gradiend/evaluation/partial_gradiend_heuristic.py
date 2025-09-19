@@ -56,11 +56,15 @@ def get_score(heuristic_mask, layer_mask):
     }
 
 
-def get_heuristic_mask(model, *thresholds, n_heuristic_samples=10, n_heuristic_names=5):
+def get_heuristic_mask(model, *thresholds, proportions=None, n_heuristic_samples=10, n_heuristic_names=5):
+    proportions = proportions or []
+    thresholds = [t for t in thresholds if t is not None]
+
     if isinstance(model, str):
         gradiend = ModelWithGradiend.from_pretrained(model)
     else:
         gradiend = model
+
 
     genter = read_genter(split='train')
 
@@ -94,8 +98,39 @@ def get_heuristic_mask(model, *thresholds, n_heuristic_samples=10, n_heuristic_n
         heuristic_layer_maps[threshold] = heuristic_mask
         heuristic_n_neurons[threshold] = sum(torch.sum(v).item() for k, v in heuristic_mask.items())
 
-    if len(thresholds) == 1:
-        return heuristic_layer_maps[thresholds[0]], heuristic_n_neurons[thresholds[0]]
+    if proportions:
+        if len(thresholds) > 0:
+            raise ValueError("Cannot specify both thresholds and proportions.")
+
+        all_gradients = torch.cat([v.abs().flatten() for v in mean_gradients.values()])
+        total_neurons = all_gradients.numel()
+
+        for proportion in proportions:
+            top_k = max(1, int(total_neurons * proportion))  # Ensure at least one neuron is selected
+            top_k_values, top_k_indices = torch.topk(all_gradients, top_k, largest=True, sorted=False)
+
+            # Create a global mask
+            global_mask = torch.zeros_like(all_gradients, dtype=torch.bool)
+            global_mask[top_k_indices] = True
+
+            # Reconstruct per-layer masks
+            heuristic_mask = {}
+            offset = 0
+            for k, v in mean_gradients.items():
+                num_elements = v.numel()
+                layer_mask_flattened = global_mask[offset:offset + num_elements]
+                heuristic_mask[k] = layer_mask_flattened.view(v.shape)
+                offset += num_elements  # Move to next layer
+
+            heuristic_layer_maps[proportion] = heuristic_mask
+            heuristic_n_neurons[proportion] = sum(torch.sum(v).item() for v in heuristic_mask.values())
+
+        if len(proportions) == 1:
+            return heuristic_layer_maps[proportions[0]], heuristic_n_neurons[proportions[0]]
+
+    else:
+        if len(thresholds) == 1:
+            return heuristic_layer_maps[thresholds[0]], heuristic_n_neurons[thresholds[0]]
 
     return heuristic_layer_maps, heuristic_n_neurons
 
@@ -161,7 +196,7 @@ def evaluate(model='results/models/bert-base-cased', n_heuristic_samples=100, n_
     # Show plot
     plt.legend()
     plt.grid(True)
-    output = f'results/img/partial_gradiend_heuristic/{model}.pdf'
+    output = f'img/partial_gradiend_heuristic/{model}.pdf'
     os.makedirs(os.path.dirname(output), exist_ok=True)
     plt.savefig(output)
     plt.show()

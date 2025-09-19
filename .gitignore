@@ -10,3 +10,5 @@ results/
 *.pdf
 *.png
 
+
+gradiend/training/decoder_only_mlm/decoder_mlm_model/

@@ -1,5 +1,6 @@
 import ast
 import io
+import json
 import os
 import pickle
 import re
@@ -7,6 +8,8 @@ import re
 import numpy as np
 import pandas as pd
 from matplotlib import font_manager as fm, pyplot as plt
+
+from gradiend.training.decoder_only_mlm.model import DecoderModelWithMLMHead
 
 default_accuracy_function = lambda x: x #np.power(x, 10)
 normalization = lambda x: x #np.power(x, 0.1)
@@ -65,9 +68,11 @@ def init_matplotlib(font_path="/root/times.ttf", use_tex=False):
 \newcommand{\gentertest}{$\genter_\text{test}$}
 \newcommand{\genterval}{$\genter_\text{val}$}
 \newcommand{\genterzero}{$\genter^0$}
-\newcommand{\geneutral}{\textsc{GENeutral}}
+\newcommand{\gerneutral}{\textsc{BIASneutral}}
 \newcommand{\gentypes}{\textsc{GENTypes}}
 
+\newcommand{\traindata}{\ensuremath{\mathcal{T}}}
+\newcommand{\traindatazero}{\ensuremath{\traindata\textsc{neutral}}}
 \newcommand{\acc}{\text{Acc}}
 \newcommand{\cor}{\text{Cor}}
 \newcommand{\enc}{\text{Enc}}
@@ -113,6 +118,37 @@ def get_total_memory_usage(data):
             total_size += get_total_memory_usage(item)
     # Add other iterable types if needed
     return total_size
+
+def convert_tuple_keys_recursively(obj):
+    if isinstance(obj, dict):
+        new_dict = {}
+        for k, v in obj.items():
+            # Convert tuple keys to JSON strings (of lists)
+            if isinstance(k, tuple):
+                k = json.dumps(k)
+            new_dict[k] = convert_tuple_keys_recursively(v)
+        return new_dict
+    elif isinstance(obj, list):
+        return [convert_tuple_keys_recursively(item) for item in obj]
+    else:
+        return obj
+
+def restore_tuple_keys_recursively(obj):
+    if isinstance(obj, dict):
+        new_dict = {}
+        for k, v in obj.items():
+            try:
+                k_loaded = json.loads(k)
+                if isinstance(k_loaded, list):
+                    k = tuple(k_loaded)
+            except (ValueError, json.JSONDecodeError):
+                pass
+            new_dict[k] = restore_tuple_keys_recursively(v)
+        return new_dict
+    elif isinstance(obj, list):
+        return [restore_tuple_keys_recursively(item) for item in obj]
+    else:
+        return obj
 
 def recursive_gpu_size(obj, seen=None):
     if seen is None:
@@ -236,7 +272,10 @@ def evaluate_he_she(model, tokenizer, masked_text):
 
     # Extract the logits and softmax to get probabilities
     logits = outputs.logits
-    mask_token_logits = logits[0, mask_token_index, :]
+    if isinstance(model, DecoderModelWithMLMHead):
+        mask_token_logits = logits
+    else:
+        mask_token_logits = logits[0, mask_token_index, :]
     probabilities = torch.softmax(mask_token_logits, dim=-1)
 
     # Get the token IDs for "he" and "she"
@@ -257,14 +296,19 @@ def evaluate_he_she(model, tokenizer, masked_text):
         if is_generative:
             probabilities = probabilities.unsqueeze(0)
 
-        he_probability = probabilities[:, he_token_id].tolist()
-        she_probability = probabilities[:, she_token_id].tolist()
+        if isinstance(model, DecoderModelWithMLMHead):
+            he_probability = probabilities[:, 0].tolist()
+            she_probability = probabilities[:, 1].tolist()
+            most_likely_token = ['he' if he_probability > she_probability else 'she']
+        else:
+            he_probability = probabilities[:, he_token_id].tolist()
+            she_probability = probabilities[:, she_token_id].tolist()
 
-        # Determine the most likely token
-        most_likely_token_id = torch.argmax(probabilities, dim=1).tolist()
+            # Determine the most likely token
+            most_likely_token_id = torch.argmax(probabilities, dim=1).tolist()
 
-        # Determine which token ("he" or "she") was the most likely
-        most_likely_token = [tokenizer.decode(id) for id in most_likely_token_id]
+            # Determine which token ("he" or "she") was the most likely
+            most_likely_token = [tokenizer.decode(id) for id in most_likely_token_id]
 
         if shape[0] == 1:
             he_probability = he_probability[0]
@@ -279,6 +323,20 @@ def evaluate_he_she(model, tokenizer, masked_text):
         }
 
     return result
+
+
+def z_score(x, groupby=None, key=None):
+    if isinstance(x, pd.DataFrame):
+        assert key is not None
+
+        if groupby is not None:
+            result = x.groupby(groupby).apply(lambda x: z_score(x[key]))
+            return result.reset_index(level=0, drop=True)
+        x = x[key]
+
+    mean = x.mean()
+    std = x.std()
+    return (x - mean) / std
 
 
 import fnmatch
@@ -345,7 +403,7 @@ def hash_model_weights(model):
 
 
 # hashes a string deterministically across multiple program runs (in contrast to Python's built-in hash function)
-def hash_it(x):
+def hash_it(x, return_num=False):
     """
     Returns a deterministic hash for any hashable object.
 
@@ -361,6 +419,11 @@ def hash_it(x):
     # Compute the SHA-256 hash of the byte stream
     hash_object = hashlib.sha256(byte_stream)
     hash_hex = hash_object.hexdigest()
+
+    if return_num:
+        # Convert the hex hash to an integer
+        hash_num = int(hash_hex, 16)
+        return hash_num
 
     return hash_hex
 

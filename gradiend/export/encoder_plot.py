@@ -1,5 +1,6 @@
-from gradiend.evaluation.analyze_encoder import plot_encoded_value_distribution, analyze_models
+from gradiend.evaluation.analyze_encoder import plot_encoded_value_distribution
 from gradiend.export import models as default_models
+from gradiend.setups.gender.en import GenderEnSetup
 from gradiend.util import init_matplotlib
 
 
@@ -18,7 +19,8 @@ def plot(models=None, suffix=''):
     init_matplotlib(use_tex=True)
 
     # make sure that the models have been analyzed before
-    analyze_models(*gradiend_models)
+    #setup = GenderEnSetup()
+    #setup.analyze_models(*gradiend_models)
 
     plot_encoded_value_distribution(*gradiend_models, model_names=names)
 

@@ -134,7 +134,7 @@ def plot_all(*data, x_key='male_prob_mean', y_key='female_prob_mean', suffix='')
 
     # Adjust layout
     plt.tight_layout(rect=[0, 0, 1, 0.9])  # Leave space for the legend
-    output_file = f'results/img/gender_predictions{suffix}.pdf'
+    output_file = f'img/gender_predictions{suffix}.pdf'
     os.makedirs(os.path.dirname(output_file), exist_ok=True)
     plt.savefig(output_file)
     plt.show()

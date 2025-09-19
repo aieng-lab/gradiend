@@ -6,69 +6,111 @@ import time
 import numpy as np
 import torch
 
-from gradiend.evaluation.analyze_encoder import analyze_models, get_model_metrics
-from gradiend.evaluation.select_models import select
+from gradiend.evaluation.analyze_encoder import get_model_metrics
+from gradiend.setups.gender.en import GenderEnSetup
 from gradiend.training import train_all_layers_gradiend, train_multiple_layers_gradiend, PolarFeatureLoss
 
 
-def train(base_model, model_config, n=3, metric='pearson_MF', force=False, version=None, clear_cache=False):
-    metrics = []
-    total_start = time.time()
-    times = []
+def train(setup, base_model, model_config=None, n=3, metric='pearson', force=False, version=None, clear_cache=False, only_return_output=False):
+    model_config = model_config or {}
+
     if version is None or version == '':
         version = ''
     else:
-        version = f'/v{version}'
+        version = f'/{version}'
+
+    base_model_id = base_model.split('/')[-1]
+    output = f'results/models/{setup.id}/{base_model_id}{version.replace("/", "-")}'
+    if only_return_output:
+        return output
+
+    metrics = []
+    total_start = time.time()
+    times = []
 
     for i in range(n):
         start = time.time()
-        output = f'results/experiments/gradiend/{base_model}{version}/{i}'
+        output = f'results/experiments/gradiend/{setup.id}/{base_model}{version}/{i}'
         metrics_file = f'{output}/metrics.json'
         if not force and os.path.exists(metrics_file):
             metrics.append(json.load(open(metrics_file)))
             print(f'Skipping training of {output} as it already exists')
+
             continue
 
-        if not os.path.exists(output):
+        if not os.path.isfile(f'{output}/pytorch_model.bin') or force:
             print('Training', output)
-            model_config['seed'] = i
+            model_config['seed'] = i + 1
             if 'layers' in model_config:
-                train_multiple_layers_gradiend(model=base_model, output=output, **model_config)
+                train_multiple_layers_gradiend(setup, model=base_model, output=output, **model_config)
             else:
-                train_all_layers_gradiend(model=base_model, output=output, **model_config)
+                train_all_layers_gradiend(setup, model=base_model, output=output, **model_config)
         else:
             print('Model', output, 'already exists, skipping training, but evaluate')
 
-        analyze_models(output, split='val', force=force)
-        model_metrics = get_model_metrics(output, split='val')
-        metric_value = model_metrics[metric]
-        json.dump(metric_value, open(metrics_file, 'w'))
-        metrics.append(metric_value)
+        try:
+            setup.analyze_models(output, split='val', force=force)
+            model_metrics = setup.get_model_metrics(output, split='val')
+            metric_value = model_metrics[metric]
+            json.dump(metric_value, open(metrics_file, 'w'))
+            metrics.append(metric_value)
+        except Exception as e:
+            print(f'Error analyzing model {output}, {e}, skipping...')
 
         times.append(time.time() - start)
 
         if clear_cache:
-            cache_folder = f'data/cache/gradients/{base_model}'
+            cache_folder = f'results/cache/gradients/{setup.id}/{base_model}'
             if os.path.exists(cache_folder):
                 shutil.rmtree(cache_folder)
 
-    print(f'Metrics for model {base_model}: {metrics}')
-    best_index = np.argmax(metrics)
-    print('Best metric at index', best_index, 'with value', metrics[best_index])
+    if metrics:
+        print(f'Metrics for model {base_model}: {metrics}')
+        best_index = np.argmax(metrics)
+        print('Best metric at index', best_index, 'with value', metrics[best_index])
 
-    base_model_id = base_model.split('/')[-1]
-    output = f'results/models/{base_model_id}{version.replace("/", "-")}'
-    # copy the best model to output
-    shutil.copytree(f'results/experiments/gradiend/{base_model}{version}/{best_index}', output, dirs_exist_ok=True)
+        # copy the best model to output
+        shutil.copytree(f'results/experiments/gradiend/{setup.id}/{base_model}{version}/{best_index}', output, dirs_exist_ok=True)
 
-    total_time = time.time() - total_start
-    if times:
-        print(f'Trained {len(times)} models in {total_time}s')
-        print(f'Average time per model: {np.mean(times)}')
+        total_time = time.time() - total_start
+        if times:
+            print(f'Trained {len(times)} models in {total_time}s')
+            print(f'Average time per model: {np.mean(times)}')
+        else:
+            print('All models were already trained before!')
+    elif n == 1:
+        print(f'No metrics found for model {base_model}, but trained once')
+        # check if copying is necessary
+        if not os.path.exists(output) or not os.path.isfile(f'{output}/pytorch_model.bin'):
+            print('Copying trained model to output')
+            shutil.copytree(f'results/experiments/gradiend/{setup.id}/{base_model}{version}/0', output, dirs_exist_ok=True)
     else:
-        print('All models were already trained before!')
+        print(f'No metrics found for model {base_model}, skipping saving output')
+
 
     return output
+
+def train_for_configs(setup, model_configs, n=3, metric='pearson', force=False, version=None, clear_cache=False, selecting_after_total_training=False):
+    models = []
+    for base_model, model_config in model_configs.items():
+        model = train(setup, base_model, model_config, only_return_output=False, n=n, metric=metric, force=force, version=version, clear_cache=clear_cache)
+        models.append(model)
+        if not selecting_after_total_training:
+            try:
+                setup.select(model)
+                pass
+            except Exception as e:
+                print(f'Error selecting model: {e}')
+
+
+    if selecting_after_total_training:
+        try:
+            for model in models:
+                setup.select(model)
+        except Exception as e:
+            print(f'Error selecting models: {e}')
+
+    return models
 
 
 if __name__ == '__main__':
@@ -82,11 +124,12 @@ if __name__ == '__main__':
         'meta-llama/Llama-3.2-3B': dict(batch_size=32, eval_max_size=0.05, eval_batch_size=1, epochs=1, torch_dtype=torch.bfloat16, lr=1e-4, n_evaluation=250),
     }
 
+    setup = GenderEnSetup()
+
     models = []
     for base_model, model_config in model_configs.items():
-        model = train(base_model, model_config, n=3, version='', clear_cache=False, force=False)
+        model = train(setup, base_model, model_config, n=3, version='test2', clear_cache=False, force=False)
         models.append(model)
 
-
     for model in models:
-        select(model)
+        setup.select(model)

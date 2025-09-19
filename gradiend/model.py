@@ -1,6 +1,8 @@
 import copy
+import gc
 import re
 import warnings
+from typing import Iterator
 
 import numpy as np
 import torch
@@ -8,12 +10,14 @@ import torch.nn as nn
 import torch.nn.functional as F
 from matplotlib import pyplot as plt
 from scipy.stats import binned_statistic
-from transformers import AutoModelForMaskedLM, AutoTokenizer, AutoModelForCausalLM
+from torch.nn import Parameter
+from transformers import AutoModelForMaskedLM, AutoTokenizer, AutoModelForCausalLM, AutoConfig, GPT2Config
 import json
 import os
-import math
 
-from gradiend.util import hash_it
+from gradiend.training.decoder_only_mlm.model import DecoderModelWithMLMHead
+from gradiend.util import hash_it, convert_tuple_keys_recursively
+
 HF_TOKEN = os.getenv('HF_TOKEN')
 
 
@@ -24,14 +28,18 @@ class AutoModelForLM(nn.Module):
         try:
             return AutoModelForMaskedLM.from_pretrained(name_or_path)
         except Exception:
-            if 'llama' in name_or_path.lower():
+
+            config_file = os.path.join(name_or_path, 'config_mlm_head.json')
+
+            if os.path.exists(config_file):
+                return DecoderModelWithMLMHead.from_pretrained(name_or_path, torch_dtype=torch_dtype)
+            elif 'llama' in name_or_path.lower():
                 return AutoModelForCausalLM.from_pretrained(name_or_path,
                                                             torch_dtype=torch_dtype,
                                                             token=HF_TOKEN,
-                                                            #device_map='auto',
                                                             )
 
-            return AutoModelForCausalLM.from_pretrained(name_or_path)
+            return AutoModelForCausalLM.from_pretrained(name_or_path, torch_dtype=torch_dtype)
 
 
 
@@ -173,6 +181,8 @@ def get_activation(activation: str, encoder=False):
             activation_fnc = nn.LayerNorm(1)
         else:
             activation_fnc = nn.Identity()
+    elif activation == 'silu':
+        activation_fnc = nn.SiLU()
     else:
         raise ValueError('Unsupported activation function:', activation)
     return activation_fnc
@@ -308,9 +318,9 @@ class GradiendModel(nn.Module):
                  latent_dim,
                  layers,
                  activation='tanh',
-                 bias_decoder=False,
+                 bias_decoder=True,
                  decoder_factor=1.0,
-                 activation_decoder=None,
+                 activation_decoder='id',
                  torch_dtype=torch.float32,
                  device=None,
                  device_encoder=None,
@@ -322,6 +332,10 @@ class GradiendModel(nn.Module):
 
         self.latent_dim = int(latent_dim)
         self.input_dim = int(input_dim)
+
+        if self.input_dim <= 0 or self.latent_dim <= 0:
+            raise ValueError("Input and latent dimensions must be positive integers.")
+
         self.layers = layers
         self.activation = activation.lower()
         self.bias_decoder = bias_decoder
@@ -349,6 +363,7 @@ class GradiendModel(nn.Module):
         # Initialize the decoder weights with the same distribution as the encoder weights (up to decoder_factor)
         x = self.encoder[0].weight.max().item() * decoder_factor
         nn.init.uniform_(self.decoder[0].weight, -x, x)
+
         if bias_decoder:
             nn.init.uniform_(self.decoder[0].bias, -x, x)
 
@@ -375,7 +390,7 @@ class GradiendModel(nn.Module):
             layers_hash = hash_it(self.layers)
         return layers_hash
 
-    def extract_gradients(self, bert, return_dict=False, ):
+    def extract_gradients_(self, bert, return_dict=False, ):
         layer_map = {k: v for k, v in bert.named_parameters()}
         if isinstance(self.layers, dict):
             if return_dict:
@@ -387,6 +402,28 @@ class GradiendModel(nn.Module):
             return {layer: layer_map[layer].grad.detach() for layer in self.layers}
 
         return torch.concat([layer_map[layer].grad.flatten().detach() for layer in self.layers])
+
+    def extract_gradients(self, bert, return_dict=False):
+        layer_map = {k: v for k, v in bert.named_parameters()}
+        if isinstance(self.layers, dict):
+            if return_dict:
+                return {
+                    k: (v.grad.detach().clone() * self.layers[k]
+                        if v.grad is not None else torch.zeros_like(v))
+                    for k, v in layer_map.items() if k in self.layers
+                }
+            else:
+                layer_map = {
+                    k: v.grad[self.layers[k]].detach().clone()
+                    for k, v in layer_map.items() if k in self.layers
+                }
+                return torch.concat([layer_map[layer].flatten() for layer in self.layers])
+        elif return_dict:
+            return {layer: layer_map[layer].grad.detach().clone()
+                    for layer in self.layers}
+
+        return torch.concat([layer_map[layer].grad.flatten().detach().clone()
+                             for layer in self.layers])
 
     def set_tokenizer(self, tokenizer):
         self.tokenizer = tokenizer
@@ -507,14 +544,18 @@ class GradiendModel(nn.Module):
         with open(config_path, 'w') as f:
             json.dump(config, f)
 
+
+
     def _serialize_kwargs(self):
         kwargs = self.kwargs.copy()
-        training_kwargs = kwargs['training'].copy()
+        training_kwargs = kwargs['training']['config'].copy()
 
         if isinstance(training_kwargs['layers'], dict):
             training_kwargs['layers'] = list(training_kwargs['layers'].keys())
             training_kwargs['layers_path'] = 'layers.pth'
-        kwargs['training'] = training_kwargs
+        kwargs['training']['config'] = training_kwargs
+
+        kwargs = convert_tuple_keys_recursively(kwargs)
 
         return kwargs
 
@@ -550,19 +591,22 @@ class GradiendModel(nn.Module):
         with open(config_path, 'r') as f:
             config = json.load(f)
 
+        # check if the file actually belongs to a GRADIEND model
+        if 'input_dim' not in config or 'latent_dim' not in config or 'layers' not in config:
+            raise FileNotFoundError(f"The directory {load_directory} does not contain a valid GRADIEND model configuration.")
+
 
         if 'llama' in load_directory.lower() and device_encoder is None and device_decoder is None:
             # check that two GPUs are available
             if torch.cuda.device_count() < 2:
                 raise RuntimeError("Two GPUs are required for GRADIEND Llama models.")
 
-            device_encoder = torch.device("cuda:1")
-            device_decoder = torch.device("cuda:0")
+            device_encoder = torch.device("cuda:0")
+            device_decoder = torch.device("cuda:1")
 
         # Instantiate the model
         model = cls(**config, device_encoder=device_encoder, device_decoder=device_decoder)
 
-    # todo check GPU?
         # Load model state dictionary
         state_dict = torch.load(model_path, map_location=device_decoder, weights_only=True)
 
@@ -642,21 +686,76 @@ class GradiendModel(nn.Module):
         plt.grid(True)
         plt.tight_layout()
 
-        return fig
+        return
+
+    @property
+    def source(self):
+        if 'config' in self.kwargs['training']:
+            source = self.kwargs['training']['config']['source']
+        else:
+            # todo deprecate
+            source = self.kwargs['training'].get('source', 'factual')
+
+        if source == 'gradient':
+            source = 'factual'
+        elif source == 'inv_gradient':
+            source = 'counterfactual'
+
+        return source
+
+class CombinedGradiendModel(GradiendModel):
+
+    def _extract_property(self, gradiends, property_name, default=None):
+        values = [getattr(g, property_name, default) for g in gradiends]
+        if all(v == values[0] for v in values):
+            return values[0]
+        else:
+            raise ValueError(f"All gradiends must have the same {property_name}, but got: {values}")
+
+    def __init__(self, gradiends):
+        input_dim = self._extract_property(gradiends, 'input_dim')
+        latent_dim = len(gradiends) # todo ensure all have latent_dim 1
+        layers = self._extract_property(gradiends, 'layers')
+        activation = self._extract_property(gradiends, 'activation')
+        bias_decoder = self._extract_property(gradiends, 'bias_decoder')
+        decoder_factor = self._extract_property(gradiends, 'decoder_factor', 1.0)
+        activation_decoder = self._extract_property(gradiends, 'activation_decoder')
+        torch_dtype = self._extract_property(gradiends, 'torch_dtype', torch.float32)
+
+        super().__init__(
+            input_dim=input_dim,
+            latent_dim=latent_dim,
+            layers=layers,
+            activation=activation,
+            bias_decoder=bias_decoder,
+            decoder_factor=decoder_factor,
+            activation_decoder=activation_decoder,
+            torch_dtype=torch_dtype,
+        )
+
+        for i, gradiend in enumerate(gradiends):
+            self.encoder[0].weight.data[i:i+1, :] = gradiend.encoder[0].weight.data
+            self.encoder[0].bias.data[i:i+1] = gradiend.encoder[0].bias.data
+            self.decoder[0].weight.data[:, i:i+1] = gradiend.decoder[0].weight.data
+
+        self.decoder[0].bias.data = torch.stack([g.decoder[0].bias.data for g in gradiends]).mean(dim=0)
+
 
 def is_generative(model):
-    return hasattr(model, 'lm_head')
+    return 'ForMaskedLM' not in str(type(model))
+
 
 class ModelWithGradiend(nn.Module):
 
-    def __init__(self, base_model, gradiend, tokenizer, base_model_device=None):
+    def __init__(self, base_model, gradiend, tokenizer, base_model_device=None, use_gradients=True):
         super().__init__()
         self.base_model = base_model
         self.gradiend = gradiend
         self.tokenizer = tokenizer
         self.grad_iterations = gradiend.grad_iterations
+        self.use_gradients = use_gradients
 
-        self.base_model_device = base_model_device or torch.device('cuda')
+        self.base_model_device = base_model_device or gradiend.encoder[0].linear.weight.device
         self.base_model.to(self.base_model_device)
         self.layer_map = {k: v for k, v in self.base_model.named_parameters()}
 
@@ -666,9 +765,20 @@ class ModelWithGradiend(nn.Module):
         if self.is_generative:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
+    def parameters(self, recurse: bool = True) -> Iterator[Parameter]:
+        return self.gradiend.parameters(recurse=recurse)
+
+    def plot(self, *args, **kwargs):
+        # Plotting is handled by the gradiend model
+        return self.gradiend.plot(*args, **kwargs)
+
     @property
     def name(self):
         return os.path.basename(self.gradiend.name_or_path)
+
+    @property
+    def source(self):
+        return self.gradiend.source
 
     def create_gradients(self, text, label, return_dict=False, verbose=False):
         item = self.create_inputs(text, label)
@@ -699,7 +809,7 @@ class ModelWithGradiend(nn.Module):
                         true_token = self.tokenizer.decode([true_id], skip_special_tokens=True)
 
                         print(f"Position {pos.item():>2}: Predicted = '{pred_token}', True = '{true_token}'",
-                              "✅" if pred_token.lower() == true_token.lower() else "❌")
+                              "✅" if pred_token.strip().lower() == true_token.strip().lower() else "❌")
 
         loss_base_model = outputs.loss
 
@@ -707,19 +817,39 @@ class ModelWithGradiend(nn.Module):
         loss_base_model.backward()
 
         gradients = self.gradiend.extract_gradients(self.base_model, return_dict=return_dict)
+        self.base_model.zero_grad(set_to_none=True)
         return gradients
 
+    def create_base_model_outputs(self, text, label):
+        # create inputs for the base model
+        inputs = self.create_inputs(text, label)
+        outputs = self.create_model_embeddings(inputs)
+        return outputs
 
-    def encode(self, text, label):
-        gradients = self.create_gradients(text, label)
-        encoded = self.gradiend.encoder(gradients).item()
+    def create_encoder_inputs(self, text, label):
+        if self.use_gradients:
+            return self.create_gradients(text, label)
+        else:
+            return self.create_base_model_outputs(text, label)
+
+    def encode(self, input, label=None):
+        if isinstance(input, str):
+            assert label is not None, 'Label must be provided if input is a string'
+            input = self.create_encoder_inputs(input, label)
+
+        encoded = self.gradiend.encoder(input)
+        #if len(encoded) == 1:
+        #    encoded = encoded.item()
+
         return encoded
 
-
-
-    def modify_model(self, lr, gender_factor, part='decoder', top_k=None, top_k_part=None):
-        # returns a base_model model with enhanced weights based on the auto encoder, use the learning rate parameter to control the influence of the auto encoder
+    def modify_model(self, lr, feature_factor, part='decoder', top_k=None, top_k_part=None):
+        # returns a base_model model with enhanced weights based on the GRADIEND, use the learning rate parameter to control the influence of the GRADIEND
         top_k_part = top_k_part or part
+
+        if not isinstance(feature_factor, list):
+            feature_factor = [feature_factor]
+
 
         import copy
         enhanced_model = copy.deepcopy(self.base_model)
@@ -730,7 +860,7 @@ class ModelWithGradiend(nn.Module):
         model_device = self.base_model.device
         layer_map = {k: v for k, v in enhanced_model.named_parameters()}
         if part == 'decoder':
-            enhancer = self.gradiend.decoder(torch.tensor([gender_factor], dtype=torch.float, device=model_device))
+            enhancer = self.gradiend.decoder(torch.tensor(feature_factor, dtype=torch.float, device=model_device))
         elif part == 'encoder':
             enhancer = self.gradiend.encoder[0].weight.flatten().to(model_device)
         else:
@@ -766,7 +896,8 @@ class ModelWithGradiend(nn.Module):
                 for layer in self.gradiend.layers:
                     shape = layer_map[layer].shape
                     number_of_elements = shape.numel()
-                    layer_chunk = enhancer[idx:idx + number_of_elements].to(model_device)
+                    enhancer = enhancer.unsqueeze(0) if enhancer.dim() == 1 else enhancer
+                    layer_chunk = enhancer[:, idx:idx + number_of_elements].to(model_device)
                     layer_map[layer] += lr * layer_chunk.reshape(shape)
                     idx += number_of_elements
 
@@ -839,13 +970,13 @@ class ModelWithGradiend(nn.Module):
         return layer_map
 
 
+
     def mask_and_encode(self, text, ignore_tokens=False, return_masked_text=False, single_mask=True):
-        item = self.tokenizer(text, return_tensors="pt")
+        item = self.tokenizer(text, return_tensors="pt", max_length=512, truncation=True)
         item = {k: v.to(self.base_model_device) for k, v in item.items()}
         labels = item['input_ids'].clone()
 
         if self.is_generative:
-
             n = labels.shape[1]
 
             # left shift the labels by one
@@ -857,7 +988,7 @@ class ModelWithGradiend(nn.Module):
                 valid_indices_mask = ~torch.isin(labels[0, n // 2:], torch.tensor(ignore_tokens, device=labels.device))
 
                 # Get the indices of the valid tokens
-                valid_indices = torch.nonzero(valid_indices_mask, as_tuple=False).squeeze()
+                valid_indices = torch.nonzero(valid_indices_mask, as_tuple=False).squeeze(-1)
 
                 if valid_indices.numel() > 0:
                     # Randomly select an index from the valid tokens
@@ -893,12 +1024,17 @@ class ModelWithGradiend(nn.Module):
         item['labels'] = labels
 
         outputs = self.base_model(**item)
-        loss_bert = outputs.loss
+        loss_base_model = outputs.loss
+        if loss_base_model is None:
+            if return_masked_text:
+                return None, None, None
+            return None
 
         self.base_model.zero_grad()
-        loss_bert.backward()
+        loss_base_model.backward()
 
         gradients = self.gradiend.extract_gradients(self.base_model)
+        self.base_model.zero_grad(set_to_none=True)
 
         encoded = self.gradiend.encoder(gradients).item()
 
@@ -916,16 +1052,18 @@ class ModelWithGradiend(nn.Module):
         item = {k: v.to(self.base_model_device) for k, v in item.items()}
         if hasattr(self.tokenizer, 'tokenizer'):
             label_token_id = self.tokenizer.tokenizer(f' {label}', add_special_tokens=False)['input_ids']
+            if self.tokenizer.tokenizer.decode(label_token_id[0]).strip() == '':
+                label_token_id = label_token_id[1:]
         else:
             label_token_id = self.tokenizer(f'{label}', add_special_tokens=False)['input_ids']
         if not len(label_token_id) == 1:
+            # todo we need to support multiple label tokens in the future (e.g., for valence/arousal key words)
             raise ValueError('Only a single label token is supported', label_token_id, label)
         label_token_id = label_token_id[0]
 
         if self.is_generative:
             item['labels'] = torch.full_like(item['input_ids'], -100)
             last_idx = (item['input_ids'].squeeze() != self.tokenizer.pad_token_id).nonzero()[-1].item()
-            #last_idx -= int(self.is_instruction_model)
             item['labels'][:, last_idx] = label_token_id
         else:
             labels = item['input_ids'].clone()
@@ -934,10 +1072,54 @@ class ModelWithGradiend(nn.Module):
             item['labels'] = labels
         return item
 
-    def forward_pass(self, inputs, return_dict=False, lr=1e-4, verbose=False): # todo implement batched=True
 
+    def feature_creator(self, *args, **kwargs):
+        if self.use_gradients:
+            return self.forward_pass_create_gradients(*args, **kwargs)
+        else:
+            return self.create_model_embeddings(*args, **kwargs)
+
+    @property
+    def feature_creator_id(self):
+        return 'grad' if self.use_gradients else 'no-grad'
+
+    def create_model_embeddings(self, inputs):
         inputs = {k: v.to(self.base_model_device) for k, v in inputs.items()}
+        inputs = {k: v.unsqueeze(0) if v.ndim == 1 else v for k, v in inputs.items()}
+        input_ids = inputs['input_ids']
+        mask = input_ids == self.tokenizer.mask_token_id
+        labels = inputs['labels']
+        mask_labels = labels[labels != -100]
+        #input_ids[mask] = mask_labels
+        inputs['input_ids'] = input_ids
+        del inputs['labels']
 
+
+        # change mask to [CLS] token, i.e., the first token
+        cls_mask = torch.zeros_like(input_ids, dtype=torch.bool, device=input_ids.device)
+        cls_mask[:, 0] = True
+
+
+        output = self.base_model.base_model(**inputs)
+        #logits = output.logits
+        #mask_logits = logits[mask.unsqueeze(-1).expand_as(logits)]
+        #return mask_logits
+
+        last_hidden_state = output[0]
+
+        # we currently take only the mean of the last hidden state for the masked tokens
+        # note that we apply the mean here to get a similar representation as we have for the gradient input
+        return last_hidden_state[cls_mask].mean(dim=0)
+
+
+# todo rename to create_gradients (once verified nothing breaks when renaming globally)
+    def forward_pass_create_gradients(self,
+                                      inputs,
+                                      return_dict=False,
+                                      lr=1e-4,
+                                      verbose=False): # todo implement batched=True
+        inputs = {k: v.to(self.base_model_device) for k, v in inputs.items()}
+        inputs = {k: v.unsqueeze(0) if v.ndim == 1 else (v.squeeze(dim=1) if v.ndim == 3 and v.shape[1] == 1 else v) for k, v in inputs.items()}
         grads = []
 
         if self.grad_iterations > 1:
@@ -948,6 +1130,7 @@ class ModelWithGradiend(nn.Module):
                 base_model.zero_grad()
                 loss_bert.backward()
                 gradients = self.gradiend.extract_gradients(base_model, return_dict=True)
+                self.base_model.zero_grad(set_to_none=True)
                 grads.append(gradients)
 
                 if i < self.grad_iterations - 1:
@@ -968,28 +1151,60 @@ class ModelWithGradiend(nn.Module):
             return flatten_gradient
 
         else:
+
+
             outputs = self.base_model(**inputs)
 
             if verbose:
-                # todo check gpt
                 # Get most likely next token from CausalLMOutputWithPast
                 # Find the last valid (non -100) label index for each sequence
-                labels = inputs['labels']
-                last_valid_indices = (labels != -100).int().argmax(dim=1, keepdim=True)
-                pad_id = self.tokenizer.pad_token_id
-                mask = inputs['input_ids'] != pad_id  # shape: [B, T]
-                # But this gives you the first non-pad; we want last
-                last_non_pad_indices = (inputs['input_ids'] != pad_id).int().flip(dims=[1]).argmax(dim=1)
-                last_non_pad_indices = inputs['input_ids'].size(1) - 2 - last_non_pad_indices #+ int(self.is_instruction_model)
+                logits = outputs.logits
+                input_ids = inputs["input_ids"]
 
-                # Get logits at those positions
-                batch_indices = torch.arange(labels.size(0), device=labels.device)
-                selected_logits = outputs.logits[batch_indices, last_non_pad_indices,:]  # shape: (batch_size, vocab_size)
 
-                # Get most likely next token
-                next_token_ids = selected_logits.argmax(dim=-1)  # shape: (batch_size,)
-                next_tokens = self.tokenizer.batch_decode(next_token_ids)
-                print('Next Tokens', next_tokens)
+                shape = input_ids.shape
+                batch_size = shape[0]
+                seq_len = shape[-1]  # always the last dim
+
+                # --- MLM (BERT-style) ---
+                if not self.is_generative:
+                    mask_positions = (input_ids == self.tokenizer.mask_token_id).nonzero(as_tuple=False)
+                    # batch gather
+                    batch_logits = logits[mask_positions[:, 0], mask_positions[:, 1], :]
+                    next_token_ids = batch_logits.argmax(dim=-1)
+                    next_tokens = self.tokenizer.batch_decode(next_token_ids)
+
+                # --- Causal LM (GPT-style) ---
+                else:
+                    labels = inputs['labels']
+                    pred_mask = torch.roll(labels != -100, shifts=-1, dims=1)
+                    batch_logits = logits[pred_mask]
+                    next_token_ids = batch_logits.argmax(dim=-1)
+                    next_tokens = self.tokenizer.batch_decode(next_token_ids)
+
+
+
+                    pad_id = self.tokenizer.pad_token_id or self.tokenizer.eos_token_id
+
+                    # input_ids shape: [B, T] (or [B, K, T], we just care about last dim)
+                    mask = input_ids != pad_id  # [B, T] or [B, K, T]
+
+                    # flatten extra dims if needed
+                    mask_2d = mask.view(mask.size(0), -1)  # [B, T']
+                    seq_len = mask_2d.size(1)
+
+                    # find last non-pad position for each sequence
+                    last_non_pad_indices = mask_2d.int().flip(dims=[1]).argmax(dim=1)
+                    last_non_pad_indices = seq_len - 1 - last_non_pad_indices  # shape [B]
+
+                    # now we can index safely
+                    batch_indices = torch.arange(input_ids.size(0), device=input_ids.device)
+                    batch_logits = logits[batch_indices, last_non_pad_indices, :]
+
+                    next_token_ids = batch_logits.argmax(dim=-1)
+                    next_tokens = self.tokenizer.batch_decode(next_token_ids)
+
+                print('Predicted next tokens:', next_tokens)
 
             loss_bert = outputs.loss
 
@@ -997,102 +1212,214 @@ class ModelWithGradiend(nn.Module):
             loss_bert.backward()
             return self.gradiend.extract_gradients(self.base_model, return_dict=return_dict)
 
+    def forward_pass_create_gradients_(self, inputs, return_dict=False, lr=1e-4, verbose=False):
+        # ensure inputs on same device as base model (or move to cpu — see variant B)
+        inputs = {k: v.to(self.base_model_device) for k, v in inputs.items()}
+        inputs = {k: v.unsqueeze(0) if v.ndim == 1 else (v.squeeze(dim=1) if v.ndim == 3 and v.shape[1] == 1 else v)
+                  for k, v in inputs.items()}
+
+        # run forward
+        outputs = self.base_model(**inputs)
+        loss_bert = outputs.loss
+
+        # collect parameters we care about (only those that require grad)
+        params = [p for p in self.base_model.parameters() if p.requires_grad]
+
+        # compute grads via autograd.grad (does NOT create higher-order graph by default)
+        grads = torch.autograd.grad(loss_bert, params, create_graph=False, retain_graph=False)
+
+        # detach, clone and optionally move to CPU immediately to free GPU memory
+        grads_detached = [g.detach().clone().to('cpu') if g is not None else torch.zeros_like(p, device='cpu')
+                          for g, p in zip(grads, params)]
+
+        # optionally zero out base model grads and delete outputs to free memory
+        self.base_model.zero_grad(set_to_none=True)
+        del outputs
+        for t in inputs.values():
+            try:
+                del t
+            except Exception:
+                pass
+        torch.cuda.empty_cache()
+        gc.collect()
+
+        # convert to dict if needed (keyed by parameter name)
+        if return_dict:
+            named = dict(self.base_model.named_parameters())
+            out = {}
+            idx = 0
+            for name, p in named.items():
+                if p.requires_grad:
+                    out[name] = grads_detached[idx]
+                    idx += 1
+            return out
+        else:
+            # flatten into a single tensor (on CPU)
+            return torch.cat([g.flatten() for g in grads_detached])
 
     @property
     def layers_hash(self):
         return self.gradiend.layers_hash
 
     # invert the encoded value, i.e. encoded value * (-1), while keeping the decoders value
-    def invert_encoding(self):
+    def invert_encoding(self, index=None):
         with torch.no_grad():
-            self.gradiend.encoder[0].weight.data *= -1
-            self.gradiend.encoder[0].bias.data *= -1
-            self.gradiend.decoder[0].weight.data *= -1
+            if index is None:
+                # invert all indices
+                self.gradiend.encoder[0].weight.data *= -1
+                self.gradiend.encoder[0].bias.data *= -1
+                self.gradiend.decoder[0].weight.data *= -1
+            else:
+                # invert only the index
+                if isinstance(index, int):
+                    index = [index]
+                elif not isinstance(index, list):
+                    raise ValueError('Index must be an integer or a list of integers')
+
+                for i in index:
+                    if i < 0 or i >= self.gradiend.latent_dim:
+                        raise ValueError(f'Index {i} out of bounds for latent dimension {self.gradiend.latent_dim}')
+                    self.gradiend.encoder[0].weight.data[i] *= -1
+                    self.gradiend.encoder[0].bias.data[i] *= -1
+                    self.gradiend.decoder[0].weight.data[i] *= -1
+
 
     def save_pretrained(self, save_directory, **kwargs):
         self.gradiend.save_pretrained(save_directory, bert=self.base_model.name_or_path, tokenizer=self.tokenizer.name_or_path, **kwargs)
 
     @classmethod
-    def from_pretrained(cls, load_directory, layers=None, latent_dim=1, torch_dtype=torch.float32, device=None, **kwargs):
-        layers = layers or []
-        if len(layers) == 1 and isinstance(layers[0], list):
-            layers = layers[0]
-
+    def from_pretrained(cls,
+                        load_directory,
+                        layers=None,
+                        latent_dim=1,
+                        torch_dtype=torch.float32,
+                        device=None,
+                        use_gradients=True,
+                        init_gradiends=None,
+                        **kwargs):
         device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
         device_encoder = device
         device_decoder = device
-        if 'llama' in load_directory.lower():
-            # check that two GPUs are available
-            if torch.cuda.device_count() < 2:
-                raise RuntimeError("Two GPUs are required for GRADIEND Llama models.")
+        device_base_model = device
 
-            device_encoder = torch.device("cuda:1")
-            device_decoder = torch.device("cuda:0")
+        if init_gradiends:
+            if latent_dim is not None and latent_dim != len(init_gradiends):
+                raise ValueError('If init_gradiends is provided, latent_dim must be None or equal to init_gradiends')
 
-        try:
-            ae = GradiendModel.from_pretrained(load_directory, device_encoder=device_encoder, device_decoder=device_decoder)
+            base_model_id = load_directory.split('/')[-1]
+            gradiends = [GradiendModel.from_pretrained(f'{d}/{base_model_id}') for d in init_gradiends]
+            for g in gradiends:
+                if g.latent_dim != 1:
+                    raise ValueError('Only Gradiend models with latent_dim=1 can be used for initialization')
 
-            if layers and ae.layers != layers:
-                raise ValueError(f'The provided layers {layers} do not match the layers in the model configuration {ae.layers}')
-            else:
-                layers = ae.layers
+            base_models = set(g.kwargs['base_model'] for g in gradiends)
+            if len(base_models) != 1:
+                raise ValueError('All Gradiend models used for initialization must have the same base_model, got:', base_models)
 
 
-            base_model_id = ae.kwargs['base_model']
-            base_model = AutoModelForLM.from_pretrained(base_model_id)
-            tokenizer = ae.kwargs.get('tokenizer', base_model_id)
-            tokenizer = AutoTokenizerForLM.from_pretrained(tokenizer)
-        except FileNotFoundError:
-            print('No model with auto encoder found in the specified directory:', load_directory, ' -> creating a new auto encoder')
+            if load_directory not in base_models:
+                raise ValueError(f'The provided base model id {load_directory} does not match the base model ids of the Gradiend models used for initialization: {base_models}')
 
-            if isinstance(load_directory, str):
-                base_model = AutoModelForLM.from_pretrained(load_directory, torch_dtype=torch_dtype)
-                tokenizer = AutoTokenizerForLM.from_pretrained(load_directory)
-            else:
-                base_model = load_directory
-                tokenizer = base_model.tokenizer
+            base_model = AutoModelForLM.from_pretrained(load_directory)
+            tokenizer = AutoTokenizerForLM.from_pretrained(load_directory)
 
-            layer_map = {k: v for k, v in base_model.named_parameters() if 'cls.prediction' not in k.lower()}
+            gradiend = CombinedGradiendModel(gradiends)
+            layers = gradiend.layers
+        else:
+            layers = layers or []
+            if len(layers) == 1 and isinstance(layers[0], list):
+                layers = layers[0]
 
-            if layers:
-                if not isinstance(layers, dict):
-                    # layers information are provided
-                    # check if layer description can be matched with layer_map keys
-                    # layer description could also be "*.layer.10*"
-                    matched_layers = []
-                    for layer in layers:
-                        if layer in layer_map:
-                            matched_layers.append(layer)
-                        else:
-                            # Handle wildcard matching (e.g., "*.layer.10*")
-                            layer_pattern = layer.replace('.', r'\.').replace('*', r'.*')  # Convert to regex pattern
-                            layer_regex = re.compile(layer_pattern)
+            if 'llama' in load_directory.lower():
+                # check that two GPUs are available
+                cuda_count = torch.cuda.device_count()
+                if cuda_count < 2:
+                    raise RuntimeError("Two GPUs are required for GRADIEND Llama models.")
 
-                            for layer_name in layer_map:
-                                if layer_regex.fullmatch(layer_name):
-                                    matched_layers.append(layer_name)
+                device_encoder = torch.device("cuda:0")
+                device_decoder = torch.device("cuda:1")
 
-                    layers = list(sorted(matched_layers, key=lambda x: list(layer_map.keys()).index(x)))
-            else:
-                # no layer provided, i.e. all layers are used that are part of the core model, i.e. all layers that are not part of prediction layers
-                layers = [layer for layer in layer_map]
+                available_gpu_ram = torch.cuda.get_device_properties(device_encoder).total_memory // (1024 ** 3)
+                available_gpu_ram_greater_than_100GB = available_gpu_ram >= 100
+                device_base_model = device_encoder if (cuda_count == 2 or available_gpu_ram_greater_than_100GB) else torch.device("cuda:2")
 
-            if isinstance(layers, dict):
-                input_dim = sum([v.sum() for v in layers.values()])
-            else:
-                input_dim = sum([layer_map[layer].numel() for layer in layers])
-            ae = GradiendModel(input_dim,
-                               layers=layers,
-                               latent_dim=latent_dim,
-                               base_model=load_directory,
-                               torch_dtype=torch_dtype,
-                               device=device,
-                               **kwargs)
+            try:
+                gradiend = GradiendModel.from_pretrained(load_directory, device_encoder=device_encoder, device_decoder=device_decoder)
+
+                if layers and gradiend.layers != layers:
+                    raise ValueError(f'The provided layers {layers} do not match the layers in the model configuration {gradiend.layers}')
+                else:
+                    layers = gradiend.layers
+
+                if 'config' in gradiend.kwargs['training']:
+                    base_model_id = gradiend.kwargs['training']['config']['base_model']
+                else:
+                    # todo deprecate this format
+                    base_model_id = gradiend.kwargs['training']['base_model']
+                base_model = AutoModelForLM.from_pretrained(base_model_id, torch_dtype=torch_dtype).to(device_base_model)
+                tokenizer = gradiend.kwargs.get('tokenizer', base_model_id)
+                tokenizer = AutoTokenizerForLM.from_pretrained(tokenizer)
+            except FileNotFoundError or TypeError:
+                print('No model with GRADIEND found in the specified directory:', load_directory, ' -> creating a new GRADIEND')
+
+                if isinstance(load_directory, str):
+                    base_model = AutoModelForLM.from_pretrained(load_directory, torch_dtype=torch_dtype).to(device_base_model)
+                    tokenizer = AutoTokenizerForLM.from_pretrained(load_directory)
+                else:
+                    base_model = load_directory
+                    tokenizer = base_model.tokenizer
+
+                excluded_layers = {
+                    'cls.prediction', # todo check if this is still needed as we use base_model (e.g. ,BertModel, rather than BertForMaskedLM)
+                }
+
+                layer_map = {k: v for k, v in base_model.named_parameters() if not any(x in k.lower() for x in excluded_layers)}
+
+                if layers:
+                    if not isinstance(layers, dict):
+                        # layers information are provided
+                        # check if layer description can be matched with layer_map keys
+                        # layer description could also be "*.layer.10*"
+                        matched_layers = []
+                        for layer in layers:
+                            if layer in layer_map:
+                                matched_layers.append(layer)
+                            else:
+                                # Handle wildcard matching (e.g., "*.layer.10*")
+                                layer_pattern = layer.replace('.', r'\.').replace('*', r'.*')  # Convert to regex pattern
+                                layer_regex = re.compile(layer_pattern)
+
+                                for layer_name in layer_map:
+                                    if layer_regex.fullmatch(layer_name):
+                                        matched_layers.append(layer_name)
+
+                        layers = list(sorted(matched_layers, key=lambda x: list(layer_map.keys()).index(x)))
+                else:
+                    # no layer provided, i.e. all layers are used that are part of the core model, i.e. all layers that are not part of prediction layers
+                    layers = [layer for layer in layer_map]
+
+                if use_gradients:
+                    if isinstance(layers, dict):
+                        input_dim = sum([v.sum() for v in layers.values()])
+                    else:
+                        input_dim = sum([layer_map[layer].numel() for layer in layers])
+                else:
+                    # use the hidden size of the base model as input dimension
+                    input_dim = base_model.config.hidden_size
+
+                gradiend = GradiendModel(input_dim,
+                                   layers=layers,
+                                   latent_dim=latent_dim,
+                                   base_model=load_directory,
+                                   torch_dtype=torch_dtype,
+                                   device_encoder=device_encoder,
+                                   device_decoder=device_decoder,
+                                   **kwargs)
 
         # freeze all layers that do not require gradient calculations
         freeze_layers_until_target(base_model, *layers)
 
-        model = ModelWithGradiend(base_model, ae, tokenizer)
+        model = ModelWithGradiend(base_model, gradiend, tokenizer, base_model_device=device_base_model, use_gradients=use_gradients)
         model.name_or_path = load_directory
         return model
 

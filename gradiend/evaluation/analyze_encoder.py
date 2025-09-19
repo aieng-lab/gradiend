@@ -2,6 +2,8 @@ import itertools
 import json
 import os.path
 
+from matplotlib.cm import get_cmap
+from matplotlib.colors import ListedColormap
 from scipy.stats import stats
 from sklearn.metrics import balanced_accuracy_score
 from tqdm import tqdm
@@ -17,271 +19,22 @@ from scipy.spatial.distance import jensenshannon
 
 
 from gradiend.model import ModelWithGradiend
-from gradiend.data import read_geneutral, read_gender_data, get_gender_words, \
-    write_default_predictions, read_default_predictions, json_dumps, json_loads, read_genter, read_namexact
-from gradiend.data import read_names_data
+from gradiend.data.util import json_loads
 import seaborn as sns
 
-from gradiend.util import token_distance, get_files_and_folders_with_prefix, evaluate_he_she, find_outliers
+from gradiend.util import get_files_and_folders_with_prefix, find_outliers, z_score
 
 
-def z_score(x, groupby=None, key=None):
-    if isinstance(x, pd.DataFrame):
-        assert key is not None
+def read_encoded_values(file):
+    encoded_values = get_file_name(file, file_format='csv', max_size=None, split='test', v=3)
+    df_encoded = pd.read_csv(encoded_values)
 
-        if groupby is not None:
-            result = x.groupby(groupby).apply(lambda x: z_score(x[key]))
-            return result.reset_index(level=0, drop=True)
-        x = x[key]
+    df_encoded['he'] = df_encoded['he'].apply(json_loads)
+    df_encoded['she'] = df_encoded['she'].apply(json_loads)
+    df_encoded['labels'] = df_encoded['labels'].apply(json_loads)
+    df_encoded['most_likely_token'] = df_encoded['most_likely_token'].apply(json_loads)
 
-    mean = x.mean()
-    std = x.std()
-    return (x - mean) / std
-
-
-
-def plot_model_results(encoded_values, title='', y='z_score'):
-    if isinstance(encoded_values, str):
-        results = read_encoded_values(encoded_values)
-        if not title:
-            title = encoded_values.removesuffix('.csv')
-    else:
-        results = encoded_values
-
-    plot_results = results.copy()
-    plot_results['plot_state'] = plot_results['type']
-    if y == 'encoded':
-        plot_results.loc[plot_results['type'] == 'gender masked', 'plot_state'] = plot_results['state']
-    else:
-        plot_results = plot_results[plot_results['type'] == 'gender masked'].reset_index(drop=True)
-        plot_results['plot_state'] = plot_results['state']
-
-#    plot_results = results[results['type'] == 'gender masked'].sort_values(by='state').reset_index(drop=True)
-    sns.boxplot(x='plot_state', y=y, data=plot_results)
-    plt.grid()
-    plt.title(title)
-    file = f'results/img/z_score/{title}_{y}.png'
-    os.makedirs(os.path.dirname(file), exist_ok=True)
-    plt.savefig(file)
-    plt.show()
-
-
-
-def analyze_model(model_with_gradiend, genter_df, names_df, output, df_no_gender=None, include_B=False, plot=False):
-    if not include_B and 'B' in names_df['gender'].unique():
-        if not 'genders' in names_df:
-            raise ValueError('The names_df must contain the key genders if include_B is False')
-        names_df = names_df[names_df['genders'] != 'B']
-
-    model = model_with_gradiend.base_model
-    tokenizer = model_with_gradiend.tokenizer
-    mask_token = tokenizer.mask_token
-    is_generative = model_with_gradiend.is_generative
-
-    cache_default_predictions_dict = read_default_predictions(model)
-
-    modified_cache = []
-
-    def get_default_prediction(masked_text):
-        if masked_text in cache_default_predictions_dict:
-            return cache_default_predictions_dict[masked_text]
-
-        # calculate the predictions
-        predictions = evaluate_he_she(model, tokenizer, masked_text)
-        cache_default_predictions_dict[masked_text] = predictions
-        if not modified_cache:
-            modified_cache.append(True)
-        return predictions
-
-    source = model_with_gradiend.gradiend.kwargs['training']['source']
-
-    male_names = itertools.cycle(names_df[names_df['gender'] == 'M'].iterrows())
-    female_names = itertools.cycle(names_df[names_df['gender'] == 'F'].iterrows())
-
-    filled_texts = []
-
-    def process_entry(row, plot=False):
-        if is_generative:
-            masked = row['masked'].split('[PRONOUN]')[0]
-        else:
-            masked = row['masked'].replace('[PRONOUN]', mask_token)
-        encoded_values = []
-        genders = []
-        names = []
-        token_distances = []
-        labels = []
-        default_predictions = {k: [] for k in ['he', 'she', 'most_likely_token', 'label']}
-
-        masked_token_distance = token_distance(tokenizer, masked, '[NAME]', mask_token)
-
-        # todo make the encoding batched!
-
-        inputs = []
-        for i, entry in [next(female_names), next(male_names)]:
-            name = entry['name']
-            filled_text = masked.replace('[NAME]', name)
-            filled_texts.append(filled_text)
-            label = 'he' if entry['gender'] == 'M' else 'she'
-
-            if source == 'diff':
-                label_factual = 'he' if label == 'M' else 'she'
-                label_counter_factual = 'she' if label == 'M' else 'he'
-                inputs_factual = model_with_gradiend.create_inputs(filled_text, label_factual)
-                grads_factual = model_with_gradiend.forward_pass(inputs_factual, return_dict=False)
-                inputs_counter_factual = model_with_gradiend.create_inputs(filled_text, label_counter_factual)
-                grads_counter_factual = model_with_gradiend.forward_pass(inputs_counter_factual, return_dict=False)
-                grads = grads_factual - grads_counter_factual
-                inputs.append(grads)
-                encoded = model_with_gradiend.gradiend.encoder(grads).item()
-            else:
-                if source == 'gradient':
-                    masked_label = label
-                elif source == 'inv_gradient':
-                    masked_label = 'he' if label == 'she' else 'she'
-                else:
-                    raise ValueError(f'Unknown source: {source}')
-                inputs.append((filled_text, masked_label))
-                encoded = model_with_gradiend.encode(filled_text, label=masked_label)
-
-            encoded_values.append(encoded)
-            genders.append(entry['gender'])
-            names.append(name)
-            token_distances.append(masked_token_distance)
-            labels.append([label] * row['pronoun_count'])
-
-            default_prediction = get_default_prediction(filled_text)
-            default_prediction['label'] = label
-            for key, value in default_prediction.items():
-                default_predictions[key].append(value)
-
-        results = pd.DataFrame({
-            'text': masked,
-            'name': names,
-            'state': genders,
-            'encoded': encoded_values,
-            'token_distance': token_distances,
-            'labels': labels,
-            'type': 'gender masked',
-            **default_predictions,
-        })
-
-        results['state_value'] = results['state'].map({'M': 0, 'F': 1, 'B': 0.5})
-        results['z_score'] = z_score(results['encoded'])
-        results = results.sort_values(by='state')
-
-        if plot:
-            plt.title(row['masked'])
-            sns.boxplot(x='state', y='z_score', data=results)
-            plt.show()
-
-        return results
-
-        # todo correlate with names that might be used for the other gender!!!
-
-    # Enable the progress_apply method for DataFrames
-    tqdm.pandas(desc="Analyze with GENTER Test Data")
-    genter_df['genter'] = genter_df.progress_apply(process_entry, axis=1)
-    results = genter_df['genter'].tolist()
-
-    gender_tokens = get_gender_words(tokenizer=tokenizer)
-    torch.manual_seed(42)
-    if df_no_gender is not None:
-        if len(df_no_gender) > 10000:
-            df_no_gender = df_no_gender.head(10000).reset_index(drop=True)
-        texts = []
-        encoded_values = []
-        labels = []
-        default_predictions = {k: [] for k in ['he', 'she', 'most_likely_token', 'label']}
-
-        for i, row in tqdm(list(df_no_gender.iterrows()), desc='No gender data'):
-            text = row['text']
-            encoded, masked_text, label = model_with_gradiend.mask_and_encode(text, ignore_tokens=gender_tokens, return_masked_text=True, single_mask=True)
-            texts.append(masked_text)
-            encoded_values.append(encoded)
-            labels.append(label)
-
-            default_prediction = get_default_prediction(masked_text)
-            default_prediction['label'] = label
-            for key, value in default_prediction.items():
-                default_predictions[key].append(value)
-
-        result = pd.DataFrame({
-            'text': texts,
-            'name': None,
-            'state': None,
-            'encoded': encoded_values,
-            'token_distance': None,
-            'type': 'no gender',
-            **default_predictions,
-        })
-        results.append(result)
-
-    texts = []
-    encoded_values = []
-    labels = []
-    default_predictions = {k: [] for k in ['he', 'she', 'most_likely_token', 'label']}
-    torch.manual_seed(42)
-    for text in tqdm(filled_texts, desc='GENTER data without gender words masked'):
-        encoded, masked_text, label = model_with_gradiend.mask_and_encode(text, ignore_tokens=gender_tokens, return_masked_text=True)
-        texts.append(text)
-        encoded_values.append(encoded)
-        labels.append(label)
-
-        default_prediction = get_default_prediction(masked_text)
-        default_prediction['label'] = label
-        for key, value in default_prediction.items():
-            default_predictions[key].append(value)
-
-    result = pd.DataFrame({
-        'text': texts,
-        'name': None,
-        'state': None,
-        'encoded': encoded_values,
-        'token_distance': None,
-        'type': 'no gender masked',
-        **default_predictions,
-    })
-    results.append(result)
-
-    if modified_cache:
-        write_default_predictions(cache_default_predictions_dict, model)
-
-    total_results = pd.concat(results)
-
-    mean = total_results['encoded'].mean()
-    std = total_results['encoded'].std()
-    total_results['global_z_score'] = (total_results['encoded'] - mean) / std
-
-
-    total_results['he'] = total_results['he'].apply(json_dumps)
-    total_results['she'] = total_results['she'].apply(json_dumps)
-    total_results['label'] = total_results['label'].apply(json_dumps)
-    total_results['most_likely_token'] = total_results['most_likely_token'].apply(json_dumps)
-
-    total_results.to_csv(output, index=False)
-
-
-
-    if plot:
-        # plot results
-        plot_model_results(total_results, title=output.removesuffix('.csv'))
-
-        plot_results = total_results[total_results['type'] == 'gender masked'].sort_values(by='state').reset_index(drop=True)
-        sns.boxplot(x='state', y='encoded', data=plot_results)
-        plt.title(model_with_gradiend.name_or_path)
-        plt.show()
-
-        cor = np.nanmean([text_df[['encoded', 'state_value']].corr(method='pearson')['encoded']['state_value'] for text, text_df in plot_results.groupby('text')])
-        print('Correlation', cor)
-
-        # now without B
-        plot_results_MF = plot_results[plot_results['state'] != 'B']
-        cor = np.nanmean([text_df[['encoded', 'state_value']].corr(method='pearson')['encoded']['state_value'] for text, text_df in plot_results_MF.groupby('text')])
-        print('Correlation MF', cor)
-
-    return total_results
-
-
+    return df_encoded
 
 def get_correlation(df, method):
     if method == 'pearson':
@@ -319,16 +72,6 @@ def get_std_stats(df):
     }
 
 
-def read_encoded_values(file):
-    encoded_values = get_file_name(file, file_format='csv', max_size=None, split='test')
-    df_encoded = pd.read_csv(encoded_values)
-
-    df_encoded['he'] = df_encoded['he'].apply(json_loads)
-    df_encoded['she'] = df_encoded['she'].apply(json_loads)
-    df_encoded['labels'] = df_encoded['labels'].apply(json_loads)
-    df_encoded['most_likely_token'] = df_encoded['most_likely_token'].apply(json_loads)
-
-    return df_encoded
 
 
 
@@ -447,7 +190,7 @@ def get_model_metrics(*encoded_values, prefix=None, suffix='.csv', **kwargs):
     pearson = get_pearson_correlation(df)
     spearman = get_spearman_correlation(df)
 
-    pearson_MF = get_pearson_correlation(df_without_B)
+    pearson = get_pearson_correlation(df_without_B)
     spearman_MF = get_spearman_correlation(df_without_B)
 
     scores = {
@@ -462,8 +205,8 @@ def get_model_metrics(*encoded_values, prefix=None, suffix='.csv', **kwargs):
         'spearmann': spearman,
         'spearman_p_value': spearman['p_value'],
 
-        'pearson_MF': pearson_MF['correlation'],
-        'pearson_MF_p_value': pearson_MF['p_value'],
+        'pearson': pearson['correlation'],
+        'pearson_p_value': pearson['p_value'],
         'spearman_MF': spearman_MF['correlation'],
         'spearman_MF_p_value': spearman_MF['p_value'],
 
@@ -492,6 +235,7 @@ def get_model_metrics(*encoded_values, prefix=None, suffix='.csv', **kwargs):
         json.dump(scores, f, indent=4)
 
     return scores
+
 
 def plot_encoded_value_distribution(*models, model_names=None):
     # read all the encoded values data
@@ -525,12 +269,132 @@ def plot_encoded_value_distribution(*models, model_names=None):
 
     # Initialize the plot
     #plt.figure(figsize=(9, 4))
-    plt.figure(figsize=(13, 3.5))
+    plt.figure(figsize=(13, 3.2))
 
     rename_type_dict = {
-        'gender masked': r'\genter', # todo write genter with \textsc?
+        'F': r'\text{Female}',
+        'M': r'\text{Male}',
+        'no gender masked': r'\traindatazero',
+        #'no gender': r'\geneutral'
+        'gerneutral': r'\gerneutral'
+    }
+    combined_df['type2'] = combined_df['type']
+    combined_df.loc[combined_df['type'] == 'gender masked', 'type2'] = combined_df['state']
+    combined_df['renamed_type'] = combined_df['type2'].map(rename_type_dict)
+
+    combined_df = combined_df[combined_df['state'] != 'B'].reset_index(drop=True)
+
+    #combined_df = combined_df[combined_df['type'] != 'no gender masked'].reset_index(drop=True)
+
+    # add some noise to the encoded values to avoid overplotting
+    combined_df['encoded'] = combined_df['encoded'] + np.random.normal(0, 0.02, size=len(combined_df))
+
+    paired = get_cmap("Paired")
+
+    # extract its colors as a list
+    colors = paired.colors  # list of RGBA tuples
+
+    # pick indices you want (0,1,6,7)
+    custom_colors = [colors[i] for i in [0, 1, 6, 7]]
+
+    # Plot the distribution of the "encoded_value" column
+    # Grouped by "type" and separated by "model" using hue
+    sns.violinplot(x='model',
+                   y='encoded',
+                   hue='renamed_type',
+                   data=combined_df,
+                   split=True,
+                   inner='quartile',
+                   palette=custom_colors,
+                   scale='width',
+                   linewidth=0.7,
+                   hue_order=list(rename_type_dict.values()),
+                   #bw_adjust=0.5,
+                   zorder=5,
+                   )
+
+    # add yellow dots as labels
+    # add yellow dots as labels
+    label_map = {'F': +1, 'M': -1, 'no gender masked': 0, 'gerneutral': 0}
+    offset_map = {'F': -0.29, 'M': -0.11, 'no gender masked': +0.2, 'gerneutral': 0.2}
+
+    # For each model, plot the label dot
+    for i, model_name in enumerate(plot_model_names):
+        model_df = combined_df[combined_df['model'].str.removeprefix("\\") == model_name]
+        for t, label_val in label_map.items():
+            # compute mean encoded value for this type
+            if t in model_df['type2'].values:
+                #y = model_df[model_df['type2'] == t]['label'].mean()
+                y = label_val
+                x = i + offset_map[t] # violinplot x-position is based on model order
+                plt.scatter(x, y, color='yellow', edgecolor='black', s=30, zorder=10)
+
+    # add a dummy scatter for the legend entry (will not appear on the plot)
+    plt.scatter([], [], color='yellow', edgecolor='black', s=30, label='Label', zorder=10)
+
+    # Customize the plot
+    #plt.title('Distribution of Encoded Values by Type and Model')
+    plt.xlabel('Model', fontsize=font_size)
+    plt.ylabel('$h$', fontsize=font_size)
+    yticks = [-1.0, -0.5, 0.0, 0.5, 1.0]
+    plt.xticks(fontsize=font_size-4)
+    plt.yticks(yticks, fontsize=font_size-4)
+
+    # make legend horizontal
+    plt.legend(loc='upper center', bbox_to_anchor=(0.5, 1.38), title_fontsize='large', fontsize=font_size-2, ncol=5)
+
+    # Rotate x-axis labels for better readability
+    if not model_names:
+        plt.xticks(rotation=45, ha='right', fontsize=font_size)
+
+    total_name = '_'.join(plot_model_names)
+
+    # Show the plot
+    plt.tight_layout()
+    plt.grid(zorder=0)
+    output = f'img/encoded_values_{total_name}.pdf'
+    os.makedirs(os.path.dirname(output), exist_ok=True)
+    plt.savefig(output, bbox_inches='tight')
+    plt.show()
+
+def plot_encoded_value_distribution_old(*models, model_names=None):
+    # read all the encoded values data
+    # for each group 'type' plot the distribution of the encoded values in a single plot
+    # Initialize the plot
+    # Initialize a list to collect all the processed data
+    processed_dfs = []
+    plot_model_names = []
+
+    # Loop through each model and prepare the data
+    for i, model in enumerate(models):
+        # Read encoded values for this model
+        df = read_encoded_values(model)
+
+        # Add a column to identify the model
+        if model_names:
+            df['model'] = model_names[i]
+            plot_model_names.append(model_names[i].replace('\\', ''))
+        else:
+            model_base_name = model.split('/')[-1].replace('\\', '')
+            plot_model_names.append(model_base_name)
+            df['model'] = model_base_name
+
+        # Collect the dataframe with the model label
+        processed_dfs.append(df)
+
+    font_size = 20
+
+    # Concatenate all the dataframes into one, so we can plot them together
+    combined_df = pd.concat(processed_dfs, ignore_index=True)
+
+    # Initialize the plot
+    #plt.figure(figsize=(9, 4))
+    plt.figure(figsize=(13, 3))
+
+    rename_type_dict = {
+        'gender masked': r'\genter',
         'no gender masked': r'\genterzero',
-        'no gender': r'\geneutral'
+        'gerneutral': r'\gerneutral'
     }
     combined_df['renamed_type'] = combined_df['type'].map(rename_type_dict)
 
@@ -551,7 +415,7 @@ def plot_encoded_value_distribution(*models, model_names=None):
     # Customize the plot
     #plt.title('Distribution of Encoded Values by Type and Model')
     plt.xlabel('Model', fontsize=font_size)
-    plt.ylabel('Encoded Value $h$', fontsize=font_size)
+    plt.ylabel('$h$', fontsize=font_size)
     plt.xticks(fontsize=font_size-4)
     plt.yticks(fontsize=font_size-4)
 
@@ -567,7 +431,7 @@ def plot_encoded_value_distribution(*models, model_names=None):
     # Show the plot
     plt.tight_layout()
     plt.grid()
-    output = f'results/img/encoded_values_{total_name}.pdf'
+    output = f'img/encoded_values_{total_name}.pdf'
     os.makedirs(os.path.dirname(output), exist_ok=True)
     plt.savefig(output, bbox_inches='tight')
     plt.show()
@@ -734,7 +598,7 @@ def analyze_neurons(model, part='encoder', include_he_she=True):
                 plt.annotate(id, xy=(value, data_offset), xytext=(value, data_offset + offset), textcoords='data', ha='center', rotation=0, color='r', fontsize=8)
 
     plt.tight_layout()
-    file = f'results/img/token_means/{model}_{part}.pdf'
+    file = f'img/token_means/{model}_{part}.pdf'
     os.makedirs(os.path.dirname(file), exist_ok=True)
     plt.savefig(file, bbox_inches='tight')
     plt.show()
@@ -924,7 +788,7 @@ def analyze_neurons_all_parts(model, parts=None, relative=False, q=99.99, boxplo
     plt.legend(loc='center right')
     plt.grid(zorder=0)
     model_name = model.split('/')[-1]
-    file = f'results/img/average_neurons/{model_name}{suffix}_per_layer.pdf'
+    file = f'img/average_neurons/{model_name}{suffix}_per_layer.pdf'
     os.makedirs(os.path.dirname(file), exist_ok=True)
     plt.savefig(file , bbox_inches='tight')
     plt.show()
@@ -1040,46 +904,11 @@ def analyze_neurons_all_parts(model, parts=None, relative=False, q=99.99, boxplo
     plt.legend(loc='lower right')
     plt.grid(zorder=0)
     model_name = model.split('/')[-1]
-    file = f'results/img/average_neurons/{model_name}{suffix}.pdf'
+    file = f'img/average_neurons/{model_name}{suffix}.pdf'
     os.makedirs(os.path.dirname(file), exist_ok=True)
     plt.savefig(file, bbox_inches='tight')
     plt.show()
 
-
-
-def analyze_models(*models, max_size=None, force=False, split='test', prefix=None, best_score=None):
-    if prefix:
-        # find all models in the folder with the suffix
-        best_score = '_best' if best_score else ''
-        models = list(models) + get_files_and_folders_with_prefix(prefix, only_folder=True, suffix=best_score)
-    print(f'Analyze {len(models)} Models:', models)
-
-    names_df = read_namexact(split=split)
-    df = read_genter(split=split)
-    df_no_gender = read_geneutral(max_size=10000)
-
-    if max_size:
-        df = df.head(max_size)
-        df_no_gender = df_no_gender.head(max_size)
-
-    dfs = {}
-    for model in models:
-
-        output = get_file_name(model, max_size=max_size, file_format='csv', split=split)
-
-        if force or not os.path.isfile(output):
-            bert_with_ae = ModelWithGradiend.from_pretrained(model)
-            analyze_df = analyze_model(bert_with_ae, df, names_df, output=output, df_no_gender=df_no_gender)
-            print(f'Done with Model {model}')
-
-        else:
-            print(f'Skipping Model {model} as output file {output} already exists!')
-            analyze_df = pd.read_csv(output)
-
-        if len(models) == 1:
-            return analyze_df
-        dfs[model] = analyze_df
-    return dfs
 
 
 def highlight_highest_values(data, headers):
@@ -1159,14 +988,16 @@ def print_all_models(folder='results/models/', *, prefix=None, keys=None, **kwar
 
 if __name__ == '__main__':
     models = [
-        'bert-base-cased',
-        'bert-large-cased',
-        'roberta-large',
-        'distilbert-base-cased',
-        'gpt2',
-        'meta-llama/Llama-3.2-3B',
-        'meta-llama/Llama-3.2-3B-Instruct'
+        #'bert-base-cased',
+        #'bert-large-cased',
+        #'roberta-large',
+        #'distilbert-base-cased',
+        #'gpt2',
+        'Llama-3.2-3B-Instruct',
+        'Llama-3.2-3B',
     ]
 
-    df = analyze_models(*[f'results/models/{model}' for model in models])
+    from gradiend.setups.gender.en import GenderEnSetup
+    setup = GenderEnSetup()
+    df = setup.analyze_models(*[f'results/models/{model}' for model in models], force=False)
     print_all_models()

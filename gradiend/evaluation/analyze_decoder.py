@@ -9,17 +9,478 @@ from matplotlib import pyplot as plt
 import seaborn as sns
 from torch import softmax
 from tqdm import tqdm
-import pandas as pd
-import torch
+
 from transformers import AutoModelForMaskedLM
 
-from gradiend.evaluation.mlm import evaluate_mlm, evaluate_clm_perplexity
-from gradiend.data import read_geneutral, read_gentypes, read_namextend, read_namexact
+
 from gradiend.model import ModelWithGradiend, AutoModelForLM, AutoTokenizerForLM, InstructTokenizerWrapper
 from gradiend.util import hash_model_weights, normalization, default_accuracy_function, init_matplotlib
 
 
-init_matplotlib()
+import torch
+import pandas as pd
+from collections import defaultdict
+
+
+import torch
+import numpy as np
+from collections import defaultdict
+
+import torch
+import numpy as np
+from collections import defaultdict
+
+def compute_bias_score_v1(model,
+                       tokenizer,
+                       df,
+                       targets,  # dict of key_stratify values -> list of target words
+                       key_text='masked',
+                       ):
+    """
+    Compute bias score per-example, then average.
+    Each example produces:
+        - similarity across groups
+        - magnitude of target probability
+        - combined score = similarity * magnitude
+    Finally, results are averaged across all examples.
+    """
+    model.eval()
+    device = model.device
+    is_generative = 'ForMaskedLM' not in model.__class__.__name__
+    is_llama = 'llama' in model.name_or_path.lower()
+
+    def create_token_ids(words):
+        ids = []
+        if is_llama:
+            words += [f' {w.strip()}' for w in words]
+
+        for w in set(words):
+            tokenized = tokenizer.tokenize(w)
+            if len(tokenized) != 1:
+                print(f"Warning: word '{w}' tokenized into multiple tokens {tokenized};")
+                continue
+            token_id = tokenizer.convert_tokens_to_ids(tokenized[0])
+            ids.append(token_id)
+        return list(set(ids))
+
+    # Convert target words to token ids
+    targets_ids = {group: create_token_ids(words) for group, words in targets.items()}
+
+    all_scores, all_sims, all_mags = [], [], []
+    group_probs_all = defaultdict(list)
+
+    with torch.no_grad():
+        for _, row in df.iterrows():
+            if is_generative:
+                prefix = row[key_text].split('[MASK]')[0]
+
+                if not prefix.strip():
+                    continue
+
+                # Tokenize only prefix, since suffix isn’t used for next-token prediction
+                inputs = tokenizer(prefix, return_tensors="pt", max_length=512, truncation=True).to(device)
+
+                with torch.no_grad():
+                    outputs = model(**inputs)
+
+                # Get logits for the next token after the prefix
+                logits = outputs.logits[0, -1, :]  # last position
+                probs = torch.softmax(logits, dim=-1)
+            else:
+                text = row[key_text].replace('[MASK]', tokenizer.mask_token)
+
+                inputs = tokenizer(text, return_tensors="pt", max_length=512, truncation=True).to(device)
+                mask_idx = (inputs["input_ids"] == tokenizer.mask_token_id).nonzero(as_tuple=True)[1]
+                if len(mask_idx) == 0:
+                    continue
+                mask_idx = mask_idx.item()
+
+                outputs = model(**inputs)
+                logits = outputs.logits[0, mask_idx, :]
+                probs = torch.softmax(logits, dim=-1)
+
+            # Collect probs for all groups for THIS example
+            per_group_probs = {}
+            for group, candidate_ids in targets_ids.items():
+                if not candidate_ids:
+                    continue
+
+                candidate_prob = probs[candidate_ids].sum().cpu().item()
+                per_group_probs[group] = candidate_prob
+                group_probs_all[group].append(candidate_prob)
+
+            if len(per_group_probs) < 2:
+                continue  # need at least 2 groups to compare
+
+            # --- Compute similarity across groups ---
+            values = np.array(list(per_group_probs.values()))
+            all_pairs = []
+            for i in range(len(values)):
+                for j in range(i + 1, len(values)):
+                    all_pairs.append((values[i], values[j]))
+            l1_diff = np.max([abs(a - b) for a, b in all_pairs])
+            similarity = 1.0 - l1_diff
+
+            # --- Magnitude = smallest group prob ---
+            magnitude = float(np.min(values))
+
+            # --- Score ---
+            score = similarity * magnitude
+
+            all_sims.append(similarity)
+            all_mags.append(magnitude)
+            all_scores.append(score)
+
+        if not group_probs_all:
+            raise ValueError("No valid group probabilities computed; check your data and targets.")
+        # Final aggregation
+        group_means = {g: float(np.mean(v)) for g, v in group_probs_all.items() if v}
+        magnitude = float(np.mean(all_mags)) if all_mags else 0.0
+        similarity = float(np.mean(all_sims)) if all_sims else 0.0
+        score = float(np.mean(all_scores)) if all_scores else 0.0
+
+        # Print after loop (like original)
+        print(group_means, 'mag', magnitude, 'sim', similarity, 'score', score)
+
+        return {
+            'score': score,
+            'similarity': similarity,
+            'magnitude': magnitude,
+            'group_probs': group_means,
+        }
+
+import torch
+import numpy as np
+from collections import defaultdict
+
+def compute_bias_score_v2(model,
+                       tokenizer,
+                       df,
+                       targets,  # dict of key_stratify values -> list of target words
+                       key_text='masked',
+                       batch_size=16,
+                       ):
+    """
+    Compute bias score per-example, then average.
+    Each example produces:
+        - similarity across groups
+        - magnitude of target probability
+        - combined score = similarity * magnitude
+    Finally, results are averaged across all examples.
+    """
+    model.eval()
+    device = model.device
+    is_generative = 'ForMaskedLM' not in model.__class__.__name__
+    is_llama = 'llama' in model.name_or_path.lower()
+
+    # --- Precompute target token ids ---
+    def create_token_ids(words):
+        _tokenizer = tokenizer
+        if hasattr(tokenizer, 'tokenizer'):
+            _tokenizer = tokenizer.tokenizer
+        toks = []
+        if is_llama:
+            words = words + [f' {w.strip()}' for w in words]
+        for w in set(words):
+            tokenized = _tokenizer.tokenize(w)
+            if len(tokenized) == 1:
+                toks.append(_tokenizer.convert_tokens_to_ids(tokenized[0]))
+            #elif not is_llama:
+            #    continue
+            else:
+                # check if the first token is at most 50% of the word
+                first_token = tokenized[0]
+                first_token_str = _tokenizer.convert_tokens_to_string([first_token]).strip()
+                if len(first_token_str) / len(w) < 0.5:
+                    print(f"Warning: word '{w}' tokenized into multiple tokens {tokenized}; first token '{first_token_str}' is less than 50% of the word.")
+                else:
+                    print(f"Warning: word '{w}' tokenized into multiple tokens {tokenized}; using first token only.")
+                    toks.append(_tokenizer.convert_tokens_to_ids(tokenized[0]))
+        return list(set(toks))
+
+    targets_ids = {g: create_token_ids(ws) for g, ws in targets.items()}
+
+    # ensure that each target has at least one token id
+    for g, ids in targets_ids.items():
+        if not ids:
+            raise ValueError(f"Target group '{g}' has no valid token ids; check your target words and tokenizer.")
+
+    all_scores, all_sims, all_mags = [], [], []
+    group_probs_all = defaultdict(list)
+
+    rows = df.to_dict("records")
+
+    with torch.no_grad():
+        for start in range(0, len(rows), batch_size):
+            batch = rows[start:start+batch_size]
+
+            if is_generative:
+                # Prefix only (drop empty prefixes)
+                prefixes = [r[key_text].split('[MASK]')[0] for r in batch]
+                valid = [(i, p) for i, p in enumerate(prefixes) if p.strip()]
+                if not valid:
+                    continue
+
+                idxs, prefix_texts = zip(*valid)
+                inputs = tokenizer(list(prefix_texts), return_tensors="pt",
+                                   padding=True, truncation=True, max_length=512).to(device)
+                outputs = model(**inputs)
+                logits = outputs.logits[:, -1, :]  # next-token logits
+                probs = torch.softmax(logits, dim=-1)
+                example_probs = {i: probs[j] for j, i in enumerate(idxs)}
+
+            else:  # MaskedLM
+                texts = [r[key_text].replace('[MASK]', tokenizer.mask_token) for r in batch]
+                inputs = tokenizer(list(texts), return_tensors="pt",
+                                   padding=True, truncation=True, max_length=512).to(device)
+
+                mask_idxs = (inputs["input_ids"] == tokenizer.mask_token_id).nonzero(as_tuple=False)
+                if len(mask_idxs) == 0:
+                    continue
+
+                outputs = model(**inputs)
+                logits = outputs.logits
+                probs = torch.softmax(logits, dim=-1)
+
+                # Map each example to its masked position’s probs
+                example_probs = {}
+                for b_idx, pos in mask_idxs.tolist():
+                    example_probs[b_idx] = probs[b_idx, pos, :]
+
+            # --- Process each example ---
+            for b_idx, row in enumerate(batch):
+                if b_idx not in example_probs:
+                    continue
+
+                p = example_probs[b_idx]
+                per_group_probs = {}
+                for g, ids in targets_ids.items():
+                    if ids:
+                        per_group_probs[g] = float(p[ids].sum())
+                        group_probs_all[g].append(per_group_probs[g])
+
+                if len(per_group_probs) < 2:
+                    continue
+
+                values = np.array(list(per_group_probs.values()))
+                # max |a-b| = max - min
+                l1_diff = values.max() - values.min()
+                similarity = 1.0 - l1_diff
+                magnitude = float(values.min())
+                score = similarity * magnitude
+
+                all_sims.append(similarity)
+                all_mags.append(magnitude)
+                all_scores.append(score)
+
+    if not group_probs_all:
+        raise ValueError("No valid group probabilities computed; check your data and targets.")
+
+    # Final aggregation
+    group_means = {g: float(np.mean(v)) for g, v in group_probs_all.items() if v}
+    magnitude = float(np.mean(all_mags)) if all_mags else 0.0
+    similarity = float(np.mean(all_sims)) if all_sims else 0.0
+    score = float(np.mean(all_scores)) if all_scores else 0.0
+
+    print(group_means, 'mag', magnitude, 'sim', similarity, 'score', score)
+
+    return {
+        'score': score,
+        'similarity': similarity,
+        'magnitude': magnitude,
+        'group_probs': group_means,
+    }
+
+token_cache = {}
+
+def compute_bias_score(model,
+                       tokenizer,
+                       df,
+                       targets,  # dict of key_stratify values -> list of target words/phrases
+                       key_text='masked',
+                       batch_size=16,
+                       ):
+    """
+    Compute bias score per-example, then average.
+    Supports multi-token targets for MaskedLM.
+    Each example produces:
+        - similarity across groups
+        - magnitude of target probability
+        - combined score = similarity * magnitude
+    Finally, results are averaged across all examples.
+    """
+
+
+    model.eval()
+    device = model.device
+    is_generative = 'ForMaskedLM' not in model.__class__.__name__
+    if is_generative:
+        return compute_bias_score_v2(model, tokenizer, df, targets, key_text, batch_size)
+
+    # --- Precompute target token ids (support multi-token) ---
+    def create_token_ids(words):
+
+        cache_id = (tokenizer.name_or_path, hash(tuple(sorted(words))))
+        if cache_id in token_cache:
+            return token_cache[cache_id]
+
+        _tokenizer = tokenizer
+        if hasattr(tokenizer, 'tokenizer'):
+            _tokenizer = tokenizer.tokenizer
+        result = [ _tokenizer.convert_tokens_to_ids(_tokenizer.tokenize(w)) for w in set(words) ]
+        token_cache[cache_id] = result
+        return result
+
+
+    targets_ids = {g: create_token_ids(ws) for g, ws in targets.items()}
+
+    for g, id_lists in targets_ids.items():
+        if not id_lists:
+            raise ValueError(f"Target group '{g}' has no valid token ids; check your targets.")
+
+    all_scores, all_sims, all_mags = [], [], []
+    group_probs_all = defaultdict(list)
+
+    rows = df.to_dict("records")
+
+    with torch.no_grad():
+        for start in range(0, len(rows), batch_size):
+            batch = rows[start:start+batch_size]
+
+            if is_generative:
+                # prefix-only mode
+                prefixes = [r[key_text].split('[MASK]')[0] for r in batch]
+                valid = [(i, p) for i, p in enumerate(prefixes) if p.strip()]
+                if not valid:
+                    continue
+
+                idxs, prefix_texts = zip(*valid)
+                inputs = tokenizer(list(prefix_texts), return_tensors="pt",
+                                   padding=True, truncation=True, max_length=512).to(device)
+                outputs = model(**inputs)
+                logits = outputs.logits[:, -1, :]
+                probs = torch.softmax(logits, dim=-1)
+                example_probs = {i: probs[j] for j, i in enumerate(idxs)}
+
+                # --- Process each example ---
+                for b_idx, row in enumerate(batch):
+                    if b_idx not in example_probs:
+                        continue
+
+                    p = example_probs[b_idx]
+                    per_group_probs = {}
+                    for g, ids in targets_ids.items():
+                        if ids:
+                            per_group_probs[g] = float(p)
+                            group_probs_all[g].append(per_group_probs[g])
+
+                    if len(per_group_probs) < 2:
+                        continue
+
+                    values = np.array(list(per_group_probs.values()))
+                    # max |a-b| = max - min
+                    l1_diff = values.max() - values.min()
+                    similarity = 1.0 - l1_diff
+                    magnitude = float(values.min())
+                    score = similarity * magnitude
+
+                    all_sims.append(similarity)
+                    all_mags.append(magnitude)
+                    all_scores.append(score)
+
+            else:  # MaskedLM with multi-token support
+                texts = [r[key_text] for r in batch]
+
+                # group all targets by length once
+                targets_by_len = defaultdict(list)
+                for g, id_lists in targets_ids.items():
+                    for ids in id_lists:
+                        targets_by_len[len(ids)].append((g, ids))
+
+                # for each length, build expanded texts for *all examples* and run in batch
+                example_probs = defaultdict(dict)  # b_idx -> {group: prob}
+                for k, g_and_ids in targets_by_len.items():
+                    expanded_texts = []
+                    example_map = []  # map back expanded idx -> original example
+                    for b_idx, text in enumerate(texts):
+                        if "[MASK]" not in text:
+                            continue
+                        masked_text = text.replace("[MASK]", " ".join([tokenizer.mask_token] * k))
+                        expanded_texts.append(masked_text)
+                        example_map.append(b_idx)
+
+                    if not expanded_texts:
+                        continue
+
+                    inputs = tokenizer(expanded_texts, return_tensors="pt",
+                                       padding=True, truncation=True, max_length=512).to(device)
+                    outputs = model(**inputs)
+                    probs = torch.softmax(outputs.logits, dim=-1)
+
+                    # for each expanded input, score all targets of this length
+                    for local_idx, b_idx in enumerate(example_map):
+                        mask_positions = (inputs["input_ids"][local_idx] == tokenizer.mask_token_id).nonzero(
+                            as_tuple=False).squeeze(-1).tolist()
+
+                        for g, ids in g_and_ids:
+                            if len(ids) > len(mask_positions):
+                                continue
+                            logp = 0.0
+                            for j, tok_id in enumerate(ids):
+                                pos = mask_positions[j]
+                                logp += torch.log(probs[local_idx, pos, tok_id] + 1e-12)
+                            p = torch.exp(logp).item()
+
+                            example_probs[b_idx][g] = example_probs[b_idx].get(g, 0.0) + p
+                            group_probs_all[g].append(p)
+
+                # compute per-example scores
+                for b_idx, row in enumerate(batch):
+                    per_group_probs = example_probs.get(b_idx, {})
+                    if len(per_group_probs) < 2:
+                        continue
+
+                    values = np.array(list(per_group_probs.values()))
+                    l1_diff = values.max() - values.min()
+                    similarity = 1.0 - l1_diff
+                    magnitude = float(values.min())
+                    score = similarity * magnitude
+
+                    all_sims.append(similarity)
+                    all_mags.append(magnitude)
+                    all_scores.append(score)
+
+    if not group_probs_all:
+        raise ValueError("No valid group probabilities computed; check your data and targets.")
+
+    group_means = {g: float(np.mean(v)) for g, v in group_probs_all.items() if v}
+    magnitude = float(np.mean(all_mags)) if all_mags else 0.0
+    similarity = float(np.mean(all_sims)) if all_sims else 0.0
+    score = float(np.mean(all_scores)) if all_scores else 0.0
+
+    print(group_means, 'mag', magnitude, 'sim', similarity, 'score', score)
+
+    return {
+        'score': score,
+        'similarity': similarity,
+        'magnitude': magnitude,
+        'group_probs': group_means,
+    }
+
+
+
+
+def compute_lms(model, tokenizer, texts, ignore):
+    from gradiend.evaluation.mlm import evaluate_mlm, evaluate_clm_perplexity
+    is_generative = tokenizer.mask_token is None
+    if is_generative:
+        is_llama = 'llama' in model.__class__.__name__.lower()
+        batch_size = 8 if is_llama else 32
+        result = evaluate_clm_perplexity(model, tokenizer, texts[:1000], verbose=False, ignore=ignore, batch_size=batch_size)
+    else:
+        result, stats = evaluate_mlm(model, tokenizer, texts, verbose=False, ignore=ignore)
+    return result
+
 
 
 def calculate_average_probability_difference(fairness_dict):
@@ -112,6 +573,8 @@ token_indices_cache = {}
 gender_mapping_cache = {}
 
 def evaluate_gender_bias_name_predictions(model, tokenizer, text_prefix=None, batch_size=64, df_name=None, baseline=None, verbose=False):
+    from gradiend.setups.gender.en.data import read_geneutral, read_gentypes, read_namextend, read_namexact
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = model.to(device)
     model.eval()
@@ -119,7 +582,6 @@ def evaluate_gender_bias_name_predictions(model, tokenizer, text_prefix=None, ba
     is_generative = tokenizer.mask_token is None
     if is_generative:
         tokenizer.pad_token = tokenizer.eos_token
-        #return evaluate_gender_bias_multitoken(model, tokenizer, text_prefix=text_prefix, baseline=baseline)
 
     if is_instruction_model:
         tokenizer.system_prompt = tokenizer.system_prompt_name
@@ -487,19 +949,17 @@ def evaluate_gender_bias_multitoken(
 
 
 def evaluate_non_gender_mlm(model, tokenizer, max_size=10000):
+    from gradiend.setups.gender.en.data import read_geneutral
     df = read_geneutral(max_size=max_size)
     texts = df['text'].tolist()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = model.to(device)
-    is_generative = tokenizer.mask_token is None
-    is_llama = 'llama' in model.name_or_path.lower()
+    is_generative = any(name in model.__class__.__name__.lower() for name in ['gpt', 'llama'])
     if is_generative:
+        from gradiend.evaluation.mlm import evaluate_clm_perplexity
         result = evaluate_clm_perplexity(model, tokenizer, texts[:1000], verbose=False)
-        # todo gpt
-        #if is_llama:
-        #else:
-        #    result, stats = evaluate_clm(model, tokenizer, texts, verbose=False)
     else:
+        from gradiend.evaluation.mlm import evaluate_mlm
         result, stats = evaluate_mlm(model, tokenizer, texts, verbose=False)
     return result
 
@@ -537,7 +997,7 @@ def evaluate_model(model, tokenizer, verbose=True, df_name=None, thorough=True, 
     start_time = time.time()
     if df_name:
         df_name = f'{df_name.replace(".csv", "")}_friend'
-    gender_bias_name_stats = evaluate_gender_bias_name_predictions(model, tokenizer) # todo , df_name=df_name)
+    gender_bias_name_stats = evaluate_gender_bias_name_predictions(model, tokenizer)
     gender_bias_name_time = time.time() - start_time
     result['gender_bias_names'] = gender_bias_name_stats
 
@@ -569,7 +1029,7 @@ def evaluate_model(model, tokenizer, verbose=True, df_name=None, thorough=True, 
 
     return result
 
-def get_evaluation_file(path, gender_factors, lrs, thorough=True, top_k=None, part=None, top_k_part=None):
+def get_evaluation_file(path, feature_factors, lrs, thorough=True, top_k=None, part=None, top_k_part=None):
     top_k = f'_top_k_{top_k}' if top_k is not None else ''
     iter_stats = lambda iterable: f'{min(iterable)}_{max(iterable)}_{len(iterable)}{top_k}'
     not_thorough = '_not_thorough' if not thorough else ''
@@ -579,7 +1039,7 @@ def get_evaluation_file(path, gender_factors, lrs, thorough=True, top_k=None, pa
     if top_k_part != 'decoder':
         top_k_part = f'_top_k_{top_k_part}'
 
-    return f'{path}_{thorough}{top_k}{part}{top_k_part}_evaluation.json', f'{path}_evaluation_{iter_stats(gender_factors)}_{iter_stats(lrs)}{not_thorough}{top_k}{part}{top_k_part}.json'
+    return f'{path}_{thorough}{top_k}{part}{top_k_part}_evaluation.json', f'{path}_evaluation_{iter_stats(feature_factors)}_{iter_stats(lrs)}{not_thorough}{top_k}{part}{top_k_part}.json'
 
 def convert_results_to_dict(list_results):
     dict_result = {}
@@ -588,16 +1048,33 @@ def convert_results_to_dict(list_results):
         if isinstance(id, str):
             key = id
         else:
-            key = (id['gender_factor'], id['lr'])
+            if 'feature_factor' in id:
+                feature_factor = id['feature_factor']
+            elif 'gender_factor' in id:
+                feature_factor = id['gender_factor']
+                print('WARNING: Old id "gender_factor" used, which is deprecated!')
+            else:
+                raise ValueError(f"Invalid id format: {id}")
+
+            if isinstance(feature_factor, list):
+                feature_factor = tuple(feature_factor)
+
+            lr = id['lr']
+            key = (feature_factor, lr)
 
         dict_result[key] = entry
     return dict_result
 
 def convert_results_to_list(dict_results):
-    return [{**dict_result, 'id': (key if isinstance(key, str) else {'gender_factor': key[0], 'lr': key[1]})} for key, dict_result in dict_results.items()]
+    return [{**dict_result, 'id': (key if isinstance(key, str) else {'feature_factor': key[0], 'lr': key[1]})} for key, dict_result in dict_results.items()]
 
 
-def evaluate_bert_with_ae(path_or_model, gender_factors=None, lrs=None, thorough=True, top_k=None, accuracy_function=None, part='decoder', top_k_part='decoder'):
+def evaluate_gradiend(model_with_gradiend, feature_factors=None, lrs=None, thorough=True, top_k=None, accuracy_function=None, part='decoder', top_k_part='decoder'):
+    if isinstance(model_with_gradiend, str):
+        path_or_model = model_with_gradiend
+        model_with_gradiend = ModelWithGradiend.from_pretrained(model_with_gradiend)
+    
+    path = model_with_gradiend.name_or_path
     accuracy_function = accuracy_function or default_accuracy_function
     metric_keys = ['bpi', 'fpi', 'mpi']
 
@@ -617,38 +1094,32 @@ def evaluate_bert_with_ae(path_or_model, gender_factors=None, lrs=None, thorough
         for key in metric_keys:
             arg_max = max(raw_results, key=lambda x: raw_results[x][key])
             if arg_max == 'base':
-                gender_factor = 0
+                feature_factor = 0
                 lr = 0
             else:
-                gender_factor = arg_max[0]
+                feature_factor = arg_max[0]
                 lr = arg_max[1]
             relevant_results[key] = {
                 'value': raw_results[arg_max][key],
                 'id': arg_max,
-                'gender_factor': gender_factor,
+                'feature_factor': feature_factor,
                 'lr': lr,
             }
         return relevant_results
 
-    if isinstance(path_or_model, str):
-        bert_with_ae = ModelWithGradiend.from_pretrained(path_or_model)
-        path = path_or_model
-    else:
-        bert_with_ae = path_or_model
-        path = bert_with_ae.name_or_path
 
-    base_model = bert_with_ae.base_model
-    tokenizer = bert_with_ae.tokenizer
+
+    base_model = model_with_gradiend.base_model
+    tokenizer = model_with_gradiend.tokenizer
     model_id = os.path.basename(path) if path.startswith('results/models') else path
-    base_file, file = get_evaluation_file(f'results/cache/decoder/{model_id}', gender_factors, lrs, thorough=thorough, top_k=top_k, part=part, top_k_part=top_k_part)
+    base_file, file = get_evaluation_file(f'results/cache/decoder/{model_id}', feature_factors, lrs, thorough=thorough, top_k=top_k, part=part, top_k_part=top_k_part)
     os.makedirs(os.path.dirname(base_file), exist_ok=True)
     os.makedirs(os.path.dirname(file), exist_ok=True)
 
-    pairs = {(gender_factor, lr) for gender_factor in gender_factors for lr in lrs}
+    pairs = {(feature_factor, lr) for feature_factor in feature_factors for lr in lrs}
     expected_results = len(pairs) + 1 + 3 # 1 because of base, 3 because of bpi, mpi, fpi
 
     try:
-        #raise FileNotFoundError() # todo remove
         relevant_results = json.load(open(file, 'r'))
 
         raw_relevant_results = convert_results_to_dict(relevant_results)
@@ -670,7 +1141,6 @@ def evaluate_bert_with_ae(path_or_model, gender_factors=None, lrs=None, thorough
 
 
     try:
-        #raise FileNotFoundError() # todo remove
         all_results = json.load(open(base_file, 'r'))
         raw_all_results = convert_results_to_dict(all_results)
 
@@ -706,20 +1176,20 @@ def evaluate_bert_with_ae(path_or_model, gender_factors=None, lrs=None, thorough
         relevant_results['base'] = base_results
 
 
-    for gender_factor, lr in tqdm(pairs, desc=f"Evaluate GRADIEND {path_or_model}"):
-        id = {'gender_factor': gender_factor, 'lr': lr}
-        id_key = (gender_factor, lr)
+    for feature_factor, lr in tqdm(pairs, desc=f"Evaluate GRADIEND {path_or_model}"):
+        id = {'feature_factor': feature_factor, 'lr': lr}
+        id_key = (feature_factor, lr)
         if id_key in relevant_results:
             print(f"Skipping {id} as it is already evaluated")
             continue
 
-        enhanced_bert = bert_with_ae.modify_model(lr=lr, gender_factor=gender_factor, top_k=top_k, part=part, top_k_part=top_k_part)
+        enhanced_bert = model_with_gradiend.modify_model(lr=lr, feature_factor=feature_factor, top_k=top_k, part=part, top_k_part=top_k_part)
         if top_k is None:
-            df_name = f'results/cache/models/{bert_with_ae.name}_lr_{lr}_gf_{gender_factor}.csv'
+            df_name = f'results/cache/models/{model_with_gradiend.name}_lr_{lr}_gf_{feature_factor}.csv'
         else:
-            df_name = f'results/cache/models/{bert_with_ae.name}/{top_k}/lr_{lr}_gf_{gender_factor}.csv'
+            df_name = f'results/cache/models/{model_with_gradiend.name}/{top_k}/lr_{lr}_gf_{feature_factor}.csv'
 
-        enhanced_bert_results = evaluate_model(enhanced_bert, tokenizer, df_name=df_name, thorough=thorough, cache_folder=f'{gender_factor}_{lr}_v2') # force=True?
+        enhanced_bert_results = evaluate_model(enhanced_bert, tokenizer, df_name=df_name, thorough=thorough, cache_folder=f'{feature_factor}_{lr}_v2') # force=True?
         all_results[id_key] = enhanced_bert_results
         relevant_results[id_key] = enhanced_bert_results
 
@@ -736,19 +1206,28 @@ def evaluate_bert_with_ae(path_or_model, gender_factors=None, lrs=None, thorough
         json.dump(list_results, f, indent=2)
     return apply_accuracy_function(convert_results_to_dict(list_results))
 
-def plot_bert_with_ae_results(data,
-                              model_name,
-                              gender_factors=None,
-                              lrs=None,
-                              metrics=None,
-                              friend=True,
-                              split='total',
-                              thorough=True,
-                              highlight='best',
-                              small=True,
-                              square=True):
-    metrics = metrics or ['avg_prob_m', 'avg_prob_f', 'avg_prob_m + avg_prob_f', 'apd', 'accuracy', 'bpi', 'fpi', 'mpi']
-
+def plot_gradiend_model_selection(data,
+                                  model_name,
+                                  feature_factors=None,
+                                  lrs=None,
+                                  metrics=None,
+                                  highlight_metrics=None,
+                                  friend=True,
+                                  split='total',
+                                  thorough=True,
+                                  highlight='best',
+                                  small=True,
+                                  square=True,
+                                  plot_numbers=True,
+                                  mirror_lr_axis=False,
+                                  single_plots=False,
+                                  overview_plot=False,
+                                  linear_plot=True,
+                                  horizontal_plot=False,
+                                  ):
+    metrics = metrics or ['avg_prob_m', 'avg_prob_f', 'accuracy', 'bpi', 'fpi', 'mpi']
+    highlight_metrics = highlight_metrics or ['bpi', 'fpi', 'mpi']
+    model_name = model_name.removeprefix('results/models/')
     baseline = None
     evaluations = []
 
@@ -767,9 +1246,9 @@ def plot_bert_with_ae_results(data,
         print(json.dumps(data, indent=2))
         raise ValueError('No baseline found in data!')
 
-    if gender_factors is None or lrs is None:
-        if gender_factors is None:
-            gender_factors = []
+    if feature_factors is None or lrs is None:
+        if feature_factors is None:
+            feature_factors = []
         if lrs is None:
             lrs = []
 
@@ -778,26 +1257,37 @@ def plot_bert_with_ae_results(data,
             if id == 'base':
                 continue
 
-            gender_factor = entry['id']['gender_factor']
+            feature_factor = entry['id']['feature_factor']
             lr = entry['id']['lr']
-            if gender_factor not in gender_factors:
-                gender_factors.append(gender_factor)
+            if feature_factor not in feature_factors:
+                feature_factors.append(feature_factor)
 
             if lr not in lrs:
                 lrs.append(lr)
 
         # sort the lists
-        gender_factors = list(sorted(gender_factors))
+        feature_factors = list(sorted(feature_factors))
         lrs = list(sorted(lrs))
 
 
 
     def get_metric(x, metric):
         bias = 'gender_bias_names' if friend else 'gender_bias'
-        if metric == 'accuracy':
+        if '->' in metric:
+            parts = metric.split('->')
+            for part in parts:
+                if part in x:
+                    x = x[part]
+                elif parts.index(part) == len(parts) - 1:
+                    return 0.0
+                else:
+                    raise ValueError(f"Metric part '{part}' not found in data (available keys: {list(x.keys())}, full metric was '{metric}')")
+        elif metric in x:
+            return x[metric]
+        elif metric == 'accuracy':
             x = x['mlm']['accuracy']
         elif metric in {'gender_preference_accuracy', 'overall_accuracy', 'average_absolute_difference'}:
-            x = x[''] # todo what?
+            x = x[''] # todo what? Deprecated??
         elif metric == 'avg_prob_m + avg_prob_f':
             if isinstance(x[bias]['avg_prob_m'], dict):
                 x = {k: xx + x[bias]['avg_prob_f'][k] for k, xx in x[bias]['avg_prob_m'].items()}
@@ -813,24 +1303,6 @@ def plot_bert_with_ae_results(data,
         return x[split]
 
         # Prepare the subplots
-
-    n_metrics = len(metrics)
-    if n_metrics == 1:
-        fig, axes = plt.subplots(1, 1, figsize=(10, 8))
-        axes = [axes]
-    elif n_metrics == 2 or n_metrics == 3:
-        fig, axes = plt.subplots(1, n_metrics, figsize=(10 * n_metrics, 8))
-    elif n_metrics == 4:
-        fig, axes = plt.subplots(2, 2, figsize=(20, 16))
-        axes = axes.flatten()
-    elif n_metrics in [5, 6]:
-        fig, axes = plt.subplots(2, 3, figsize=(30, 16))
-        axes = axes.flatten()
-    elif n_metrics in [7, 8]:
-        fig, axes = plt.subplots(2, 4, figsize=(40, 16))
-        axes = axes.flatten()
-    else:
-        raise ValueError(f"Too many metrics to plot: {n_metrics} ({metrics}")
 
     baseline_values = {metric: get_metric(baseline, metric) * 100 for metric in metrics}
 
@@ -848,10 +1320,23 @@ def plot_bert_with_ae_results(data,
         'bpi': 'BPI',
         'fpi': 'FPI',
         'mpi': 'MPI',
-        'avg_prob_f': r'\mathhbb{P}(F)',
-        'avg_prob_m': r'\mathhbb{P}(M)',
-        'avg_prob_m + avg_prob_f': r'\mathbb{P}(F\cup M)',
-        'accuracy': 'Accuracy',
+        'avg_prob_f': r'$\mathbb{P}(F)$',
+        'avg_prob_m': r'$\mathbb{P}(M)$',
+        'avg_prob_m + avg_prob_f': r'$\mathbb{P}(F\cup M)$',
+        'accuracy': r'$\text{LMS}_\text{Dec}$',
+        'white': r'$\mathbb{P}(White)$',
+        'black': r'$\mathbb{P}(Black)$',
+        'asian': r'$\mathbb{P}(Asian)$',
+        'christian': r'$\mathbb{P}(Christian)$',
+        'muslim': r'$\mathbb{P}(Muslim)$',
+        'jewish': r'$\mathbb{P}(Jewish)$',
+        'lms': r'$\text{LMS}_\text{Dec}$',
+        'race_black_asian': r'BalancedBS',
+        'race_white_black': r'BalancedBS',
+        'race_white_asian': r'BalancedBS',
+        'religion_christian_jewish': r'BalancedBS',
+        'religion_christian_muslim': r'BalancedBS',
+        'religion_muslim_jewish': r'BalancedBS',
     }
 
 
@@ -860,24 +1345,29 @@ def plot_bert_with_ae_results(data,
     heatmap_data_dfs = {}
     masks = {}
     lr_name = r'Learning Rate $\alpha$'
-    gf_name = 'Gender Factor $h$'
+    gf_name = 'Feature Factor $h$'
 
     for metric in metrics:
         df = pd.DataFrame([{
-            'gender_factor': e['id']['gender_factor'],
+            'feature_factor': e['id']['feature_factor'],
             'lr': e['id']['lr'],
             'value': get_metric(e, metric)
         } for e in evaluations if isinstance(e, dict) and isinstance(e['id'], dict)])
         metric_dfs[metric] = df
 
-        # rename column gender_factor to "Gender Factor"
-        df[gf_name] = df['gender_factor']
+        if mirror_lr_axis:
+            df['lr'] = df['lr'].apply(lambda x: -x)
+
+        # rename column feature_factor to "Gender Factor"
+        df[gf_name] = df['feature_factor']
         df[lr_name] = df['lr']
 
         if gf_x_axis:
             heatmap_data = df.pivot(index=lr_name, columns=gf_name, values='value')[::-1]
         else:
             heatmap_data = df.pivot(index=gf_name, columns=lr_name, values='value')[::-1]
+
+
         heatmap_data_dfs[metric] = heatmap_data
         baseline_value = baseline_values[metric]
 
@@ -889,6 +1379,7 @@ def plot_bert_with_ae_results(data,
             extreme_value = heatmap_data.max().max()
         extreme_values[metric] = extreme_value
         masks[metric] = mask
+
 
     if gf_x_axis:
         gf_data = heatmap_data.columns
@@ -906,183 +1397,451 @@ def plot_bert_with_ae_results(data,
     }
     tolerance = 0.01
 
-    for ax, metric in zip(axes, metrics):
-        metric_label = metrics_labels.get(metric, metric)
-        heatmap_data = heatmap_data_dfs[metric]
-        baseline_value = baseline_values[metric]
-        mask = masks[metric]
-        kwargs = {'xticklabels' if gf_x_axis else 'yticklabels': gf_tick_labels}
-        sns.heatmap(heatmap_data, cmap="YlGnBu", cbar_kws={'label': ''}, annot=True, fmt='.2f',
-                    annot_kws={"size": 9 if small else 10}, ax=ax,
-                    **kwargs)
-
-        for y in range(heatmap_data.shape[0]):
-            for x in range(heatmap_data.shape[1]):
-                if highlight == 'best':
-                    for metric, metric_color in metric_colors.items():
-                        heatmap_data_metric = heatmap_data_dfs[metric]
-                        extreme_value = extreme_values[metric]
-                        if heatmap_data_metric.iloc[y, x] == extreme_value:
-                            ax.add_patch(plt.Rectangle((x, y), 1, 1, fill=False, edgecolor=metric_color, linewidth=3))
-                else:
-                    extreme_value = extreme_values[metric]
-                    if abs(heatmap_data.iloc[y, x] - extreme_value) <= tolerance:
-                        ax.add_patch(plt.Rectangle((x, y), 1, 1, fill=False, edgecolor='red', linewidth=3))
-                    elif mask.iloc[y, x]:
-                        ax.add_patch(plt.Rectangle((x, y), 1, 1, fill=False, edgecolor='red'))
-
-        ax.set_title(f"{metric_label}", fontsize=15)
-        # Add a custom text for the baseline value with background color
-        ax.text(1.0,
-                1.0,
-                f"(Baseline: {baseline_value:.4f})",
-                transform=ax.transAxes,  # Set relative to the axis
-                fontsize=12,  # Font size
-                ha='right',  # Horizontal alignment
-                va='center',  # Vertical alignment
-                bbox=dict(facecolor='yellow', alpha=0.5, edgecolor='none'))  # Background color
-
-    fig.suptitle(model_name, y=1, fontsize=25)
-    plt.tight_layout(rect=[0, 0, 0.98, 1])
-
-    def get_evaluation_file(path, gender_factors, lrs, thorough=True):
+    def get_evaluation_file(path, feature_factors, lrs, thorough=True):
         iter_stats = lambda iterable: f'{min(iterable)}_{max(iterable)}_{len(iterable)}'
         not_thorough = '_not_thorough' if not thorough else ''
-        return f'results/models/{model_name}_evaluation{not_thorough}.json', f'results/models/{model_name}_evaluation_{iter_stats(gender_factors)}_{iter_stats(lrs)}{not_thorough}.json'
+        return f'results/models/{model_name}_evaluation{not_thorough}.json', f'results/models/{model_name}_evaluation_{iter_stats(feature_factors)}_{iter_stats(lrs)}{not_thorough}.json'
 
-    _, image_file = get_evaluation_file(f'results/img/{model_name}', gender_factors, lrs, thorough=thorough)
+    _, image_file = get_evaluation_file(f'img/{model_name}', feature_factors, lrs, thorough=thorough)
     base_image_file = image_file.replace('.json', f'{"_small" if small else ""}{"_square" if square else ""}.pdf')
-    plt.savefig(base_image_file, bbox_inches='tight')
-    plt.show()
 
-    for idx, metric in enumerate(metrics):
-        version = base_image_file.removesuffix(".pdf").removeprefix('results/models/').removeprefix(model_name).removeprefix('_')
-        heatmap_data = heatmap_data_dfs[metric]
-        baseline_value = baseline_values[metric]
-        mask = masks[metric]
+    if overview_plot:
 
-        # Create a new figure for each subplot
-        if small:
-            if square:
-                fig_single, ax_single = plt.subplots(figsize=(4, 2.9))
-            else:
-                fig_single, ax_single = plt.subplots(figsize=(4, 2.0))
+        n_metrics = len(metrics)
+        if n_metrics == 1:
+            fig, axes = plt.subplots(1, 1, figsize=(10, 8))
+            axes = [axes]
+        elif n_metrics == 2 or n_metrics == 3:
+            fig, axes = plt.subplots(1, n_metrics, figsize=(10 * n_metrics, 8))
+        elif n_metrics == 4:
+            fig, axes = plt.subplots(2, 2, figsize=(20, 16))
+            axes = axes.flatten()
+        elif n_metrics in [5, 6]:
+            fig, axes = plt.subplots(2, 3, figsize=(30, 16))
+            axes = axes.flatten()
+        elif n_metrics in [7, 8]:
+            fig, axes = plt.subplots(2, 4, figsize=(40, 16))
+            axes = axes.flatten()
         else:
-            fig_single, ax_single = plt.subplots(figsize=(8, 3.3))
+            raise ValueError(f"Too many metrics to plot: {n_metrics} ({metrics}")
 
-        # Plot the heatmap again for each subplot
-        cbar_kws = {}
-        kwargs = {
-            'xticklabels': lr_tick_labels,
-            'yticklabels': gf_tick_labels,
-        }
-        heatmap_data_percent = heatmap_data * 100
-        sns.heatmap(heatmap_data_percent, cmap="YlGnBu", cbar_kws=cbar_kws, annot=True, fmt='.0f',
-                    annot_kws={"size": 9 if small else 8, "va": "center_baseline"}, ax=ax_single, **kwargs)
-        ls = (10 if square else 8) if small else 10
-        ax_single.tick_params(axis='x', labelsize=ls)
-        ax_single.tick_params(axis='y', labelsize=ls)
-        cbar = ax_single.collections[0].colorbar
-        cbar.ax.tick_params(labelsize=ls)
+        for ax, metric in zip(axes, metrics):
+            metric_label = metric_labels_latex.get(metric, metric)
+            heatmap_data = heatmap_data_dfs[metric]
+            baseline_value = baseline_values[metric]
+            mask = masks[metric]
+            kwargs = {'xticklabels' if gf_x_axis else 'yticklabels': gf_tick_labels}
+            sns.heatmap(heatmap_data, cmap="YlGnBu", cbar_kws={'label': ''}, annot=True, fmt='.2f',
+                        annot_kws={"size": 9 if small else 10}, ax=ax,
+                        **kwargs)
 
-        for y in range(heatmap_data.shape[0]):
-            for x in range(heatmap_data.shape[1]):
-                if highlight == 'best':
-                    for metric_, metric_color in metric_colors.items():
-                        heatmap_data_metric = heatmap_data_dfs[metric_]
-                        extreme_value = extreme_values[metric_]
-                        if heatmap_data_metric.iloc[y, x] == extreme_value:
-                            ax_single.add_patch(plt.Rectangle((x, y), 1, 1, fill=False, edgecolor=metric_color, linewidth=2))
-                else:
-                    extreme_value = extreme_values[metric]
-                    if abs(heatmap_data.iloc[y, x] - extreme_value) <= tolerance:
-                        ax_single.add_patch(plt.Rectangle((x, y), 1, 1, fill=False, edgecolor='red', linewidth=3))
-                    elif mask.iloc[y, x]:
-                        ax_single.add_patch(plt.Rectangle((x, y), 1, 1, fill=False, edgecolor='red'))
+            for y in range(heatmap_data.shape[0]):
+                for x in range(heatmap_data.shape[1]):
+                    if highlight == 'best':
+                        for metric in highlight_metrics:
+                            metric_color = metric_colors.get(metric, '#FF0000')
+                            heatmap_data_metric = heatmap_data_dfs[metric]
+                            extreme_value = extreme_values[metric]
+                            if heatmap_data_metric.iloc[y, x] == extreme_value:
+                                ax.add_patch(plt.Rectangle((x, y), 1, 1, fill=False, edgecolor=metric_color, linewidth=3))
+                    else:
+                        extreme_value = extreme_values[metric]
+                        if abs(heatmap_data.iloc[y, x] - extreme_value) <= tolerance:
+                            ax.add_patch(plt.Rectangle((x, y), 1, 1, fill=False, edgecolor='red', linewidth=3))
+                        elif mask.iloc[y, x]:
+                            ax.add_patch(plt.Rectangle((x, y), 1, 1, fill=False, edgecolor='red'))
 
-        # Determine the color based on the baseline_value and the cmap YlGnBu
-        cmap = plt.get_cmap("YlGnBu")  # Get the colormap
+            ax.set_title(f"{metric_label}", fontsize=15)
+            # Add a custom text for the baseline value with background color
+            ax.text(1.0,
+                    1.0,
+                    f"(Baseline: {baseline_value:.4f})",
+                    transform=ax.transAxes,  # Set relative to the axis
+                    fontsize=10,  # Font size
+                    ha='right',  # Horizontal alignment
+                    va='center',  # Vertical alignment
+                    bbox=dict(facecolor='yellow', alpha=0.5, edgecolor='none'))  # Background color
 
-        # Normalize baseline_value to a range between 0 and 1
-        norm = matplotlib.colors.Normalize(vmin=heatmap_data.min().min(), vmax=heatmap_data.max().max())
+        fig.suptitle(model_name, y=1, fontsize=25)
+        plt.tight_layout(rect=[0, 0, 0.98, 1])
 
-        # Map the baseline_value to the corresponding color in the colormap
-        baseline_color = cmap(norm(baseline_value))
-
-        # Function to compute luminance and decide text color
-        def get_text_color(facecolor):
-            # Convert color to RGB
-            rgb = matplotlib.colors.to_rgb(facecolor)
-            # Calculate luminance using relative luminance formula
-            luminance = 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]
-
-            # If luminance is high (bright background), return black text, else return white text
-            return 'black' if luminance > 0.5 else 'white'
-
-        text_color = get_text_color(baseline_color)
-
-        if small:
-            kwargs = {'x': 1.21, 'y': -0.26}
-        else:
-            kwargs = {'x': 0.992, 'y': -0.24}
-        plt.text(
-            s=f'Base Model: {baseline_value:.1f}',  # Text with formatted value
-            color=text_color,  # Text color
-            fontsize=11 if small else 10,  # Font size
-            ha='right',  # Align text to the right
-            va='bottom',  # Align text to the bottom
-            bbox={  # Background box styling
-                'facecolor': baseline_color,
-                'pad': 2,
-                'edgecolor': 'none'
-            },
-            transform=plt.gca().transAxes,  # Use axes coordinates
-            **kwargs
-        )
-
-        #plt.suptitle(f'{model_name} - {metric}')
-        fs = (13 if square else 11) if small else 12
-        if gf_x_axis:
-            ax_single.set_xlabel(gf_name, fontsize=fs)
-            ax_single.set_ylabel(lr_name, fontsize=fs)
-        else:
-            ax_single.set_xlabel(lr_name, fontsize=fs)
-            ax_single.set_ylabel(gf_name, fontsize=fs)
-
-        if small:
-            ax_single.yaxis.set_label_coords(-0.145, 0.5)
-
-        # Save the individual subplot
-        image_file = f'results/img/decoder/{model_name}/{version}/subplot_{metrics[idx]}.pdf'
-        os.makedirs(os.path.dirname(image_file), exist_ok=True)
-        fig_single.savefig(image_file, dpi=300, bbox_inches='tight')
+        os.makedirs(os.path.dirname(base_image_file), exist_ok=True)
+        plt.savefig(base_image_file, bbox_inches='tight')
         plt.show()
-        plt.close(fig_single)  # Close to prevent memory issues
+
+    if single_plots:
+        for idx, metric in enumerate(metrics):
+            version = base_image_file.removesuffix(".pdf").removeprefix('results/models/').removeprefix(model_name).removeprefix('_')
+            heatmap_data = heatmap_data_dfs[metric]
+            baseline_value = baseline_values[metric]
+            mask = masks[metric]
+
+            # Create a new figure for each subplot
+            if small:
+                if square:
+                    fig_single, ax_single = plt.subplots(figsize=(4, 2.9))
+                else:
+                    fig_single, ax_single = plt.subplots(figsize=(4, 2.0))
+            else:
+                fig_single, ax_single = plt.subplots(figsize=(8, 3.3))
+
+            # Plot the heatmap again for each subplot
+            cbar_kws = {}
+            kwargs = {
+                'xticklabels': lr_tick_labels,
+                'yticklabels': gf_tick_labels,
+            }
+            heatmap_data_percent = heatmap_data * 100
+
+            max_val = heatmap_data_percent.max().max()
+            annot_size = 9 if small else 8
+            annot_size = 7
+            if max_val < 1:
+                fmt = ".2f"  # all values tiny → keep 2 decimals
+                annot_size = 4
+            elif max_val < 10:
+                fmt = ".1f"  # moderate values → one decimal
+                annot_size = 5
+            else:
+                fmt = ".0f"  # large values → integers only
+
+            sns.heatmap(heatmap_data_percent, cmap="YlGnBu", cbar_kws=cbar_kws, annot=plot_numbers, fmt=fmt,
+                        annot_kws={"size": annot_size, "va": "center_baseline"}, ax=ax_single, **kwargs)
+            ls = (10 if square else 8) if small else 10
+            ax_single.tick_params(axis='x', labelsize=ls)
+            ax_single.tick_params(axis='y', labelsize=ls)
+            cbar = ax_single.collections[0].colorbar
+            cbar.ax.tick_params(labelsize=ls)
+
+            for y in range(heatmap_data.shape[0]):
+                for x in range(heatmap_data.shape[1]):
+                    if highlight == 'best':
+                        for metric_ in highlight_metrics:
+                            metric_color = metric_colors.get(metric_, '#FF0000')
+                            heatmap_data_metric = heatmap_data_dfs[metric_]
+                            extreme_value = extreme_values[metric_]
+                            if heatmap_data_metric.iloc[y, x] == extreme_value:
+                                ax_single.add_patch(plt.Rectangle((x, y), 1, 1, fill=False, edgecolor=metric_color, linewidth=2))
+                    else:
+                        extreme_value = extreme_values[metric]
+                        if abs(heatmap_data.iloc[y, x] - extreme_value) <= tolerance:
+                            ax_single.add_patch(plt.Rectangle((x, y), 1, 1, fill=False, edgecolor='red', linewidth=3))
+                        elif mask.iloc[y, x]:
+                            ax_single.add_patch(plt.Rectangle((x, y), 1, 1, fill=False, edgecolor='red'))
+
+            # Determine the color based on the baseline_value and the cmap YlGnBu
+            cmap = plt.get_cmap("YlGnBu")  # Get the colormap
+
+            # Normalize baseline_value to a range between 0 and 1
+            norm = matplotlib.colors.Normalize(vmin=heatmap_data_percent.min().min(), vmax=heatmap_data_percent.max().max())
+
+            # Map the baseline_value to the corresponding color in the colormap
+            baseline_color = cmap(norm(baseline_value))
+
+            # Function to compute luminance and decide text color
+            def get_text_color(facecolor):
+                # Convert color to RGB
+                rgb = matplotlib.colors.to_rgb(facecolor)
+                # Calculate luminance using relative luminance formula
+                luminance = 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]
+
+                # If luminance is high (bright background), return black text, else return white text
+                return 'black' if luminance > 0.5 else 'white'
+
+            text_color = get_text_color(baseline_color)
+
+            if small:
+                kwargs = {'x': 1.21, 'y': -0.26}
+            else:
+                kwargs = {'x': 0.992, 'y': -0.24}
+            plt.text(
+                s=f'Base Model: {baseline_value:.1f}',  # Text with formatted value
+                color=text_color,  # Text color
+                fontsize=10 if small else 9,  # Font size
+                ha='right',  # Align text to the right
+                va='bottom',  # Align text to the bottom
+                bbox={  # Background box styling
+                    'facecolor': baseline_color,
+                    'pad': 2,
+                    'edgecolor': 'none'
+                },
+                transform=plt.gca().transAxes,  # Use axes coordinates
+                **kwargs
+            )
+
+            #plt.suptitle(f'{model_name} - {metric}')
+            fs = (13 if square else 11) if small else 12
+            if gf_x_axis:
+                ax_single.set_xlabel(gf_name, fontsize=fs)
+                ax_single.set_ylabel(lr_name, fontsize=fs)
+            else:
+                ax_single.set_xlabel(lr_name, fontsize=fs)
+                ax_single.set_ylabel(gf_name, fontsize=fs)
+
+            if small:
+                ax_single.yaxis.set_label_coords(-0.145, 0.5)
+
+            # Save the individual subplot
+            metric_id = metrics[idx].replace(' ', '')
+            image_file = f'img/decoder/{model_name}/{version}/subplot_{metric_id}.pdf'
+            os.makedirs(os.path.dirname(image_file), exist_ok=True)
+            fig_single.savefig(image_file, dpi=300, bbox_inches='tight')
+            plt.show()
+            plt.close(fig_single)  # Close to prevent memory issues
+
+    if linear_plot:
+        # prepare subplot grid
+        n_metrics = len(metrics)
+        fig, axes = plt.subplots(1, n_metrics, figsize=(5 * n_metrics, 4), squeeze=False)
+        # 1 row, n_metrics columns
+
+        for idx, metric in enumerate(metrics):
+            ax = axes[0, idx]  # select subplot axis
+
+            version = base_image_file.removesuffix(".pdf").removeprefix('results/models/').removeprefix(
+                model_name).removeprefix('_')
+            heatmap_data = heatmap_data_dfs[metric]
+            baseline_value = baseline_values[metric]
+            mask = masks[metric]
+
+            # --- heatmap plotting ---
+            cbar_kws = {}
+            kwargs = {
+                'xticklabels': lr_tick_labels,
+                'yticklabels': gf_tick_labels,
+            }
+            heatmap_data_percent = heatmap_data * 100
+
+            max_val = heatmap_data_percent.max().max()
+            annot_size = 7
+            if max_val < 1:
+                fmt = ".2f"
+                annot_size = 4
+            elif max_val < 10:
+                fmt = ".1f"
+                annot_size = 5
+            else:
+                fmt = ".0f"
+
+            sns.heatmap(
+                heatmap_data_percent,
+                cmap="YlGnBu",
+                cbar_kws=cbar_kws,
+                annot=False,
+                fmt=fmt,
+                #annot_kws={"size": annot_size, "va": "center_baseline"},
+                ax=ax,
+                **kwargs
+            )
+
+            ls = 14
+            ax.tick_params(axis='x', labelsize=ls)
+            ax.tick_params(axis='y', labelsize=ls)
+
+            # add latex title
+            metric_label = metric_labels_latex.get(metric.split('->')[-1], metric)
+            ax.set_title(f"{metric_label}", fontsize=15 if n_metrics == 4 else 23)
+
+            cbar = ax.collections[0].colorbar
+            cbar.ax.tick_params(labelsize=ls)
+
+            # highlight rectangles (kept same as your logic)
+            for y in range(heatmap_data.shape[0]):
+                for x in range(heatmap_data.shape[1]):
+                    if highlight == 'best':
+                        for metric_ in highlight_metrics:
+                            metric_color = metric_colors.get(metric, '#FF0000')
+                            heatmap_data_metric = heatmap_data_dfs[metric_]
+                            extreme_value = extreme_values[metric_]
+                            if heatmap_data_metric.iloc[y, x] == extreme_value:
+                                ax.add_patch(plt.Rectangle((x, y), 1, 1, fill=False, edgecolor=metric_color, linewidth=2))
+                    else:
+                        extreme_value = extreme_values[metric]
+                        if abs(heatmap_data.iloc[y, x] - extreme_value) <= tolerance:
+                            ax.add_patch(plt.Rectangle((x, y), 1, 1, fill=False, edgecolor='red', linewidth=3))
+                        elif mask.iloc[y, x]:
+                            ax.add_patch(plt.Rectangle((x, y), 1, 1, fill=False, edgecolor='red'))
+
+            # baseline color logic (unchanged)
+            cmap = plt.get_cmap("YlGnBu")
+            norm = matplotlib.colors.Normalize(vmin=heatmap_data_percent.min().min(), vmax=heatmap_data_percent.max().max())
+            baseline_color = cmap(norm(baseline_value))
+
+            def get_text_color(facecolor):
+                rgb = matplotlib.colors.to_rgb(facecolor)
+                luminance = 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]
+                return 'black' if luminance > 0.5 else 'white'
+
+            text_color = get_text_color(baseline_color)
+
+            if False:
+                baseline_value_fmt = f"{baseline_value:.1f}"
+                if baseline_value_fmt == '0.0':
+                    baseline_value_fmt = f"{baseline_value:.2f}"
+                    if baseline_value_fmt == '0.00':
+                        baseline_value_fmt = f"{baseline_value:.3f}"
+                        if baseline_value_fmt == '0.000':
+                            baseline_value_fmt = f"{baseline_value:.4f}"
+                text_y = -0.4 if n_metrics == 4 else -0.3
+                ax.text(
+                    0.9, text_y, f'Base: {baseline_value_fmt}',
+                    color=text_color,
+                    fontsize=13,
+                    ha='left',
+                    va='bottom',
+                    bbox={'facecolor': baseline_color, 'pad': 2, 'edgecolor': 'none'},
+                    transform=ax.transAxes
+                )
+
+            # labels
+            fs = 16 if n_metrics == 4 else 20
+            fs_y = fs - 1 if n_metrics == 4 else fs
+            if gf_x_axis:
+                ax.set_xlabel(gf_name, fontsize=fs)
+                ax.set_ylabel(lr_name, fontsize=fs_y)
+            else:
+                ax.set_xlabel(lr_name, fontsize=fs)
+                ax.set_ylabel(gf_name, fontsize=fs_y)
+
+        # tighten layout
+        plt.tight_layout()
+
+        # save combined figure
+        image_file = f'img/decoder/{model_name}.pdf'
+        os.makedirs(os.path.dirname(image_file), exist_ok=True)
+        fig.savefig(image_file, dpi=300, bbox_inches='tight')
+        print(f'Saved linear overview plot to {image_file}')
+        plt.show()
+        plt.close(fig)
+
+    if horizontal_plot:
+        # prepare subplot grid
+        n_metrics = len(metrics)
+        fig, axes = plt.subplots(n_metrics, 1, figsize=(5, 4 * n_metrics), squeeze=False)
+        # 1 row, n_metrics columns
+
+        for idx, metric in enumerate(metrics):
+            ax = axes[idx, 0]  # select subplot axis
+
+            version = base_image_file.removesuffix(".pdf").removeprefix('results/models/').removeprefix(
+                model_name).removeprefix('_')
+            heatmap_data = heatmap_data_dfs[metric]
+            baseline_value = baseline_values[metric]
+            mask = masks[metric]
+
+            # --- heatmap plotting ---
+            cbar_kws = {}
+            kwargs = {
+                'xticklabels': lr_tick_labels,
+                'yticklabels': gf_tick_labels,
+            }
+            heatmap_data_percent = heatmap_data * 100
+
+            max_val = heatmap_data_percent.max().max()
+            annot_size = 7
+            if max_val < 1:
+                fmt = ".2f"
+                annot_size = 4
+            elif max_val < 10:
+                fmt = ".1f"
+                annot_size = 5
+            else:
+                fmt = ".0f"
+
+            sns.heatmap(
+                heatmap_data_percent,
+                cmap="YlGnBu",
+                cbar_kws=cbar_kws,
+                annot=False,
+                fmt=fmt,
+                #annot_kws={"size": annot_size, "va": "center_baseline"},
+                ax=ax,
+                **kwargs
+            )
+
+            ls = 14
+            ax.tick_params(axis='x', labelsize=ls)
+            ax.tick_params(axis='y', labelsize=ls)
+
+            # add latex title
+            metric_label = metric_labels_latex.get(metric.split('->')[-1], metric)
+            ax.set_title(f"{metric_label}", fontsize=25 if n_metrics == 4 else 23)
+
+            cbar = ax.collections[0].colorbar
+            cbar.ax.tick_params(labelsize=ls)
+
+            # highlight rectangles (kept same as your logic)
+            for y in range(heatmap_data.shape[0]):
+                for x in range(heatmap_data.shape[1]):
+                    if highlight == 'best':
+                        for metric_ in highlight_metrics:
+                            metric_color = metric_colors.get(metric, '#FF0000')
+                            heatmap_data_metric = heatmap_data_dfs[metric_]
+                            extreme_value = extreme_values[metric_]
+                            if heatmap_data_metric.iloc[y, x] == extreme_value:
+                                ax.add_patch(plt.Rectangle((x, y), 1, 1, fill=False, edgecolor=metric_color, linewidth=2))
+                    else:
+                        extreme_value = extreme_values[metric]
+                        if abs(heatmap_data.iloc[y, x] - extreme_value) <= tolerance:
+                            ax.add_patch(plt.Rectangle((x, y), 1, 1, fill=False, edgecolor='red', linewidth=3))
+                        elif mask.iloc[y, x]:
+                            ax.add_patch(plt.Rectangle((x, y), 1, 1, fill=False, edgecolor='red'))
+
+            # baseline color logic (unchanged)
+            cmap = plt.get_cmap("YlGnBu")
+            norm = matplotlib.colors.Normalize(vmin=heatmap_data_percent.min().min(), vmax=heatmap_data_percent.max().max())
+            baseline_color = cmap(norm(baseline_value))
+
+            def get_text_color(facecolor):
+                rgb = matplotlib.colors.to_rgb(facecolor)
+                luminance = 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]
+                return 'black' if luminance > 0.5 else 'white'
+
+            # labels
+            fs = 21 if n_metrics == 4 else 20
+            fs_y = fs - 1 if n_metrics == 4 else fs
+            if gf_x_axis:
+                ax.set_xlabel(gf_name, fontsize=fs)
+                ax.set_ylabel(lr_name, fontsize=fs_y)
+            else:
+                ax.set_xlabel(lr_name, fontsize=fs)
+                ax.set_ylabel(gf_name, fontsize=fs_y)
+
+        # tighten layout
+        plt.tight_layout()
+
+        # save combined figure
+        image_file = f'img/decoder/{model_name}.pdf'
+        os.makedirs(os.path.dirname(image_file), exist_ok=True)
+        fig.savefig(image_file, dpi=300, bbox_inches='tight')
+        print(f'Saved linear overview plot to {image_file}')
+        plt.show()
+        plt.close(fig)
 
     return data
 
 # currently not used function!
-def top_neuron_evaluation(model, bin_size=100, lr=None, gender_factor=None, key='bpi', thorough=True, plot=True):
-    if lr is None or gender_factor is None:
+def top_neuron_evaluation(model, bin_size=100, lr=None, feature_factor=None, key='bpi', thorough=True, plot=True):
+    if lr is None or feature_factor is None:
         print(f'Determining best best choice for lr and gender factor based on default_evaluation and key {key}')
         evaluation = default_evaluation(model, large=True, plot=False)
         best = evaluation[key]
         print(f'Best choice for {key} is {best}')
         if lr is None:
             lr = best['lr']
-        if gender_factor is None:
-            gender_factor = best['gender_factor']
+        if feature_factor is None:
+            feature_factor = best['feature_factor']
 
 
     bert_with_ae = ModelWithGradiend.from_pretrained(model)
     base_model = bert_with_ae.base_model
     tokenizer = bert_with_ae.tokenizer
 
-    def get_evaluation_file(path, gender_factor, lr, bin_size):
+    def get_evaluation_file(path, feature_factor, lr, bin_size):
         not_thorough = '_not_thorough' if not thorough else ''
-        return f'{path}_top_k_evaluation_gf_{gender_factor}_lr_{lr:.1e}{not_thorough}.json', f'{path}_top_k_evaluation_bs_{bin_size}_gf_{gender_factor}_lr_{lr:.1e}{not_thorough}.json'
+        return f'{path}_top_k_evaluation_gf_{feature_factor}_lr_{lr:.1e}{not_thorough}.json', f'{path}_top_k_evaluation_bs_{bin_size}_gf_{feature_factor}_lr_{lr:.1e}{not_thorough}.json'
 
-    base_file, file = get_evaluation_file(model + f'/../cache/decoder/' + os.path.basename(model), gender_factor, lr, bin_size)
+    base_file, file = get_evaluation_file(model + f'/../cache/decoder/' + os.path.basename(model), feature_factor, lr, bin_size)
     os.makedirs(os.path.dirname(base_file), exist_ok=True)
     os.makedirs(os.path.dirname(file), exist_ok=True)
 
@@ -1150,7 +1909,7 @@ def top_neuron_evaluation(model, bin_size=100, lr=None, gender_factor=None, key=
         raw_enhanced_bert_results = default_evaluation(model, plot=False, large=False, top_k=border)
         enhanced_bert_results = {key: raw_enhanced_bert_results[key]['value'] for key in keys}
         print(f"Results for {id}: {enhanced_bert_results}")
-        print('Genderfactor', raw_enhanced_bert_results[key]['gender_factor'])
+        print('Genderfactor', raw_enhanced_bert_results[key]['feature_factor'])
         print('Learning Rate', raw_enhanced_bert_results[key]['lr'])
 
         all_results[id] = enhanced_bert_results
@@ -1177,22 +1936,22 @@ def top_neuron_evaluation(model, bin_size=100, lr=None, gender_factor=None, key=
 
     return relevant_results
 
-default_evaluation_gender_factors = [-10, -2] + [-1, -0.8, -0.6, -0.4, -0.2, 0.0, 0.2, 0.4, 0.6, 0.8, 1.0] + [2, 10]
+default_evaluation_feature_factors = [-10, -2] + [-1, -0.8, -0.6, -0.4, -0.2, 0.0, 0.2, 0.4, 0.6, 0.8, 1.0] + [2, 10]
 default_evaluation_lrs = [-0.5, -1e-1, -5e-2, -1e-2, -5e-3, -1e-3, -5e-4, -1e-4,  1e-4, 5e-4, 1e-3, 5e-3, 1e-2, 5e-2, 1e-1, 0.5] # -5e-5, -1e-5, 1e-5, 5e-5,
 def default_evaluation(model, large=True, plot=True, top_k=None, accuracy_function=None, part='decoder', top_k_part='decoder', **kwargs):
     if large:
-        gender_factors = default_evaluation_gender_factors
+        feature_factors = default_evaluation_feature_factors
         lrs = default_evaluation_lrs
         #lrs = [-5e-2, -1e-2, -5e-3, -1e-3, -5e-4, -1e-4, -5e-5, -1e-5, 1e-5, 5e-5, 1e-4, 5e-4, 1e-3, 5e-3, 1e-2, 5e-2]
     else:
-        gender_factors = [-1, 0, 1]
+        feature_factors = [-1, 0, 1]
         lrs = [1e-2, 1e-3, 1e-4, 1e-5]
 
-    data = evaluate_bert_with_ae(model, gender_factors, lrs, thorough=large, top_k=top_k, accuracy_function=accuracy_function, part=part, top_k_part=top_k_part)
+    data = evaluate_gradiend(model, feature_factors, lrs, thorough=large, top_k=top_k, accuracy_function=accuracy_function, part=part, top_k_part=top_k_part)
 
     if plot:
-        model = os.path.basename(model.removesuffix('gradiend'))
-        plot_bert_with_ae_results(data, model, gender_factors=gender_factors, lrs=lrs, thorough=large, **kwargs)
+        model = os.path.basename(model.removesuffix('model_with_gradiend'))
+        plot_gradiend_model_selection(data, model, feature_factors=feature_factors, lrs=lrs, thorough=large, single_plots=True, **kwargs)
 
     return data
 
@@ -1209,7 +1968,7 @@ def test_aggregation_functions(model):
     }
 
     model_id = os.path.basename(model) if model.startswith('results/models') else model
-    base_file, _ = get_evaluation_file(f'results/cache/decoder/{model_id}', default_evaluation_gender_factors, default_evaluation_lrs)
+    base_file, _ = get_evaluation_file(f'results/cache/decoder/{model_id}', default_evaluation_feature_factors, default_evaluation_lrs)
 
     def bpi_fpi_mpi(stats, accuracy_conversion_function):
         acc = stats['mlm']['accuracy']
@@ -1237,7 +1996,7 @@ def test_aggregation_functions(model):
         with open(output_file, 'w+') as f:
             json.dump(new_results, f, indent=2)
 
-        plot_bert_with_ae_results(new_results, f'{model_id}_{function_name}')
+        plot_gradiend_model_selection(new_results, f'{model_id}_{function_name}')
 
 
 

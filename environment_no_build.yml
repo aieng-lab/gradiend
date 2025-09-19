@@ -414,7 +414,7 @@ dependencies:
   - xorg-libxxf86vm=1.1.5
   - xorg-xorgproto=2024.1
   - xxhash=0.8.2
-  - xz=5.2.6
+  - xz
   - yaml=0.2.5
   - yarl=1.13.1
   - zeromq=4.3.5

@@ -1,7 +1,7 @@
 from tabulate import tabulate
 
 from gradiend.evaluation.analyze_decoder import default_evaluation
-
+from gradiend.setups.gender.en import GenderEnSetup
 from gradiend.export import models
 from gradiend.util import init_matplotlib
 
@@ -40,14 +40,43 @@ table = [[
     ]]
 
 
+models = {
+    'bert-base-cased': r'\bertbase',
+    'bert-large-cased': r'\bertlarge',
+    'distilbert-base-cased': r'\distilbert',
+    'roberta-large': r'\roberta',
+    'gpt2': r'\gpttwo',
+    'Llama-3.2-3B': r'\llama',
+    'Llama-3.2-3B-Instruct': r'\llamai',
+}
+
+
+if False:
+    models = {
+        'bert-base-cased': r'\bertbase',
+        'bert-base-cased-v_0.01': r'\bertbase h',
+        'bert-base-cased-v_1e-05_decoder': r'\bertbase b',
+    }
+
+    models = {
+        'bert-large-cased': r'\bertlarge',
+        'bert-large-cased-v_0.01': r'\bertlarge h',
+        'bert-large-cased-v_1e-07_decoder-bias': r'\bertlarge b',
+}
+
 for base_model in models:
     model = f'results/models/{base_model}'
+    print(f'Processing model {model}')
 
     try:
         decoder_metrics = default_evaluation(model, plot=True)
+        #setup = GenderEnSetup()
+        #setup.select(model)
     except OSError:
         print(f'Skipping model {model} since file does not exist')
         continue
+
+
 
     # add base entry
     row = [models[base_model], '0.0', '0.0']
@@ -59,13 +88,13 @@ for base_model in models:
     for version_suffix, version in versions.items():
         version_stats = decoder_metrics[version.lower()]
         lr = version_stats['lr']
-        gender_factor = version_stats['gender_factor']
-        row = [f'\, + {gradiend_map[version_suffix]}', f'{gender_factor:.1f}', f'{lr:.0e}']
-        if lr == 0 and gender_factor == 0:
+        feature_factor = version_stats['feature_factor']
+        row = [f'\, + {gradiend_map[version_suffix]}', f'{feature_factor:.1f}', f'{lr:.0e}']
+        if lr == 0 and feature_factor == 0:
             version_metrics = base_metrics
             print(f'The base model {base_model} is the best model for {version} and {base_model}')
         else:
-            version_metrics = decoder_metrics[(gender_factor, lr)]
+            version_metrics = decoder_metrics[(feature_factor, lr)]
 
         for metric_name, metric_getter in metrics.items():
             row.append(f'{metric_getter(version_metrics):.3f}')

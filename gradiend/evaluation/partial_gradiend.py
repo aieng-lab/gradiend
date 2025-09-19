@@ -12,7 +12,7 @@ from gradiend.util import convert_tuple_keys_to_strings, convert_string_keys_to_
 proportions = np.arange(0, 1.1, 0.1)
 proportions = [0.0, 1e-10, 1e-9, 5e-9, 1e-8, 5e-8, 1e-7, 5e-7, 1e-6, 5e-6, 1e-5, 5e-5, 1e-4, 1e-3, 1e-2, 1e-1, 0.5, 1.0]
 #proportions = [0.0, 1e-9, 1e-8, 1e-7, 1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1.0]
-proportions = [1e-7, 1e-5, 1e-3, 1e-2, 1e-1]
+#proportions = [1e-7, 1e-5, 1e-3, 1e-2, 1e-1]
 #proportions = [1e-6]
 #proportions = [0.0, 1e-10, 1e-9, 5e-9, 1e-8, 5e-8, 1e-7, 5e-7, 1e-6, 5e-6, 1e-5, 5e-5]
 
@@ -58,8 +58,6 @@ def evaluate(model, part, top_k_part):
         with open(output_file, 'w') as f:
             json.dump(json_results, f)
 
-        # todo recalculate first 10 pairs of lr=0.1
-
     fpis = [results[prop]['fpi']['value'] for prop in proportions]
     mpis = [results[prop]['mpi']['value'] for prop in proportions]
     bpis = [results[prop]['bpi']['value'] for prop in proportions]
@@ -91,7 +89,7 @@ def evaluate(model, part, top_k_part):
     plt.xlabel('Proportion/ Number of neurons')
     plt.ylabel('Accuracy')
     plt.grid()
-    output = f'results/img/partial_gradiend/{model_id}_{part}_{top_k_part}.pdf'
+    output = f'img/partial_gradiend/{model_id}_{part}_{top_k_part}.pdf'
     os.makedirs(os.path.dirname(output), exist_ok=True)
     plt.title(f'{model.split("/")[-1]} {part} {top_k_part}')
     plt.savefig(output)
@@ -106,9 +104,9 @@ def evaluate(model, part, top_k_part):
 if __name__ == '__main__':
 
     models = [
-        'results/models/distilbert-base-cased',
+        #'results/models/distilbert-base-cased',
         #'results/models/bert-base-cased',
-        'results/models/bert-large-cased',
+        #'results/models/bert-large-cased',
         'results/models/roberta-large',
     ]
 

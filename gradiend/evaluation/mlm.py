@@ -15,20 +15,29 @@ import math
 import pandas as pd
 import json
 import random
-
-def evaluate_clm_perplexity(model, tokenizer, text_data, file=None, verbose=True, batch_size=32):
+def evaluate_clm_perplexity(model, tokenizer, text_data, file=None, verbose=True, batch_size=32, ignore=None):
     print('Evaluating CLM Perplexity')
+    ignore = ignore or []
     model.eval()
     device = model.device
     total_log_likelihood = 0.0
     total_token_count = 0
-    stats_data = []
+
+    # Precompute ignore token ids
+    ignore_ids = set()
+    if ignore:
+        for ig_text in ignore:
+            ig_tokens = tokenizer.encode(ig_text, add_special_tokens=False)
+            ignore_ids.update(ig_tokens)
 
     start = time.time()
 
     for start_idx in range(0, len(text_data), batch_size):
         end_idx = min(start_idx + batch_size, len(text_data))
         batch_sentences = text_data[start_idx:end_idx]
+
+        if hasattr(batch_sentences, 'tolist'):
+            batch_sentences = batch_sentences.tolist()
 
         if verbose:
             print(f"Processing batch {start_idx + 1}-{end_idx}/{len(text_data)}")
@@ -37,9 +46,14 @@ def evaluate_clm_perplexity(model, tokenizer, text_data, file=None, verbose=True
         input_ids = encoded["input_ids"].to(device)
         attention_mask = encoded["attention_mask"].to(device)
 
-        # Shift input and labels for causal LM
+        # Labels initially same as input
         labels = input_ids.clone()
-        labels[attention_mask == 0] = -100  # ignore padding in loss computation
+        # Ignore padding
+        labels[attention_mask == 0] = -100
+        # Ignore tokens from ignore list
+        if ignore_ids:
+            mask_ignore = torch.isin(labels, torch.tensor(list(ignore_ids), device=labels.device))
+            labels[mask_ignore] = -100
 
         with torch.no_grad():
             outputs = model(input_ids=input_ids, attention_mask=attention_mask)
@@ -53,10 +67,10 @@ def evaluate_clm_perplexity(model, tokenizer, text_data, file=None, verbose=True
                 ignore_index=-100
             )
 
-        # Count actual tokens (not padding)
-        non_pad_tokens = (labels != -100).sum().item()
+        # Count actual tokens (not padding or ignored)
+        non_ignored_tokens = (labels != -100).sum().item()
         total_log_likelihood += loss.item()
-        total_token_count += non_pad_tokens
+        total_token_count += non_ignored_tokens
 
     avg_neg_log_likelihood = total_log_likelihood / total_token_count
     perplexity = math.exp(avg_neg_log_likelihood)
@@ -68,7 +82,7 @@ def evaluate_clm_perplexity(model, tokenizer, text_data, file=None, verbose=True
     lms = 1 / (1 + avg_neg_log_likelihood)
 
     result = {
-        "accuracy": lms, # todo deprecate
+        "lms": lms,
         "perplexity": perplexity,
         "total_log_likelihood": total_log_likelihood,
         "total_tokens": total_token_count
@@ -135,7 +149,6 @@ def evaluate_clm(model, tokenizer, text_data, file=None, verbose=True, batch_siz
 
             if target_pos is not None:
                 predicted_token = tokenizer.decode([predictions[i, target_pos]], skip_special_tokens=True)
-                # todo check gpt
                 true_token = tokenizer.decode([input_ids[i, target_pos]], skip_special_tokens=True)
                 correct = predicted_token.lower() == true_token.lower()
 
@@ -183,7 +196,8 @@ def evaluate_clm(model, tokenizer, text_data, file=None, verbose=True, batch_siz
     return result, stats
 
 
-def _evaluate_clm_instruction(model, tokenizer, text_data, file=None, verbose=True, batch_size=1):
+def _evaluate_clm_instruction(model, tokenizer, text_data, file=None, verbose=True, batch_size=1, ignore=None):
+    ignore = ignore or []
     device = model.device
     correct_predictions = 0
     total_predictions = 0
@@ -293,11 +307,18 @@ def _evaluate_clm_instruction(model, tokenizer, text_data, file=None, verbose=Tr
             json.dump(result, f, indent=2)
 
     return result, stats
-
-def evaluate_mlm(model, tokenizer, text_data, file=None, verbose=True, batch_size=128):
+def evaluate_mlm(model, tokenizer, text_data, file=None, verbose=True, batch_size=128, ignore=None):
+    ignore = ignore or []
     random.seed(42)
     model.eval()
     device = model.device
+
+    # Precompute ignore token ids
+    ignore_ids = set()
+    if ignore:
+        for ig_text in ignore:
+            ig_tokens = tokenizer.encode(ig_text, add_special_tokens=False)
+            ignore_ids.update(ig_tokens)
 
     # Initialize variables for accuracy calculation
     correct_predictions = 0
@@ -311,13 +332,15 @@ def evaluate_mlm(model, tokenizer, text_data, file=None, verbose=True, batch_siz
     for start_idx in range(0, n, batch_size):
         end_idx = min(start_idx + batch_size, n)
         batch_sentences = text_data[start_idx:end_idx]
+        if hasattr(batch_sentences, 'tolist'):
+            batch_sentences = batch_sentences.tolist()
 
         if verbose:
             print(f'Processing batch {start_idx + 1}-{end_idx}/{n}')
 
         # Tokenize the batch
         batch_tokenized_input = tokenizer(batch_sentences, return_tensors="pt", padding=True, truncation=True,
-                                          add_special_tokens=True)
+                                          add_special_tokens=True, max_length=512)
         input_ids = batch_tokenized_input["input_ids"].to(device)
         attention_mask = batch_tokenized_input["attention_mask"].to(device)
 
@@ -352,18 +375,25 @@ def evaluate_mlm(model, tokenizer, text_data, file=None, verbose=True, batch_siz
 
             # Process each masked position only
             for mask_position in mask_positions:
+                token_id = original_tokens[mask_position].item()
+
+                # Skip ignored tokens
+                if token_id in ignore_ids:
+                    continue
+
                 predicted_token = tokenizer.decode([predicted_tokens_batch[mask_position]],
                                                    skip_special_tokens=True)
-                original_token = tokenizer.decode([original_tokens[mask_position]], skip_special_tokens=True)
+                original_token = tokenizer.decode([token_id], skip_special_tokens=True)
                 correct = predicted_token.lower() == original_token.lower()
 
-                if correct:
-                    correct_predictions += 1
+                correct_predictions += int(correct)
                 total_predictions += 1
 
                 # Append to labels for evaluation
                 true_labels.append(original_token.lower())
                 predicted_labels.append(predicted_token.lower())
+
+                score = logits_for_sentence[mask_position].max().item()
 
                 stats_data.append({
                     'sentence': sentence,
@@ -371,19 +401,17 @@ def evaluate_mlm(model, tokenizer, text_data, file=None, verbose=True, batch_siz
                     'true': original_token,
                     'predicted': predicted_token,
                     'correct': correct,
-                    'score': logits_for_sentence[mask_position].max().item()
+                    'score': score,
                 })
 
-    # Convert stats_data into DataFrame at the end to minimize DataFrame operations in the loop
+    # Convert stats_data into DataFrame at the end
     stats = pd.DataFrame(stats_data)
 
-    # Calculate accuracy
+    # Calculate metrics only on non-ignored tokens
     accuracy = correct_predictions / total_predictions if total_predictions != 0 else 0
-
-    # Calculate additional evaluation metrics
     precision = precision_score(true_labels, predicted_labels, average="weighted", zero_division=0)
     recall = recall_score(true_labels, predicted_labels, average="weighted", zero_division=0)
-    f1 = f1_score(true_labels, predicted_labels, average="weighted")
+    f1 = f1_score(true_labels, predicted_labels, average="weighted", zero_division=0)
 
     # Print results
     if verbose:
@@ -394,6 +422,7 @@ def evaluate_mlm(model, tokenizer, text_data, file=None, verbose=True, batch_siz
         print("F1 Score:", f1)
 
     result = {
+        'lms': accuracy,
         'accuracy': accuracy,
         'precision': precision,
         'recall': recall,
