@@ -61,6 +61,7 @@ dependencies:
   - colorlog=6.8.2
   - comm=0.2.2
   - contourpy=1.3.0
+  - cpython=3.9.23
   - cuda-cudart=12.4.99
   - cuda-cudart_linux-64=12.4.99
   - cuda-cupti=12.4.127
@@ -72,7 +73,6 @@ dependencies:
   - cuda-version=12.4
   - cycler=0.12.1
   - cyrus-sasl=2.1.27
-  - datasets=3.0.1
   - dbus=1.13.6
   - debugpy=1.8.6
   - decorator=5.1.1
@@ -96,7 +96,6 @@ dependencies:
   - fqdn=1.5.1
   - freetype=2.12.1
   - frozenlist=1.4.1
-  - fsspec=2024.6.1
   - gettext=0.22.5
   - gettext-tools=0.22.5
   - gflags=2.2.2
@@ -113,7 +112,6 @@ dependencies:
   - hpack=4.0.0
   - httpcore=1.0.6
   - httpx=0.27.2
-  - huggingface_hub=0.25.2
   - humanize=4.12.3
   - hyperframe=6.0.1
   - icu=75.1
@@ -207,6 +205,7 @@ dependencies:
   - liblapack=3.9.0
   - libllvm19=19.1.1
   - liblzma=5.8.1
+  - liblzma-devel=5.8.1
   - libnghttp2=1.58.0
   - libnpp=12.2.5.2
   - libnsl=2.0.1
@@ -273,6 +272,7 @@ dependencies:
   - notebook-shim=0.2.4
   - numpy=1.26.4
   - ocl-icd=2.3.2
+  - opencl-headers=2025.06.13
   - openh264=2.3.1
   - openjpeg=2.5.2
   - openldap=2.6.8
@@ -312,7 +312,7 @@ dependencies:
   - pyside6=6.7.3
   - pysocks=1.7.1
   - python=3.9.19
-  - python-dateutil=2.9.0
+  - python-dateutil=2.9.0.post0
   - python-fastjsonschema=2.20.0
   - python-json-logger=2.0.7
   - python-tzdata=2024.2
@@ -348,6 +348,7 @@ dependencies:
   - sniffio=1.3.1
   - soupsieve=2.5
   - sqlalchemy=2.0.35
+  - sqlite=3.50.2
   - stack_data=0.6.2
   - statsmodels=0.14.4
   - svt-av1=1.4.1
@@ -414,7 +415,9 @@ dependencies:
   - xorg-libxxf86vm=1.1.5
   - xorg-xorgproto=2024.1
   - xxhash=0.8.2
-  - xz
+  - xz=5.8.1
+  - xz-gpl-tools=5.8.1
+  - xz-tools=5.8.1
   - yaml=0.2.5
   - yarl=1.13.1
   - zeromq=4.3.5
@@ -423,5 +426,13 @@ dependencies:
   - zstandard=0.23.0
   - zstd=1.5.6
   - pip:
+      - datasets==4.0.0
+      - fsspec==2024.3.1
+      - hf-xet==1.1.10
+      - huggingface-hub==0.34.4
+      - pyaml==25.7.0
+      - pyarrow-hotfix==0.7
       - pympler==1.1
+      - scikit-optimize==0.10.2
       - sentencepiece==0.2.0
+prefix: /root/envs/gradiend
