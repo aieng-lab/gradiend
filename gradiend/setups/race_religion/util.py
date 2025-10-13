@@ -1,6 +1,3 @@
-
-
-
 class2pretty_name = {
     'white': 'White',
     'asian': 'Asian',

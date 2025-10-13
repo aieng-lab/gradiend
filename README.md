@@ -146,8 +146,8 @@ NAMEXTEND | `gradiend.data.generate_namextend()`
 
 ## Citation
 ```
-@misc{drechsel2025gradiendmonosemanticfeaturelearning,
-      title={{GRADIEND}: Monosemantic Feature Learning within Neural Networks Applied to Gender Debiasing of Transformer Models}, 
+@misc{drechsel2025gradiendfeaturelearning,
+      title={{GRADIEND}: Feature Learning within Neural Networks Exemplified through Biases}, 
       author={Jonathan Drechsel and Steffen Herbold},
       year={2025},
       eprint={2502.01406},

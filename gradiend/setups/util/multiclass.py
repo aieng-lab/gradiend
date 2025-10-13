@@ -10,11 +10,8 @@ from matplotlib.patches import Patch, Rectangle
 from scipy.signal import find_peaks
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
-import seaborn as sns
 import torch
 from datasets import Dataset
-from matplotlib import pyplot as plt
 from matplotlib.colors import ListedColormap
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -29,12 +26,11 @@ from gradiend.data.util import get_file_name, json_loads, json_dumps
 from gradiend.evaluation.analyze_decoder import get_evaluation_file, convert_results_to_dict, convert_results_to_list, \
     compute_bias_score, compute_lms, plot_gradiend_model_selection
 from gradiend.setups import BatchedTrainingDataset, Setup
-from gradiend.setups.gender.en import read_geneutral
-from gradiend.setups.race.data import _create_bias_attribute_words, get_base_terms
+from gradiend.setups.race_religion.data import _create_bias_attribute_words, get_base_terms
 from gradiend.training.decoder_only_mlm.model import DecoderModelWithMLMHead
 from gradiend.training.gradiend_training import train_for_configs
 from gradiend.util import hash_model_weights, get_files_and_folders_with_prefix
-from gradiend.setups.race.util import class2pretty_name
+from gradiend.setups.race_religion.util import class2pretty_name
 
 class TrainingDataset(BatchedTrainingDataset):
     def __init__(self,
@@ -91,9 +87,6 @@ class TrainingDataset(BatchedTrainingDataset):
             'source_id': entry['source_id'],
             'target': entry['target'],
             'target_id': entry['target_id'],
-
-            #'metadata': {},
-
         }
 
 
@@ -103,13 +96,13 @@ def create_training_dataset(tokenizer,
                             neutral_data=False,
                             split='train',
                             neutral_data_prop=0.5,
-                            races=None,
+                            classes=None,
                             bias_type='race',
                             single_word_texts=False,
                             is_generative=None,
                             ):
-    if races is None or len(races) < 2:
-        raise ValueError("Please provide at least two races in the 'races' list.")
+    if classes is None or len(classes) < 2:
+        raise ValueError("Please provide at least two classes in the 'classes' list.")
 
     all_dfs = []
     label_counter = 0
@@ -119,17 +112,17 @@ def create_training_dataset(tokenizer,
 
     pair_to_index = {
         frozenset((i, j)): idx
-        for idx, (i, j) in enumerate(itertools.combinations(range(len(races)), 2))
+        for idx, (i, j) in enumerate(itertools.combinations(range(len(classes)), 2))
     }
     num_pairs = len(pair_to_index)
     df_ctr = 0
 
     # Load all pairwise datasets
-    for i, race_from in enumerate(races):
-        for j, race_to in enumerate(races):
+    for i, class_from in enumerate(classes):
+        for j, class_to in enumerate(classes):
             if i == j:
-                continue  # skip same-race
-            ds_path = f"data/{bias_type}/{race_from}_to_{race_to}"
+                continue  # skip same-class
+            ds_path = f"data/{bias_type}/{class_from}_to_{class_to}"
             try:
                 df = Dataset.load_from_disk(ds_path).to_pandas()
             except FileNotFoundError:
@@ -178,7 +171,7 @@ def create_training_dataset(tokenizer,
             all_dfs.append(df)
 
     if not all_dfs:
-        raise ValueError("No datasets found for the given races.")
+        raise ValueError("No datasets found for the given classes.")
 
     # ensure all datasets have the same number of examples
     min_size = min(len(df) for df in all_dfs)
@@ -207,11 +200,11 @@ def create_training_dataset(tokenizer,
     )
 
 
-class BiasSetup(Setup):
-    def __init__(self, bias_type, *races, pretty_id=None):
-        super().__init__(f'{bias_type}_{"_".join(races)}')
-        assert len(races) > 1
-        self.races = races
+class MultiClassSetup(Setup):
+    def __init__(self, bias_type, *classes, pretty_id=None):
+        super().__init__(f'{bias_type}_{"_".join(classes)}')
+        assert len(classes) > 1
+        self.classes = classes
         self.bias_type = bias_type
         self.metric_keys = [f'bias_{self.bias_type}']
         self.metric_keys = [self.id]
@@ -222,16 +215,16 @@ class BiasSetup(Setup):
             bias_type=self.bias_type,
         )
         base_terms = get_base_terms(bias_attribute_words)
-        # todo check that all races are contained in base_terms
-        race_base_terms = {t: index for index, t in enumerate(base_terms) if t in self.races}
-        self.all_races = base_terms
-        self.targets = {t: [tt[i] for tt in bias_attribute_words] for t, i in race_base_terms.items()}
+        # todo check that all classes are contained in base_terms
+        class_base_terms = {t: index for index, t in enumerate(base_terms) if t in self.classes}
+        self.all_classes = base_terms
+        self.targets = {t: [tt[i] for tt in bias_attribute_words] for t, i in class_base_terms.items()}
         self.non_neutral_terms = [tt for t in bias_attribute_words for tt in t]
 
-        self.races2labelidx = {}
-        self.races2labelidx[(base_terms[0], base_terms[1])] = 0
-        self.races2labelidx[(base_terms[0], base_terms[2])] = 1
-        self.races2labelidx[(base_terms[1], base_terms[2])] = 2
+        self.classes2labelidx = {}
+        self.classes2labelidx[(base_terms[0], base_terms[1])] = 0
+        self.classes2labelidx[(base_terms[0], base_terms[2])] = 1
+        self.classes2labelidx[(base_terms[1], base_terms[2])] = 2
 
         self._pretty_id = pretty_id or self.id
 
@@ -241,10 +234,10 @@ class BiasSetup(Setup):
 
     @property
     def trained_state(self):
-        return '<->'.join(sorted(self.races))
+        return '<->'.join(sorted(self.classes))
 
     def create_training_data(self, *args, **kwargs):
-        return create_training_dataset(*args, races=self.races, bias_type=self.bias_type, **kwargs)
+        return create_training_dataset(*args, classes=self.classes, bias_type=self.bias_type, **kwargs)
 
     def analyze_models(self, *models, max_size=1000, force=False, split='test', prefix=None, best_score=None):
         if prefix:
@@ -371,12 +364,12 @@ class BiasSetup(Setup):
                 force = True
 
         if force or output is None or not os.path.isfile(output):
-            data = self.read_data(model_with_gradiend.tokenizer, max_size=6 * max_size, split=split, races=self.all_races)
+            data = self.read_data(model_with_gradiend.tokenizer, max_size=6 * max_size, split=split, classes=self.all_classes)
             source = model_with_gradiend.gradiend.kwargs['training']['config']['source']
 
             dataloader = DataLoader(data, batch_size=1, shuffle=False)
             df = data.data
-            like_training_data = df[df['source_id'].isin(self.races) & df['target_id'].isin(self.races)]
+            like_training_data = df[df['source_id'].isin(self.classes) & df['target_id'].isin(self.classes)]
 
             for c in ['label_0', 'label_1', 'label_2']:
                 labels = like_training_data[c]
@@ -387,7 +380,7 @@ class BiasSetup(Setup):
                 raise ValueError('Could not find label column with -1/1 labels')
 
             source2label = {}
-            for gradiend_source in self.races:
+            for gradiend_source in self.classes:
                 sub_df = like_training_data[like_training_data['source_id'] == gradiend_source]
                 labels = sub_df[label_column].unique()
                 if len(labels) > 1:
@@ -531,7 +524,7 @@ class BiasSetup(Setup):
         return total_results
 
     def get_model_metrics(self, encoded_values, trained_state=None, plot=True, plot_output=None):
-        trained_state = trained_state or '<->'.join(sorted(self.races))
+        trained_state = trained_state or '<->'.join(sorted(self.classes))
 
         output_str = None
         if isinstance(encoded_values, str):
@@ -666,21 +659,21 @@ class BiasSetup(Setup):
         df.loc[df['type'] == 'neutral', 'state'] = df['state']
 
         # map states to pretty names
-        races2labelidx = self.races2labelidx.copy()
-        all_races = self.all_races.copy()
+        classes2labelidx = self.classes2labelidx.copy()
+        all_classes = self.all_classes.copy()
         for x, y in class2pretty_name.items():
             df['state'] = df['state'].str.replace(x, y, regex=False)
-            for r1, r2 in list(races2labelidx.keys()):
+            for r1, r2 in list(classes2labelidx.keys()):
                 if r1 == x:
-                    races2labelidx[(y, r2)] = races2labelidx.pop((r1, r2))
+                    classes2labelidx[(y, r2)] = classes2labelidx.pop((r1, r2))
                 if r2 == x:
-                    races2labelidx[(r1, y)] = races2labelidx.pop((r1, r2))
-            if x in all_races:
-                all_races = [r for r in all_races if r != x] + [y]
-        all_races = list(sorted(all_races))
+                    classes2labelidx[(r1, y)] = classes2labelidx.pop((r1, r2))
+            if x in all_classes:
+                all_classes = [r for r in all_classes if r != x] + [y]
+        all_classes = list(sorted(all_classes))
         df['source_id'] = df['source_id'].map(lambda x: class2pretty_name.get(x, x))
         df['target_id'] = df['target_id'].map(lambda x: class2pretty_name.get(x, x))
-        important_states = all_races
+        important_states = all_classes
 
 
         pair_labels = []
@@ -699,14 +692,14 @@ class BiasSetup(Setup):
                 s1, s2 = [p.strip() for p in raw_state.split("->", 1)]
                 state_pair = (s1, s2)
                 # if not present in mapping, swap order (as in your original code)
-                if state_pair not in races2labelidx:
+                if state_pair not in classes2labelidx:
                     s1, s2 = s2, s1
-                label_idx = races2labelidx[(s1, s2)]
+                label_idx = classes2labelidx[(s1, s2)]
                 label_val = parse_label_value(row["all_labels"], label_idx)
                 # decide canonical sorted order and arrow direction as in your original code
                 states_sorted = (s1, s2)
                 # your original comparison: if index(s1) < index(s2) then states_sorted=(s2,s1)
-                if all_races.index(s1) < all_races.index(s2):
+                if all_classes.index(s1) < all_classes.index(s2):
                     states_sorted = (s2, s1)
                 if label_val == 1:
                     left, right = states_sorted[0], states_sorted[1]
@@ -729,15 +722,15 @@ class BiasSetup(Setup):
             # raw_state looks like s1->s2
             s1 = raw_state.split("->", 1)[0].strip()
             s2 = raw_state.split("->", 1)[1].strip()
-            states_without_s1 = [s for s in all_races if s1 != s]
+            states_without_s1 = [s for s in all_classes if s1 != s]
             return 0 if s2 == states_without_s1[0] else 1
 
         df["direction"] = df.apply(compute_direction, axis=1)
         # Build pair ordering grouped by source (left)
-        # Use the order of self.all_races where possible, then neutral last if present
+        # Use the order of self.all_classes where possible, then neutral last if present
         unique_sources = []
-        # collect sources in the order of self.all_races (if present), to keep stable ordering
-        for r in all_races:
+        # collect sources in the order of self.all_classes (if present), to keep stable ordering
+        for r in all_classes:
             if r in df["source_id"].values:
                 unique_sources.append(r)
         if "neutral" in df["source_id"].values and "neutral" not in unique_sources:
@@ -914,27 +907,27 @@ class BiasSetup(Setup):
         df.loc[df['type'] == 'neutral', 'state'] = df['state']
 
         # map states to pretty names
-        races2labelidx = self.races2labelidx.copy()
-        all_races = self.all_races.copy()
+        classes2labelidx = self.classes2labelidx.copy()
+        all_classes = self.all_classes.copy()
         for x, y in class2pretty_name.items():
             df['state'] = df['state'].str.replace(x, y, regex=False)
-            for r1, r2 in list(races2labelidx.keys()):
+            for r1, r2 in list(classes2labelidx.keys()):
                 if r1 == x:
-                    races2labelidx[(y, r2)] = races2labelidx.pop((r1, r2))
+                    classes2labelidx[(y, r2)] = classes2labelidx.pop((r1, r2))
                 if r2 == x:
-                    races2labelidx[(r1, y)] = races2labelidx.pop((r1, r2))
-            if x in all_races:
-                all_races = [r for r in all_races if r != x] + [y]
-        all_races = list(sorted(all_races))
+                    classes2labelidx[(r1, y)] = classes2labelidx.pop((r1, r2))
+            if x in all_classes:
+                all_classes = [r for r in all_classes if r != x] + [y]
+        all_classes = list(sorted(all_classes))
 
-        important_states = [races2labelidx.get(x, x) for x in self.races]
+        important_states = [classes2labelidx.get(x, x) for x in self.classes]
         train_mask = df['source_id'].isin(important_states) & df['target_id'].isin(important_states)
         df['train'] = False
         df.loc[train_mask, 'train'] = True
         df.loc[df['source_id'] == 'train-neutral', 'source_id'] = 'neutral'
 
         # Build pair ordering grouped by source (left)
-        # Use the order of self.all_races where possible, then neutral last if present
+        # Use the order of self.all_classes where possible, then neutral last if present
 
 
         df['source_id'] = df['source_id'].map(lambda x: class2pretty_name.get(x, x))
@@ -942,8 +935,8 @@ class BiasSetup(Setup):
 
 
         unique_sources = []
-        # collect sources in the order of self.all_races (if present), to keep stable ordering
-        for r in all_races:
+        # collect sources in the order of self.all_classes (if present), to keep stable ordering
+        for r in all_classes:
             if r in df["source_id"].values:
                 unique_sources.append(r)
         if "neutral" in df["source_id"].values and "Neutral" not in unique_sources:
@@ -966,14 +959,14 @@ class BiasSetup(Setup):
                 s1, s2 = [p.strip() for p in raw_state.split("->", 1)]
                 state_pair = (s1, s2)
                 # if not present in mapping, swap order (as in your original code)
-                if state_pair not in races2labelidx:
+                if state_pair not in classes2labelidx:
                     s1, s2 = s2, s1
-                label_idx = races2labelidx[(s1, s2)]
+                label_idx = classes2labelidx[(s1, s2)]
                 label_val = parse_label_value(row["all_labels"], label_idx)
                 # decide canonical sorted order and arrow direction as in your original code
                 states_sorted = (s1, s2)
                 # your original comparison: if index(s1) < index(s2) then states_sorted=(s2,s1)
-                if all_races.index(s1) < all_races.index(s2):
+                if all_classes.index(s1) < all_classes.index(s2):
                     states_sorted = (s2, s1)
                 if label_val == -1:
                     left, right = states_sorted[0], states_sorted[1]
@@ -996,7 +989,7 @@ class BiasSetup(Setup):
             # raw_state looks like s1->s2
             s1 = raw_state.split("->", 1)[0].strip()
             s2 = raw_state.split("->", 1)[1].strip()
-            states_without_s1 = [s for s in all_races if s1 != s]
+            states_without_s1 = [s for s in all_classes if s1 != s]
             return 0 if s2 == states_without_s1[0] else 1
 
         df["direction"] = df.apply(compute_direction, axis=1)
@@ -1104,9 +1097,9 @@ class BiasSetup(Setup):
                 return "GENEUTRAL"
             s1, s2 = row["state"].split("->")
             state_pair = (s1, s2)
-            if state_pair not in self.races2labelidx:
+            if state_pair not in self.classes2labelidx:
                 s1, s2 = s2, s1
-            label_idx = self.races2labelidx[(s1, s2)]
+            label_idx = self.classes2labelidx[(s1, s2)]
             label = row['all_labels']
             if isinstance(label, str):
                 if label.startswith('(') and label.endswith(')'):
@@ -1118,7 +1111,7 @@ class BiasSetup(Setup):
             elif label_idx > 0:
                 raise ValueError(f"Label index {label_idx} out of range for label {label}")
             states_sorted = (s1, s2)
-            if self.all_races.index(s1) < self.all_races.index(s2):
+            if self.all_classes.index(s1) < self.all_classes.index(s2):
                 states_sorted = (s2, s1)
             if label == 1:
                 return rf"{states_sorted[0]} $\to$ {states_sorted[1]}"
@@ -1190,7 +1183,7 @@ class BiasSetup(Setup):
     def plot_model_selection(self, model_with_gradiend):
         data = self.evaluate_gradiend(model_with_gradiend)
         model_name = model_with_gradiend.name_or_path
-        c1, c2 = self.races
+        c1, c2 = self.classes
         pretty_classes = {
 
         }
@@ -1354,8 +1347,8 @@ class BiasSetup(Setup):
 
         return result
 
-    def read_data(self, tokenizer, max_size=None, split=None, races=None):
-        races = races or self.races
+    def read_data(self, tokenizer, max_size=None, split=None, classes=None):
+        classes = classes or self.classes
 
         id = f'{tokenizer.name_or_path}_{self.id}_{max_size}_{split}'
 
@@ -1363,7 +1356,7 @@ class BiasSetup(Setup):
             return self.data_cache[id]
 
 
-        data = create_training_dataset(tokenizer, max_size, batch_size=1, split=split, races=races, bias_type= self.bias_type)
+        data = create_training_dataset(tokenizer, max_size, batch_size=1, split=split, classes=classes, bias_type= self.bias_type)
         self.data_cache[id] = data
 
         return data
@@ -1426,57 +1419,16 @@ class BiasSetup(Setup):
 
         return result
 
-class Bias1DSetup(BiasSetup):
-    def __init__(self, bias_type, race1, race2, pretty_id=None):
-        super().__init__(bias_type, race1, race2, pretty_id=pretty_id)
-        self.n_features = 1
-
-    @property
-    def race1(self):
-        return self.races[0]
-
-    @property
-    def race2(self):
-        return self.races[1]
-
-class Race1DSetup(Bias1DSetup):
-    def __init__(self, race1, race2, pretty_id=None):
-        super().__init__('race', race1, race2, pretty_id=pretty_id)
-
-class WhiteBlackSetup(Race1DSetup):
-    def __init__(self):
-        super().__init__('white', 'black', pretty_id='Black/White')
 
 
-class WhiteAsianSetup(Race1DSetup):
-    def __init__(self):
-        super().__init__('white', 'asian', pretty_id='Asian/White')
 
-class BlackAsianSetup(Race1DSetup):
-    def __init__(self):
-        super().__init__('black', 'asian', pretty_id='Asian/Black')
-
-class Religion1DSetup(Bias1DSetup):
-    def __init__(self, religion1, religion2, pretty_id=None):
-        super().__init__('religion', religion1, religion2, pretty_id=pretty_id)
-
-class MuslimJewishSetup(Religion1DSetup):
-    def __init__(self):
-        super().__init__('muslim', 'jewish', pretty_id='Jewish/Muslim')
-
-class ChristianJewishSetup(Religion1DSetup):
-    def __init__(self):
-        super().__init__('christian', 'jewish', pretty_id='Christian/Jewish')
-
-class ChristianMuslimSetup(Religion1DSetup):
-    def __init__(self):
-        super().__init__('christian', 'muslim', pretty_id='Christian/Muslim')
-
-
-class Bias3DCombinedSetup(BiasSetup):
+# Multi class implementation for bias setups for 3D learning (3 classes).
+# This setup is NOT used for the GRADIEND paper
+# This is not very well tested
+class Bias3DCombinedSetup(MultiClassSetup):
     def __init__(self, bias_type, *types):
         super().__init__(bias_type, *types)
-        self.races = list(types)
+        self.classes = list(types)
         self.short_id = self.id
         self.id += '_combined'
         self.metric_keys = [self.id]
@@ -1484,7 +1436,7 @@ class Bias3DCombinedSetup(BiasSetup):
 
 
     def create_training_data(self, *args, **kwargs):
-        return create_training_dataset(*args, races=self.races, bias_type=self.bias_type, **kwargs)
+        return create_training_dataset(*args, classes=self.classes, bias_type=self.bias_type, **kwargs)
 
 
     def evaluate(self, *args, **kwargs):
@@ -1833,87 +1785,3 @@ class Bias3DCombinedSetup(BiasSetup):
                                           metrics=[self.id], **kwargs)
 
         return dict_results
-
-
-class Race3DCombinedSetup(Bias3DCombinedSetup):
-    def __init__(self):
-        super().__init__('race', 'white', 'black', 'asian')
-
-        self.init_gradiends = [
-            f'results/models/{self.bias_type}_white_black',
-            f'results/models/{self.bias_type}_white_asian',
-            f'results/models/{self.bias_type}_black_asian',
-        ]
-
-class Religion3DCombinedSetup(Bias3DCombinedSetup):
-    def __init__(self):
-        super().__init__('religion', 'christian', 'muslim', 'jewish')
-
-        self.init_gradiends = [
-            f'results/models/{self.bias_type}_christian_jewish',
-            f'results/models/{self.bias_type}_christian_muslim',
-            f'results/models/{self.bias_type}_muslim_jewish',
-        ]
-
-class Race3DSetup(BiasSetup):
-    def __init__(self):
-        super().__init__('race', 'white', 'black', 'asian')
-        self.n_features = 3
-
-
-    def create_training_data(self, *args, **kwargs):
-        return create_training_dataset(races=self.races, *args, **kwargs)
-
-
-
-def train_race_gradiends(configs, version=None, activation='tanh', setups=None):
-
-    for id, config in configs.items():
-        config['activation'] = activation
-        config['delete_models'] = False
-
-    setups = setups or [WhiteBlackSetup(), WhiteAsianSetup(), BlackAsianSetup()]
-
-    for setup in setups:
-        print(f"Training setup: {setup.id}")
-        #if isinstance(setup, Bias3DCombinedSetup):
-        #    configs = {k: {**v, 'max_iterations': 500} for k, v in configs.items()}
-
-        train_for_configs(setup, configs, version=version, n=1, clear_cache=True)
-
-
-if __name__ == '__main__':
-    configs = {
-        #'gpt2': dict(eval_max_size=500, batch_size=32, n_evaluation=250, epochs=20, max_iterations=2500, source='factual', target='diff'),
-        #'roberta-large': dict(eval_max_size=500, batch_size=32, n_evaluation=250, epochs=20, max_iterations=2500, source='factual', target='diff', eval_batch_size=4),
-        #'distilbert-base-cased': dict(eval_max_size=500, batch_size=32, n_evaluation=250, epochs=20, max_iterations=2500, source='factual', target='diff'),
-        #'bert-base-cased': dict(eval_max_size=500, batch_size=32, n_evaluation=250, epochs=20, max_iterations=2500, source='factual', target='diff', eval_batch_size=8),
-        #'bert-large-cased': dict(eval_max_size=500, batch_size=32, n_evaluation=250, epochs=20, max_iterations=2500, source='factual', target='diff', eval_batch_size=4),
-
-        'meta-llama/Llama-3.2-3B-Instruct': dict(eval_max_size=50, batch_size=32, n_evaluation=250, epochs=20, max_iterations=2500, source='factual', target='diff', eval_batch_size=1, torch_dtype=torch.bfloat16, lr=1e-4),
-        #'meta-llama/Llama-3.2-3B': dict(eval_max_size=50, batch_size=32, n_evaluation=250, epochs=20, max_iterations=2500, source='factual', target='diff', eval_batch_size=1, torch_dtype=torch.bfloat16, lr=1e-4),
-    }
-
-
-
-
-    configs_factual_source = {k: {**v, 'source': 'factual'} for k, v in configs.items()}
-
-    all_setups = [
-        #ChristianJewishSetup(),
-        #MuslimJewishSetup(),
-        #WhiteAsianSetup(),
-        BlackAsianSetup(),
-        #WhiteBlackSetup(),
-        #ChristianMuslimSetup(),
-    ]
-
-#    all_setups = list(reversed(all_setups))
-
-    try:
-        train_race_gradiends(configs, version='v5', activation='tanh', setups=all_setups)
-    except NotImplementedError as e:
-        print(f"Error during training: {e}")
-
-
-

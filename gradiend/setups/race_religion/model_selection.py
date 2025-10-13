@@ -3,20 +3,18 @@ import pickle
 
 from gradiend.export import models as pretty_models
 from gradiend.model import ModelWithGradiend
-from gradiend.setups.race.training import WhiteBlackSetup, BlackAsianSetup, WhiteAsianSetup, ChristianJewishSetup, \
+from gradiend.setups.race_religion.training import WhiteBlackSetup, BlackAsianSetup, WhiteAsianSetup, ChristianJewishSetup, \
     ChristianMuslimSetup, MuslimJewishSetup
 
 base_models = [
-    'roberta-large-v7',
     'bert-base-cased-v7',
-    'distilbert-base-cased-v7',
-    'gpt2-v7',
     'bert-large-cased-v7',
+    'distilbert-base-cased-v7',
+    'roberta-large-v7',
+    'gpt2-v7',
     'Llama-3.2-3B-v5',
     'Llama-3.2-3B-Instruct-v5',
 ]
-
-
 
 setups = [
     BlackAsianSetup(),
@@ -39,8 +37,8 @@ args = parse_args()
 
 setup = setups[int(args.type)]
 print(f'Using setup {setup.id}')
-#setups = [setup]
 
+# todo rename file to indicate it also contains religion setups
 setup_stats_cache_file = f'results/models/selection_race_v7.pkl'
 try:
     setup_stats = pickle.load(open(setup_stats_cache_file, 'rb'))
@@ -55,6 +53,7 @@ for setup in setups:
             continue
         model_id = f'results/models/{setup.id}/{model}'
         #setup.select(model_id)
+
         model = ModelWithGradiend.from_pretrained(model_id)
         setup.plot_model_selection(model)
 
@@ -66,16 +65,13 @@ pickle.dump(setup_stats, open(setup_stats_cache_file, 'wb'))
 print()
 
 # print selected model table
-
-header = ['Model', r'FF $h$', r'LR $\alpha$', r'Base \P(Asian)', r'\P(Asian)', r'Base \P(Black)', r'\P(Black)', r'Base \P(White)', r'\P(White)', r'\accdec', r'\bpi']
-
 for setup in setups:
 
     print(r'\midrule')
     print(rf'\multicolumn{{9}}{{c}}{{$\gradiend_{{{setup.pretty_id}}}$}} \\')
     print(r'\midrule')
 
-    races = setup.races
+    races = setup.classes
     c1, c2 = races
     swapped = False
     if c1 > c2:

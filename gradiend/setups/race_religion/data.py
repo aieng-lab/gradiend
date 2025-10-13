@@ -91,10 +91,9 @@ def pairwise_counterfactual_datasets(dataset, bias_attribute_words):
 
     return datasets_per_pair
 
-def main(bias_type='race'):
+def generate_data(bias_type='race'):
     parser = argparse.ArgumentParser()
     parser.add_argument("--train_file", type=str, default='data/text/wikipedia-10.txt')
-    #parser.add_argument("--counterfactual_augmentation", type=str, required=True)
     parser.add_argument("--output_dir", type=str, default=f'data/{bias_type}')
     args = parser.parse_args()
 
@@ -118,5 +117,5 @@ def main(bias_type='race'):
         print(f"Saved dataset for {orig} → {repl} at {save_path}")
 
 if __name__ == "__main__":
-    main(bias_type='race')
-    main(bias_type='religion')
+    generate_data(bias_type='race')
+    generate_data(bias_type='religion')

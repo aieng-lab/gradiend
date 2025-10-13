@@ -1,7 +1,7 @@
 import pandas as pd
 
 from gradiend.export import models as pretty_models
-from gradiend.setups.race.training import WhiteBlackSetup, WhiteAsianSetup, BlackAsianSetup, ChristianJewishSetup, \
+from gradiend.setups.race_religion.training import WhiteBlackSetup, WhiteAsianSetup, BlackAsianSetup, ChristianJewishSetup, \
     ChristianMuslimSetup, MuslimJewishSetup
 from gradiend.util import init_matplotlib
 
@@ -16,7 +16,7 @@ base_models = [
 ]
 
 gradiend_suffixes = [
-    '-v5'
+    '-v7'
 ]
 
 
@@ -27,7 +27,6 @@ metrics = [
     'corr_train',
     'mean_abs_encoded_value_GENEUTRAL',
     'corr',
-    #'corr_christian<->jewish'
 ]
 
 setups = [
@@ -69,7 +68,7 @@ def plot_split_violin_grid(models, setups, output=None, fig_size=None):
         for j, setup in enumerate(setups):
             ax = axes[i, j]
 
-            encoded_values = f'results/models/{setup.id}/{model}-v5/encoded_values.csv'
+            encoded_values = f'results/models/{setup.id}/{model}-v7/encoded_values.csv'
             try:
                 df = pd.read_csv(encoded_values)
                 if setup.id in ['religion_christian_muslim', 'religion_muslim_jewish', 'race_white_black']:
@@ -172,7 +171,8 @@ def plot_all_models():
                            output='img/religion_encoded_values.pdf'
                            )
 
-
+# Prints the selected model stats for race and religion
+# Note that this table is not reported in the GRADIEND paper
 def print_selected_model_stats():
     table_data = []
 
@@ -202,4 +202,4 @@ def print_selected_model_stats():
 if __name__ == '__main__':
     #print_selected_model_stats()
     plot_single_models()
-    #plot_all_models()
+    plot_all_models()

@@ -3,7 +3,7 @@ from tabulate import tabulate
 
 from gradiend.evaluation.analyze_encoder import get_model_metrics
 from gradiend.export import models as default_models
-from gradiend.setups.race.training import MuslimJewishSetup, ChristianMuslimSetup, ChristianJewishSetup, \
+from gradiend.setups.race_religion.training import MuslimJewishSetup, ChristianMuslimSetup, ChristianJewishSetup, \
     WhiteAsianSetup, BlackAsianSetup, WhiteBlackSetup
 
 exported_metrics = {
