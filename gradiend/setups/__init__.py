@@ -619,6 +619,7 @@ class Setup:
                     with open(change_stats_file, 'w') as f:
                         json.dump(change_stats, f, indent=2)
                 else:
+                    py_print(f"Model {output_path} already exists")
                     # check if saved model is the same
                     saved_model = AutoModelForLM.from_pretrained(output_path)
                     # todo adjust for generative models!

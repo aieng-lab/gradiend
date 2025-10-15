@@ -51,19 +51,6 @@ models = {
 }
 
 
-if False:
-    models = {
-        'bert-base-cased': r'\bertbase',
-        'bert-base-cased-v_0.01': r'\bertbase h',
-        'bert-base-cased-v_1e-05_decoder': r'\bertbase b',
-    }
-
-    models = {
-        'bert-large-cased': r'\bertlarge',
-        'bert-large-cased-v_0.01': r'\bertlarge h',
-        'bert-large-cased-v_1e-07_decoder-bias': r'\bertlarge b',
-}
-
 for base_model in models:
     model = f'results/models/{base_model}'
     print(f'Processing model {model}')

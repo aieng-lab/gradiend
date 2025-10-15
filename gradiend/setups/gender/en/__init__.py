@@ -362,7 +362,7 @@ class GenderEnSetup(Setup):
         dfs = {}
         for model in models:
 
-            output = get_file_name(model, max_size=max_size, file_format='csv', split=split, v=2)
+            output = get_file_name(model, max_size=max_size, file_format='csv', split=split, v=3)
 
             if force or not os.path.isfile(output):
                 model_with_ae = ModelWithGradiend.from_pretrained(model)

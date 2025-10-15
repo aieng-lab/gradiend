@@ -1180,7 +1180,7 @@ def evaluate_gradiend(model_with_gradiend, feature_factors=None, lrs=None, thoro
         id = {'feature_factor': feature_factor, 'lr': lr}
         id_key = (feature_factor, lr)
         if id_key in relevant_results:
-            print(f"Skipping {id} as it is already evaluated")
+            #print(f"Skipping {id} as it is already evaluated")
             continue
 
         enhanced_bert = model_with_gradiend.modify_model(lr=lr, feature_factor=feature_factor, top_k=top_k, part=part, top_k_part=top_k_part)
@@ -2084,6 +2084,7 @@ def evaluate_gender_prediction_by_model(model, tokenizer, target=None, target_wo
     if is_generative:
         tokenizer.pad_token = tokenizer.eos_token
 
+    from gradiend.setups.gender.en import read_namexact
     names = read_namexact()
 
     # Convert male and female tokens to IDs once

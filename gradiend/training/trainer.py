@@ -541,7 +541,6 @@ def train(model_with_gradiend,
              #normalization=default_normalization,
              evaluate=dummy_evaluate,
 
-
              # training config
              source='factual',
              target='diff',

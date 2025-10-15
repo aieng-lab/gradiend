@@ -3,7 +3,7 @@ import numpy as np
 from gradiend.setups import Setup
 from gradiend.setups.emotion import plot_encoded_by_class
 from gradiend.setups.gender.en import GenderEnSetup, create_training_dataset
-from gradiend.training.gradiend_training import train_for_configs
+from gradiend.training.gradiend_training import train_for_configs, train as train_gradiend
 
 
 class MultiDimGenderEnSetup(Setup):
@@ -61,22 +61,22 @@ def multi_dim_training(configs, version=None, activation='tanh', n_features=2):
 
 
 if __name__ == '__main__':
-    configs = {
-        #'distilbert-base-cased': dict(),
-        'results/decoder-mlm-head/gpt2': dict(eval_max_size=None, eval_batch_size=4),
+    model_configs = {
+        'bert-base-cased': dict(),
+        'bert-large-cased': dict(eval_max_size=0.5, eval_batch_size=4),
+        'distilbert-base-cased': dict(),
+        'roberta-large': dict(eval_max_size=0.5, eval_batch_size=4),
+        'gpt2': dict(),
+        'meta-llama/Llama-3.2-3B-Instruct': dict(batch_size=32, eval_max_size=0.05, eval_batch_size=1, epochs=1, torch_dtype=torch.bfloat16, lr=1e-4),
+        'meta-llama/Llama-3.2-3B': dict(batch_size=32, eval_max_size=0.05, eval_batch_size=1, epochs=1, torch_dtype=torch.bfloat16, lr=1e-4, n_evaluation=250),
     }
 
-    default_training(configs)
+    setup = GenderEnSetup()
 
-    exit(1)
+    models = []
+    for base_model, model_config in model_configs.items():
+        model = train_gradiend(setup, base_model, model_config, n=3, version='', clear_cache=False, force=False)
+        models.append(model)
 
-    #dual_training(configs, version='tanh', activation='tanh')
-    #dual_training(configs, version='relu', activation='relu')
-    #dual_training(configs, version='sigmoid', activation='sigmoid')
-    multi_dim_training(configs, version='gelu_3', activation='gelu', n_features=3)
-    multi_dim_training(configs, version='tanh_3', activation='tanh', n_features=3)
-    multi_dim_training(configs, version='tanh_5', activation='tanh', n_features=5)
-    multi_dim_training(configs, version='gelu_5', activation='gelu', n_features=5)
-    #dual_training(configs, version='silu', activation='silu')
-    #dual_training(configs, version='smht', activation='smht')
-    #dual_training(configs, version='id', activation='id')
+    for model in models:
+        setup.select(model)

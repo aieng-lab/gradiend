@@ -20,9 +20,9 @@ def train(setup, base_model, model_config=None, n=3, metric='pearson', force=Fal
         version = f'/{version}'
 
     base_model_id = base_model.split('/')[-1]
-    output = f'results/models/{setup.id}/{base_model_id}{version.replace("/", "-")}'
+    main_output = f'results/models/{setup.id}/{base_model_id}{version.replace("/", "-")}'
     if only_return_output:
-        return output
+        return main_output
 
     metrics = []
     total_start = time.time()
@@ -70,7 +70,8 @@ def train(setup, base_model, model_config=None, n=3, metric='pearson', force=Fal
         print('Best metric at index', best_index, 'with value', metrics[best_index])
 
         # copy the best model to output
-        shutil.copytree(f'results/experiments/gradiend/{setup.id}/{base_model}{version}/{best_index}', output, dirs_exist_ok=True)
+        shutil.copytree(f'results/experiments/gradiend/{setup.id}/{base_model}{version}/{best_index}', main_output, dirs_exist_ok=True)
+        print('Copied best model to', main_output)
 
         total_time = time.time() - total_start
         if times:
@@ -81,14 +82,15 @@ def train(setup, base_model, model_config=None, n=3, metric='pearson', force=Fal
     elif n == 1:
         print(f'No metrics found for model {base_model}, but trained once')
         # check if copying is necessary
-        if not os.path.exists(output) or not os.path.isfile(f'{output}/pytorch_model.bin'):
+        if not os.path.exists(main_output) or not os.path.isfile(f'{main_output}/pytorch_model.bin'):
             print('Copying trained model to output')
-            shutil.copytree(f'results/experiments/gradiend/{setup.id}/{base_model}{version}/0', output, dirs_exist_ok=True)
+            shutil.copytree(f'results/experiments/gradiend/{setup.id}/{base_model}{version}/0', main_output, dirs_exist_ok=True)
     else:
         print(f'No metrics found for model {base_model}, skipping saving output')
+        main_output = output
 
 
-    return output
+    return main_output
 
 def train_for_configs(setup, model_configs, n=3, metric='pearson', force=False, version=None, clear_cache=False, selecting_after_total_training=False):
     models = []

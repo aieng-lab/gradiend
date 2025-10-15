@@ -525,7 +525,7 @@ def filter_dataset(dataset_id, batch_size=10000, split='validation'):
     filter_by_model_confidence('bert-base-uncased', threshold=0.98, df=df, df_name=f'{dataset_id}_{split}')
 
 
-def generate_geneutral():
+def generate_biasneutral():
     filter_no_gender_text()
 
 def generate_genter():
@@ -538,5 +538,5 @@ def generate_genter():
 # ajibawa-2023/Children-Stories-Collection
 
 if __name__ == '__main__':
-    generate_geneutral()
+    generate_biasneutral()
     #generate_genter()

@@ -22,12 +22,12 @@ def read_namexact(split=None):
     return load_dataset('aieng-lab/namexact', split=split)
 
 def read_genter(split=None):
-    path = 'data/genter_1.0'
-    if split:
-        path += f'_{split}'
-    path += '.csv'
-    return pd.read_csv(path)
-    #return load_dataset('aieng-lab/genter', split=split, trust_remote_code=True)
+    #path = 'data/genter_1.0'
+    #if split:
+    #    path += f'_{split}'
+    #path += '.csv'
+    #return pd.read_csv(path)
+    return load_dataset('aieng-lab/genter', split=split, trust_remote_code=True)
 
 def read_geneutral(max_size=None, exclude=None):
     df = load_dataset('aieng-lab/geneutral', trust_remote_code=True)

@@ -1,5 +1,127 @@
-from gradiend.setups.util.multiclass import MultiClassSetup, create_training_dataset, Bias3DCombinedSetup
+import itertools
+
+import numpy as np
+import pandas as pd
+from datasets import Dataset
+
+from gradiend.setups.util.multiclass import MultiClassSetup, Bias3DCombinedSetup, \
+    TrainingDataset
 from gradiend.training.gradiend_training import train_for_configs
+
+
+
+
+def create_training_dataset(tokenizer,
+                            max_size=None,
+                            batch_size=1,
+                            neutral_data=False,
+                            split='train',
+                            neutral_data_prop=0.5,
+                            classes=None,
+                            bias_type='race',
+                            single_word_texts=False,
+                            is_generative=None,
+                            return_training_dataset=True,
+                            ):
+    if classes is None or len(classes) < 2:
+        raise ValueError("Please provide at least two classes in the 'classes' list.")
+
+    all_dfs = []
+    label_counter = 0
+    is_generative = is_generative or tokenizer.mask_token_id is None
+
+    vocab = set(tokenizer.get_vocab().keys())
+
+    pair_to_index = {
+        frozenset((i, j)): idx
+        for idx, (i, j) in enumerate(itertools.combinations(range(len(classes)), 2))
+    }
+    num_pairs = len(pair_to_index)
+    df_ctr = 0
+
+    # Load all pairwise datasets
+    for i, class_from in enumerate(classes):
+        for j, class_to in enumerate(classes):
+            if i == j:
+                continue  # skip same-class
+            ds_path = f"data/{bias_type}/{class_from}_to_{class_to}"
+            try:
+                df = Dataset.load_from_disk(ds_path).to_pandas()
+            except FileNotFoundError:
+                continue  # skip if dataset doesn't exist
+
+            pair_idx = pair_to_index[frozenset((i, j))]
+
+            # add index label
+            if num_pairs == 1:
+                df["label_idx"] = label_counter
+                label_counter += 1
+            else:
+                df["label_idx"] = pair_idx
+
+            # add one-hot columns
+            one_hot = np.zeros(num_pairs, dtype=int)
+            one_hot[pair_idx] = 1 if i > j else -1
+            for k in range(num_pairs):
+                df[f"label_{k}"] = one_hot[k]
+
+            # Deterministic split
+            if split:
+                # todo save the splits persistently
+                train, val, test = 0.7, 0.2, 0.1
+                df = df.sample(frac=1.0, random_state=42).reset_index(drop=True)
+                n_train = int(len(df) * train)
+                n_val = int(len(df) * val)
+                if split == "train":
+                    df = df[:n_train]
+                elif split == "val":
+                    df = df[n_train:n_train + n_val]
+                elif split == "test":
+                    df = df[n_train + n_val:]
+                else:
+                    raise ValueError(f"Unknown split: {split}. Use 'train', 'val', or 'test'.")
+
+            is_llama = 'llama' in tokenizer.name_or_path.lower()
+            if not is_llama:
+                df = df[df["source"].isin(vocab) & df["target"].isin(vocab)]
+
+            if df.empty:
+                raise ValueError('No source and target words in vocab!')
+
+            df['df_ctr'] = df_ctr
+            df_ctr += 1
+            all_dfs.append(df)
+
+    if not all_dfs:
+        raise ValueError("No datasets found for the given classes.")
+
+    # ensure all datasets have the same number of examples
+    min_size = min(len(df) for df in all_dfs)
+    all_dfs = [df.sample(min_size, random_state=42).reset_index(drop=True) for df in all_dfs]
+
+    # Merge datasets
+    templates = pd.concat(all_dfs, ignore_index=True).sample(frac=1.0).reset_index(drop=True)
+
+    if max_size:
+        # Stratified sample across all labels
+        templates = templates.groupby('label_idx').apply(
+            lambda x: x.sample(min(len(x), max_size // templates['label_idx'].nunique()))
+        ).reset_index(drop=True)
+
+    if num_pairs == 1:
+        target_keys = 'label_idx'
+    else:
+        target_keys = [f'label_{i}' for i in range(num_pairs)]
+
+    if return_training_dataset:
+        return TrainingDataset(
+            templates,
+            tokenizer,
+            batch_size=batch_size,
+            is_generative=is_generative,
+            target_key=target_keys,
+        )
+    return templates
 
 
 class Bias1DSetup(MultiClassSetup):
@@ -14,6 +136,9 @@ class Bias1DSetup(MultiClassSetup):
     @property
     def class2(self):
         return self.classes[1]
+
+    def create_training_data(self, *args, **kwargs):
+        return create_training_dataset(*args, classes=self.classes, bias_type=self.bias_type, **kwargs)
 
 class Race1DSetup(Bias1DSetup):
     def __init__(self, class1, class2, pretty_id=None):

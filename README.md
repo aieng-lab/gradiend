@@ -7,14 +7,16 @@ Further evaluations of this study can be reproduced using our [expanded version 
 
 ## Quick Links
 - [GRADIEND Paper](https://arxiv.org/abs/2502.01406)
-- GRADIEND Training and Evaluation Datasets:
-  - [GENTER](https://huggingface.co/datasets/aieng-lab/genter)
+- GRADIEND Training and Evaluation Datasets (Hugging Face):
+  - [GENTER](https://huggingface.co/datasets/aieng-lab/genter) (Gender Data)
   - [Deprecated: GENEUTRAL](https://huggingface.co/datasets/aieng-lab/geneutral)
-  - BIASNEUTRAL - not yet released
+  - [BIASNEUTRAL](https://huggingface.co/datasets/aieng-lab/biasneutral)
   - [GENTYPES](https://huggingface.co/datasets/aieng-lab/gentypes)
   - [NAMEXACT](https://huggingface.co/datasets/aieng-lab/namexact)
   - [NAMEXTEND](https://huggingface.co/datasets/aieng-lab/namextend)
-- GRADIEND Gender Debiased Models:
+  - [Race Data](https://huggingface.co/datasets/aieng-lab/gradiend_race_data)
+  - [Religion Data](https://huggingface.co/datasets/aieng-lab/gradiend_religion_data)
+- GRADIEND Gender Debiased Models (Hugging Face):
   - [`aieng-lab/bert-base-cased-gradiend-gender-debiased`](https://huggingface.co/aieng-lab/bert-base-cased-gradiend-gender-debiased)
   - [`aieng-lab/bert-large-cased-gradiend-gender-debiased`](https://huggingface.co/aieng-lab/bert-large-cased-gradiend-gender-debiased)
   - [`aieng-lab/distilbert-base-cased-gradiend-gender-debiased`](https://huggingface.co/aieng-lab/distilbert-base-cased-gradiend-gender-debiased)
@@ -42,18 +44,18 @@ Download [bias-attribute-words](https://github.com/aieng-lab/bias-bench/blob/mai
 Optional: Install [`aieng-lab/bias-bench`](https://github.com/aieng-lab/bias-bench) for further evaluations and comparison to other debiasing techniques.
 
 In order to use Llama-based models, you must first accept the Llama 3.2 Community License Agreement (see e.g., [here](https://huggingface.co/meta-llama/Llama-3.2-3B)). Further, you need to export a variable `HF_TOKEN` with a HF access token associated to your HF account (alternatively, but not recommended, you could insert your HF token in `gradiend/model.py#HF_TOKEN`).
-Note that the GRADIEND training with default configuration requires three NVIDIA A100 GPUs with 80GB each (all other tested models run on a single A100).
+Note that the GRADIEND training with default configuration requires three NVIDIA A100 GPUs with 80GB each (all other tested models run on a single A100). The implementation automatically distributes the weights across the available GPUs for Llama.
 
 ## Overview
 
 Package | Description
 --------|------------
 `gradiend.model` | GRADIEND model implementation
-`gradiend.data` | Deprecated - Data generation and access
+`gradiend.data` | Data util functions
 `gradiend.training` | Training of GRADIEND
 `gradiend.evaluation` | Evaluation of GRADIEND
 `gradiend.export` | Export functions for results, e.g., printing LaTeX tables and plotting images
-`gradiend.setups` | Predefined setups for training and evaluation, e.g., `GenderEnSetup()`
+`gradiend.setups` | Predefined setups for training, data, and evaluation, e.g., `GenderEnSetup()`
 
 
 
@@ -62,10 +64,32 @@ Package | Description
 See `demo.ipynb` for a quick overview of the GRADIEND model and the evaluation process.
 (TODO this might be outdated!?!)
 
-### Data
-The `setups.gender.en.data` package provides two purposes:
-- Data access: The relevant datasets can be accessed via the `read_[dataset]()` functions, i.e., `read_genter()`, `read_geneutral()`, `read_namexact()`, `read_namextend()`, and `read_gentypes()`.
-- Data generation: The generation process of these datasets is not necessary for the GRADIEND training (as the datasets are already generated), but the code is still available in the `data` package (see below *Dataset Generation*).
+
+### Setups
+
+As the feature learnt by GRADIEND depends only on the data and task used during training (e.g., predicting gender related tokens results in gender feature), we provide several pre-defined *setups* which combine the data, training, and evaluation for a specific task.
+
+
+#### GenderEnSetup
+
+This setup learns a binary gender feature in English based on templated texts associating gendered singular third-person pronouns (he/she) to first names.
+```
+[NAME] plays soccer. [PRONOUN] is very good at scoring goals.
+```
+
+- [Optional:] Generate the data by running `gradiend.setups.gender.en.filtering.py`. This is optional as the generated datasets are also provided via Hugging Face.
+- Run the training with `gradiend.setups.gender.en.training.py`. In the default configuration, this script will train 3 GRADIEND models for 7 base models (`bert-base-cased`, `bert-large-cased`, `distilbert-base-cased`, `roberta-large`, `gpt2`, `Llama-3.2-3B`, and `Llama-3.2-3B-Instruct`), selecting the best GRADIEND model at the end, followed by analysis of the encoder and decoder.
+- 
+During training, the encoding gets normalized such that the female gradients are encoded positively (mostly).
+
+
+#### Race and Religion Setups
+
+Race and religion are considered with three classes each (*Asian/Black/White* and *Christian/Muslim/Jewish*).
+Hence, we provide a setup for each pair in `gradiend.setups.race_religion.training`, e.g, `WhiteBlackSetup` and `ChristianMuslimSetup`.
+Training for all setups and all considered base models can be done via `gradiend.setups.race_religion.training.py`.
+Encoder statistics are computed with `gradiend.setups.race_religion.analyze.py` and can be plotted with `gradiend.setups.race_religion.encoder_stats.py`. 
+
 
 ### Training
 
@@ -75,7 +99,7 @@ The `gradiend_training` script relies on:
 - `gradiend.training.data`: the `TrainingDataset` class combines several datasets (e.g., GENTER, NAMEXACT, ...) and contains  the logic to create appropriate training data during the training, i.e., matching a GENTER template sentence with a name of a certain gender and computing the tokens. 
 - `gradiend.training.trainer`: the `train()` function trains a single GRADIEND model and provides many hyperparameters
 
-For race and religion GRADIENDs, run `gradiend.setups.race.training.py`.
+For race and religion GRADIENDs, run `gradiend.setups.race_religion.training.py`.
 
 ### Evaluation
 
@@ -84,7 +108,7 @@ The `gradiend.evaluation.analyze_encoder.analyze()` function analyzes the encode
 
 - GENTER as in the training process
 - GENTER with correctly filled template tokens, and with masked tokens that are gender-neutral
-- GERNEUTRAL
+- BIASNEUTRAL
 
 This function can be easily called for multiple models by calling `gradiend.evaluation.analyze_encoder.analyze_models(*models)`. The raw results are saved in the same base folder as the GRADIEND model (e.g., `results/models/bert-base-cased_params_spl_test.csv`). 
 Then, the model metrics can be generated and printed by calling `gradiend.evaluation.analyze_encoder.print_all_models()`.
@@ -100,7 +124,7 @@ Some basic evaluations of these debiased models can be done by calling:
 - `gradiend.analyze_decoder.evaluate_all_gender_predictions()` and `gradiend.export.gender_predictions.py` for an overfitting analysis
 - `gradiend.export.example_predictions.py` to generate example predictions
 
-For race and religion, call `setups.race.analyze2.py` and `setups.race.model_selection.py`.
+For race and religion, call `setups.race_religion.analyze.py` and `setups.race_religion.model_selection.py`.
 
 
 ### Evaluation of (De-)Biased Models
@@ -116,8 +140,8 @@ Script | Description
 `changed_model_selection` | Generates a table with the statistics of the selected (de-) biased models (from `gradiend.evaluation.analyze_decoder.default_evaluation()`
 `gender_predictions` | Plots predicted female and male probabilities for simple masking task to evaluate overfitting
 `example_predictions` | Generates example predictions for the selected (de-) biased as a LaTeX table
-`setups.race.model_selection` | Generates plots and tables regarding the model selection
-`setups.race.encoder_stats` | Generates plots and tables regarding the encoder analysis
+`setups.race_religion.model_selection` | Generates plots and tables regarding the model selection
+`setups.race_religion.encoder_stats` | Generates plots and tables regarding the encoder analysis
 
 
 > **__NOTE:__** To enable LaTeX plotting with your desired font, you need to adjust the `init_matplotlib()` function default arguments in the gradiend.util.py` file.

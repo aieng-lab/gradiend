@@ -26,7 +26,7 @@ def print_encoder_stats(*models):
     else:
         models = {model: model for model in models}
 
-    csv_files = {pretty_model: rf'results/models/{model.removeprefix("results/models/")}_params_spl_test_v_3.csv' for model, pretty_model in models.items()}
+    csv_files = {pretty_model: rf'results/models/gender-en/{model.removeprefix("results/models/")}_params_spl_test_v_3.csv' for model, pretty_model in models.items()}
 
     results = {}
     for model, file in csv_files.items():

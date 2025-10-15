@@ -25,8 +25,8 @@ import seaborn as sns
 from gradiend.util import get_files_and_folders_with_prefix, find_outliers, z_score
 
 
-def read_encoded_values(file):
-    encoded_values = get_file_name(file, file_format='csv', max_size=None, split='test', v=3)
+def read_encoded_values(file, v=3):
+    encoded_values = get_file_name(file, file_format='csv', max_size=None, split='test', v=v)
     df_encoded = pd.read_csv(encoded_values)
 
     df_encoded['he'] = df_encoded['he'].apply(json_loads)
@@ -306,7 +306,7 @@ def plot_encoded_value_distribution(*models, model_names=None):
                    split=True,
                    inner='quartile',
                    palette=custom_colors,
-                   scale='width',
+                   density_norm='width',
                    linewidth=0.7,
                    hue_order=list(rename_type_dict.values()),
                    #bw_adjust=0.5,
@@ -357,84 +357,6 @@ def plot_encoded_value_distribution(*models, model_names=None):
     plt.savefig(output, bbox_inches='tight')
     plt.show()
 
-def plot_encoded_value_distribution_old(*models, model_names=None):
-    # read all the encoded values data
-    # for each group 'type' plot the distribution of the encoded values in a single plot
-    # Initialize the plot
-    # Initialize a list to collect all the processed data
-    processed_dfs = []
-    plot_model_names = []
-
-    # Loop through each model and prepare the data
-    for i, model in enumerate(models):
-        # Read encoded values for this model
-        df = read_encoded_values(model)
-
-        # Add a column to identify the model
-        if model_names:
-            df['model'] = model_names[i]
-            plot_model_names.append(model_names[i].replace('\\', ''))
-        else:
-            model_base_name = model.split('/')[-1].replace('\\', '')
-            plot_model_names.append(model_base_name)
-            df['model'] = model_base_name
-
-        # Collect the dataframe with the model label
-        processed_dfs.append(df)
-
-    font_size = 20
-
-    # Concatenate all the dataframes into one, so we can plot them together
-    combined_df = pd.concat(processed_dfs, ignore_index=True)
-
-    # Initialize the plot
-    #plt.figure(figsize=(9, 4))
-    plt.figure(figsize=(13, 3))
-
-    rename_type_dict = {
-        'gender masked': r'\genter',
-        'no gender masked': r'\genterzero',
-        'gerneutral': r'\gerneutral'
-    }
-    combined_df['renamed_type'] = combined_df['type'].map(rename_type_dict)
-
-    combined_df = combined_df[combined_df['state'] != 'B'].reset_index(drop=True)
-
-    # Plot the distribution of the "encoded_value" column
-    # Grouped by "type" and separated by "model" using hue
-    sns.violinplot(x='model',
-                   y='encoded',
-                   hue='renamed_type',
-                   data=combined_df,
-                   split=False,
-                   inner='quartile',
-                   palette='YlGnBu',
-                   hue_order=list(rename_type_dict.values()),
-                   )
-
-    # Customize the plot
-    #plt.title('Distribution of Encoded Values by Type and Model')
-    plt.xlabel('Model', fontsize=font_size)
-    plt.ylabel('$h$', fontsize=font_size)
-    plt.xticks(fontsize=font_size-4)
-    plt.yticks(fontsize=font_size-4)
-
-    # make legend horizontal
-    plt.legend(loc='upper center', bbox_to_anchor=(0.5, 1.3), title_fontsize='large', fontsize=font_size-2, ncol=3)
-
-    # Rotate x-axis labels for better readability
-    if not model_names:
-        plt.xticks(rotation=45, ha='right', fontsize=font_size)
-
-    total_name = '_'.join(plot_model_names)
-
-    # Show the plot
-    plt.tight_layout()
-    plt.grid()
-    output = f'img/encoded_values_{total_name}.pdf'
-    os.makedirs(os.path.dirname(output), exist_ok=True)
-    plt.savefig(output, bbox_inches='tight')
-    plt.show()
 
 
 def compare_neuron_parts(model, decoder_part='decoder'):
