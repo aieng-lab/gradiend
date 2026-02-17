@@ -1,0 +1,4 @@
+ImportError while loading conftest '/mnt/c/Git/gradiend/tests/conftest.py'.
+tests/conftest.py:13: in <module>
+    import torch
+E   ModuleNotFoundError: No module named 'torch'

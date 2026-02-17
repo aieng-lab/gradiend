@@ -1,0 +1,85 @@
+# MkDocs Material configuration for GRADIEND docs
+# Build: mkdocs build | mkdocs serve
+# Requires: pip install mkdocs-material
+
+site_name: GRADIEND
+site_description: Gradient-based targeted feature learning within neural networks
+site_url: https://github.com/aieng-lab/gradiend
+
+theme:
+  name: material
+  language: en
+  logo: img/gradiend.svg
+  favicon: img/gradiend.svg
+  features:
+    - content.code.copy
+    - content.code.annotate   # Hover/click markers in code blocks show rich content (links, tips)
+  palette:
+    - scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+
+markdown_extensions:
+  - attr_list
+  - md_in_html
+  - pymdownx.superfences
+  - pymdownx.highlight:
+      anchor_linenums: true
+      pygments_lang_class: true
+  - admonition
+  - pymdownx.details
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [.]
+          docstring_style: google
+          docstring_section_style: table
+          show_source: true
+          show_root_heading: true
+          show_object_full_path: false
+          show_symbol_type_heading: true
+          show_symbol_type_toc: true
+          members: true
+          show_symbol_heading: true
+          separate_signature: true
+          heading_level: 2
+          merge_init_into_class: true
+
+nav:
+  - Home: index.md
+  - Get started:
+    - Installation: installation.md
+    - Start here: start.md
+  - Tutorials:
+    - Data generation: tutorials/data-generation.md
+    - Training: tutorials/training.md
+    - Evaluation (intra-model): tutorials/evaluation-intra-model.md
+    - Evaluation (inter-model): tutorials/evaluation-inter-model.md
+    - Detailed workflow (overview): tutorials/detailed-workflow.md
+  - Guides:
+    - Core classes and use cases: guides/core-classes.md
+    - Data handling: guides/data-handling.md
+    - Pruning: guides/pruning-guide.md
+    - Evaluation & visualization: guides/evaluation-visualization.md
+    - Saving & loading: guides/saving-loading.md
+    - Training arguments: guides/training-arguments.md
+    - Decoder-only models: guides/decoder-only.md
+    - Testing: guides/testing.md
+  - Reference:
+    - Examples: examples.md
+    - API reference: api-reference.md
+    - FAQ: faq.md
+  - Project:
+    - Publishing the documentation: publishing-docs.md

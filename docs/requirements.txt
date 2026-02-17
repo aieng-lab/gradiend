@@ -1,0 +1,6 @@
+# Dependencies to build the documentation (e.g. Read the Docs).
+# Install from repo root: pip install -r docs/requirements.txt (installs gradiend so API docs resolve).
+# For local dev: pip install -e ".[dev]"
+-e ..
+mkdocs-material>=9.0.0
+mkdocstrings[python]>=0.24.0

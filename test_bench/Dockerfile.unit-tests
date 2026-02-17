@@ -1,0 +1,22 @@
+# Unit tests + coverage image. No GPU required.
+# Build: docker build -f test_bench/Dockerfile.unit-tests -t gradiend-unit-tests .
+#        Python 3.11: docker build -f test_bench/Dockerfile.unit-tests --build-arg PYTHON_VERSION=3.11 -t gradiend-unit-tests .
+# Run:   docker run --rm gradiend-unit-tests
+#        With coverage HTML: docker run --rm -v "$(pwd)/htmlcov:/workspace/htmlcov" gradiend-unit-tests
+
+ARG PYTHON_VERSION=3.10
+FROM python:${PYTHON_VERSION}-slim
+
+ENV PYTHONUNBUFFERED=1
+WORKDIR /workspace
+COPY . /workspace
+
+RUN apt-get update && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip install --no-cache-dir -e ".[recommended,dev]" \
+    && pip install --no-cache-dir pytest-cov
+
+# Run unit tests (exclude slow/integration) with coverage
+CMD ["pytest", "tests/", "-v", "--tb=short", "-m", "not slow and not integration", \
+     "--cov=gradiend", "--cov-report=term-missing", "--cov-report=html:htmlcov"]

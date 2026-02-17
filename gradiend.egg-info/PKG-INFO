@@ -1,0 +1,251 @@
+Metadata-Version: 2.4
+Name: gradiend
+Version: 0.0.1
+Summary: GRADIEND: Gradient-based Targeted Feature Learning within Neural Networks
+Author-email: Jonathan Drechsel <jonathan.drechsel@uni-passau.de>
+License: See LICENSE file
+Project-URL: Homepage, https://github.com/aieng-lab/gradiend
+Project-URL: Documentation, https://github.com/aieng-lab/gradiend
+Project-URL: Repository, https://github.com/aieng-lab/gradiend
+Project-URL: Bug Tracker, https://github.com/aieng-lab/gradiend/issues
+Keywords: machine learning,neural networks,feature learning,interpretability
+Classifier: Development Status :: 3 - Alpha
+Classifier: Intended Audience :: Science/Research
+Classifier: Topic :: Scientific/Engineering :: Artificial Intelligence
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.8
+Classifier: Programming Language :: Python :: 3.9
+Classifier: Programming Language :: Python :: 3.10
+Classifier: Programming Language :: Python :: 3.11
+Requires-Python: >=3.8
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Requires-Dist: torch>=2.0.0
+Requires-Dist: transformers>=4.30.0
+Requires-Dist: numpy>=1.20.0
+Requires-Dist: scipy>=1.7.0
+Requires-Dist: pandas>=1.3.0
+Requires-Dist: scikit-learn>=1.0.0
+Requires-Dist: tqdm>=4.60.0
+Provides-Extra: full
+Requires-Dist: matplotlib>=3.5.0; extra == "full"
+Requires-Dist: seaborn>=0.12.0; extra == "full"
+Requires-Dist: safetensors>=0.3.0; extra == "full"
+Provides-Extra: experiments
+Requires-Dist: seaborn>=0.12.0; extra == "experiments"
+Requires-Dist: tabulate>=0.9.0; extra == "experiments"
+Provides-Extra: setups
+Requires-Dist: datasets<=3.6.0,>=3.0.2; extra == "setups"
+Requires-Dist: seaborn>=0.12.0; extra == "setups"
+Requires-Dist: inflect>=5.0.0; extra == "setups"
+Provides-Extra: examples
+Requires-Dist: datasets<=3.6.0,>=3.0.2; extra == "examples"
+Requires-Dist: seaborn>=0.12.0; extra == "examples"
+Requires-Dist: inflect>=5.0.0; extra == "examples"
+Dynamic: license-file
+
+# GRADIent ENcoder Decoder (GRADIEND) 
+> Jonathan Drechsel, Steffen Herbold
+
+[![arXiv](https://img.shields.io/badge/arXiv-2502.01406-blue.svg)](https://arxiv.org/abs/2502.01406)
+
+This repository contains the official Python package for [GRADIEND: Monosemantic Feature Learning within Neural Networks Applied to Gender Debiasing of Transformer Models](https://arxiv.org/abs/2502.01406).
+
+## Start here
+
+- Documentation start page: [docs/index.md](docs/index.md)
+- Tutorials (workflow-first): [docs/index.md](docs/index.md#tutorials)
+- Pruning guide (manual masks, pre-/post-pruning): [docs/index.md](docs/index.md#pruning-guide)
+- API reference (auto-generated): [docs/index.md](docs/index.md#api-reference-auto-generated)
+- Examples overview: [docs/index.md](docs/index.md#examples-supplemental)
+
+## Installation
+
+### Basic Installation
+
+Install the core GRADIEND package:
+
+```bash
+pip install gradiend
+```
+
+### With Experimental Features
+
+For helper functions for data preparation, analysis of encoder/decoder, printing of LaTeX tables and plots, and example code:
+
+```bash
+pip install gradiend[experiments]
+```
+
+### From Source
+
+```bash
+git clone https://github.com/aieng-lab/gradiend.git
+cd gradiend
+pip install -e .
+# Or with experiments:
+pip install -e ".[experiments]"
+```
+
+## Quick Start
+
+### Basic Usage
+
+```python
+from gradiend import ModelWithGradiend
+
+# Load a base model with GRADIEND
+model = ModelWithGradiend.from_pretrained(
+    "model-base-cased",
+    latent_dim=1,  # Single feature dimension
+    use_gradients=True
+)
+
+# Encode text using gradients
+text = "The doctor went to the hospital."
+label = "he"
+encoded = model.mask_and_encode(text)
+print(f"Encoded value: {encoded}")
+
+# Modify the model using GRADIEND
+modified_model = model.modify_model(
+    learning_rate=1e-4,
+    feature_factor=1.0,
+    part='decoder'
+)
+```
+
+See `examples/basic_usage.py` for a complete example.
+
+### Training a GRADIEND Model
+
+Training requires a `Setup` class that defines your data and evaluation. For experimental setups (gender debiasing, race/religion debiasing), install with `[experiments]`:
+
+```python
+from gradiend.setups.gender.en import GenderEnSetup
+from gradiend.trainer import train_gradiend
+
+setup = GenderEnSetup()
+train_gradiend(
+    setup=setup,
+    model="model-base-cased",
+    output="results/models/model-base-cased-gradiend",
+    epochs=1,
+    batch_size=32
+)
+```
+
+## Package Structure
+
+### Core Package (`gradiend`)
+
+The core package provides the essential GRADIEND functionality:
+
+- **`gradiend.model`**: Core model classes
+  - `GradiendModel`: The encoder-decoder model (weights-only)
+  - `ParamMappedGradiendModel`: GradiendModel + param map for base-model gradients
+  - `ModelWithGradiend`: Wrapper combining base model with GRADIEND
+  - `AutoModelForLM`, `AutoTokenizerForLM`: Model loading utilities
+
+- **`gradiend.training`**: Training functions
+  - `train()`: Low-level training function
+  - `train_all_params()`: Train on all params
+  - `train_multiple_params()`: Train on specific params
+  - `TextGradientTrainingDataset`: Dataset for training
+
+### Experimental Features (`gradiend[experiments]`)
+
+When installed with `[experiments]`, additional features are available:
+
+- **`gradiend.setups`**: Predefined setups for common tasks
+  - `GenderEnSetup`: Gender debiasing setup for English
+  - Race and religion setups
+
+- **Setup-based evaluation**: Encoder/decoder analysis and metrics live in setup packages
+  - `gradiend.setups.core`: `get_model_metrics`, `plot_topk_neuron_intersection` (topk_venn)
+  - `gradiend.setups.text`: LM evaluation (`evaluate_mlm`, `evaluate_clm_perplexity` in `lm_eval`), decoder helpers in `decoder_utils`
+
+- **`gradiend.export`**: Export functions
+  - LaTeX table generation
+  - Plotting utilities
+  - Result export functions
+
+## Documentation
+
+### Core API
+
+```python
+from gradiend import (
+  GradiendModel,
+  ParamMappedGradiendModel,
+  ModelWithGradiend,
+  train_gradiend,
+  TextGradientTrainingDataset,
+)
+```
+
+### Experimental API (requires `gradiend[experiments]`)
+
+
+
+## Examples
+
+See the `examples/` directory for usage examples:
+
+- `basic_usage.py`: Basic GRADIEND usage
+- More examples available when installing with `[experiments]`
+
+## Datasets and Models
+
+### GRADIEND Training and Evaluation Datasets (Hugging Face)
+
+- [GENTER](https://huggingface.co/datasets/aieng-lab/genter) (Gender Data)
+- [BIASNEUTRAL](https://huggingface.co/datasets/aieng-lab/biasneutral)
+- [GENTYPES](https://huggingface.co/datasets/aieng-lab/gentypes)
+- [NAMEXACT](https://huggingface.co/datasets/aieng-lab/namexact)
+- [NAMEXTEND](https://huggingface.co/datasets/aieng-lab/namextend)
+- [Race Data](https://huggingface.co/datasets/aieng-lab/gradiend_race_data)
+- [Religion Data](https://huggingface.co/datasets/aieng-lab/gradiend_religion_data)
+
+### GRADIEND Gender Debiased Models (Hugging Face)
+
+- [`aieng-lab/bert-base-cased-gradiend-gender-debiased`](https://huggingface.co/aieng-lab/bert-base-cased-gradiend-gender-debiased)
+- [`aieng-lab/bert-large-cased-gradiend-gender-debiased`](https://huggingface.co/aieng-lab/bert-large-cased-gradiend-gender-debiased)
+- [`aieng-lab/distilbert-base-cased-gradiend-gender-debiased`](https://huggingface.co/aieng-lab/distilbert-base-cased-gradiend-gender-debiased)
+- [`aieng-lab/roberta-large-gradiend-gender-debiased`](https://huggingface.co/aieng-lab/roberta-large-gradiend-gender-debiased)
+- [`aieng-lab/gpt2-gradiend-gender-debiased`](https://huggingface.co/aieng-lab/gpt2-gradiend-gender-debiased)
+- [`aieng-lab/Llama-3.2-3B-gradiend-gender-debiased`](https://huggingface.co/aieng-lab/Llama-3.2-3B-gradiend-gender-debiased)
+- [`aieng-lab/Llama-3.2-3B-Instruct-gradiend-gender-debiased`](https://huggingface.co/aieng-lab/Llama-3.2-3B-Instruct-gradiend-gender-debiased)
+
+### Related Repositories
+
+- [`aieng-lab/bias-bench`](https://github.com/aieng-lab/bias-bench) for evaluation
+- [`aieng-lab/lm-eval-harness`](https://github.com/aieng-lab/lm-eval-harness) for GLUE zero-shot evaluation
+
+## Requirements
+
+- Python >= 3.8
+- PyTorch >= 2.0.0
+- Transformers >= 4.30.0
+
+For experimental features:
+- seaborn >= 0.12.0
+- tabulate >= 0.9.0
+
+## Citation
+
+```bibtex
+@misc{drechsel2025gradiendfeaturelearning,
+      title={{GRADIEND}: Feature Learning within Neural Networks Exemplified through Biases}, 
+      author={Jonathan Drechsel and Steffen Herbold},
+      year={2025},
+      eprint={2502.01406},
+      archivePrefix={arXiv},
+      primaryClass={cs.LG},
+      url={https://arxiv.org/abs/2502.01406}, 
+}
+```
+
+## License
+
+See LICENSE file for details.

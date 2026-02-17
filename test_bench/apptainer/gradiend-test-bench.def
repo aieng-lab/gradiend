@@ -1,0 +1,51 @@
+Bootstrap: docker
+From: continuumio/miniconda3:latest
+
+%files
+    # Copy environment files into container
+    ../../environment.yml /opt/gradiend/environment.yml
+    ../../requirements.txt /opt/gradiend/requirements.txt
+    ../../requirements-dev.txt /opt/gradiend/requirements-dev.txt
+
+%environment
+    export LC_ALL=C.UTF-8
+    export LANG=C.UTF-8
+    export PYTHONUNBUFFERED=1
+    
+    # Conda paths
+    export PATH=/opt/conda/bin:$PATH
+    export CONDA_PKGS_DIRS=/scratch/$USER/conda-pkgs
+    export CONDA_ENVS_DIRS=/scratch/$USER/conda-envs
+    
+    # Cache directories (will be overridden by bind mounts)
+    export HF_HOME=/scratch/$USER/hf
+    export TRANSFORMERS_CACHE=/scratch/$USER/hf
+    export HUGGINGFACE_HUB_CACHE=/scratch/$USER/hf
+    export TORCH_HOME=/scratch/$USER/torch
+    export XDG_CACHE_HOME=/scratch/$USER/cache
+    export TMPDIR=/scratch/$USER/tmp
+
+%post
+    # Update conda
+    /opt/conda/bin/conda update -n base -c defaults conda -y
+    
+    # Install system dependencies if needed
+    apt-get update && apt-get install -y \
+        git \
+        && rm -rf /var/lib/apt/lists/*
+    
+    # Create conda environment (will be overridden by user's env in /scratch)
+    # This is just to have a base environment in the image
+    /opt/conda/bin/conda env create -f /opt/gradiend/environment.yml -n gradiend || true
+    
+    # Clean up
+    /opt/conda/bin/conda clean -afy
+
+%runscript
+    # Default: activate conda and run python
+    exec /opt/conda/bin/conda run -n gradiend "$@"
+
+%labels
+    Author Jonathan Drechsel
+    Version 1.0
+    Description GRADIEND Test Bench Apptainer Image
