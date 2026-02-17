@@ -43,6 +43,10 @@ base = [
     "The committee met on Tuesday and they voted to postpone the decision.",
     "He left the book on the table and she noticed the door was open.",
     "The birds gathered on the wire; when the cat moved they flew away.",
+    "The mechanic wiped his hands and said the car would be ready; he had fixed it.",
+    "They invited her to the meeting and she accepted.",
+    "The dog ran to the door; it wanted to go outside.",
+    "The volunteers packed the boxes and said they would load the van at dawn.",
 ]
 creator = TextPredictionDataCreator(
     base_data=base,
@@ -51,7 +55,7 @@ creator = TextPredictionDataCreator(
         TextFilterConfig(targets=["they"], id="3PL"),
     ],
 )
-training = creator.generate_training_data(max_size_per_class=15)
+training = creator.generate_training_data(max_size_per_class=20)
 neutral = creator.generate_neutral_data(additional_excluded_words=["he", "she", "it", "they"], max_size=15)
 
 args = TrainingArguments(train_batch_size=4, eval_steps=5, max_steps=25, learning_rate=1e-4)
