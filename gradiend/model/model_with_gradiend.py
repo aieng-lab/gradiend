@@ -9,6 +9,8 @@ Generic interface across modalities (text, vision, ...). Owns:
 - persistence of gradiend_context.json + feature_class_encoding_direction.json
 """
 
+from __future__ import annotations
+
 import os
 import copy
 import json

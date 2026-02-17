@@ -8,6 +8,9 @@ logs/
 
 *.pdf
 *.png
+# Allow images under docs so built site can show plot screenshots
+!docs/img/*.png
+!docs/img/*.pdf
 
 
 gradiend/trainer/decoder_only_mlm/decoder_mlm_model/
