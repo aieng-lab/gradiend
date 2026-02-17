@@ -186,7 +186,7 @@ If `experiment_dir` is set, the plot is saved automatically under that directory
 
 ## Next steps
 
-- **[Example Code](../../gradiend/examples/gender_de_detailed.py)** — See an example of training several GRADIENDs for the German Article paradigm, and plotting venn diagrams and heatmap.
+- **[Example Code](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/gender_de_detailed.py)** — See an example of training several GRADIENDs for the German Article paradigm, and plotting venn diagrams and heatmap.
 - **[Tutorial: Evaluation (intra-model)](evaluation-intra-model.md)** — Encoder and decoder evaluation, selecting the changed model.
 - **[Tutorial: Evaluation (inter-model)](evaluation-inter-model.md)** — Comparing multiple runs, i.e., different target classes (top-k overlap, heatmaps).
 

@@ -50,7 +50,7 @@ Useful options:
 
 ## Test bench (integration, GPU)
 
-The **test bench** runs real training and verification; it is slower and typically needs a GPU. **You do not need reference scores:** verified tests use built-in thresholds (e.g. correlation ≥ 0.35); run the bench the same way every time. See [test_bench/README.md](../../test_bench/README.md) for first-time run and:
+The **test bench** runs real training and verification; it is slower and typically needs a GPU. **You do not need reference scores:** verified tests use built-in thresholds (e.g. correlation ≥ 0.35); run the bench the same way every time. See [test_bench/README.md](https://github.com/aieng-lab/gradiend/blob/main/test_bench/README.md) for first-time run and:
 
 - **Running locally:** `python test_bench/run_bench.py`
 - **Docker (recommended):** Build and run the test-bench image; it runs the full test bench including **verified runs** that assert scores (e.g. correlation ≥ threshold) and required files. Use `--build-arg BASE_IMAGE=continuumio/miniconda3:py311` for a different Python.

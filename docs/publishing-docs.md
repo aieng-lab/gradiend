@@ -8,6 +8,7 @@ From the project root, install dev dependencies and build:
 
 ```bash
 pip install -e ".[dev]"
+pip install mkdocs mkdocs-material
 mkdocs build
 ```
 
@@ -18,6 +19,18 @@ mkdocs serve
 ```
 
 Then open [http://127.0.0.1:8000](http://127.0.0.1:8000). The **Reference → API reference** section is generated from the code (docstrings and type hints) via [mkdocstrings](https://mkdocstrings.github.io/).
+
+### Test the same build as CI
+
+CI runs `mkdocs build` (no `--strict`). To match it locally:
+
+```bash
+pip install -e ".[dev]"
+pip install mkdocs mkdocs-material
+mkdocs build
+```
+
+To treat warnings as errors (broken links, missing images, griffe/type hints), run `mkdocs build --strict`; fix any reported issues for the build to succeed.
 
 ## Hosting (public access)
 

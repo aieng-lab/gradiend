@@ -150,9 +150,9 @@ class Evaluator:
         Returns:
             A dict with:
             - summary: Per-metric selection summary (best candidate id, value,
-              feature_factor, and learning_rate).
+                feature_factor, and learning_rate).
             - grid: Mapping of candidate id -> evaluation results, including a
-              "base" entry for the unmodified model.
+                "base" entry for the unmodified model.
         """
         kwargs = dict(
             trainer=self._trainer,

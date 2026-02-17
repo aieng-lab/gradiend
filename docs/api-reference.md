@@ -9,7 +9,6 @@ The following pages are **auto-generated from the source code** (docstrings and 
 ::: gradiend
     options:
       show_root_heading: false
-      show_symbol_heading: true
       show_symbol_type_heading: true
       heading_level: 2
       members: false

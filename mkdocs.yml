@@ -48,15 +48,14 @@ plugins:
             docstring_style: google
             docstring_section_style: table
             merge_init_into_class: true
-          show_source: true
-          show_root_heading: true
-          show_object_full_path: false
-          show_symbol_type_heading: true
-          show_symbol_type_toc: true
-          members: true
-          show_symbol_heading: true
-          separate_signature: true
-          heading_level: 2
+            show_source: true
+            show_root_heading: true
+            show_root_full_path: false
+            show_symbol_type_heading: true
+            show_symbol_type_toc: true
+            members: true
+            separate_signature: true
+            heading_level: 2
 
 nav:
   - Home: index.md

@@ -292,7 +292,7 @@ modified_model = model.modify_model(
 
 **Note:** `TextPredictionTrainer` already has an `Evaluator` instance, so you typically call `trainer.evaluate_encoder()` directly.
 
-**See also:** [API reference](../api-reference.md#evaluator), [Evaluation tutorial](../tutorials/evaluation-intra-model.md)
+**See also:** [API reference](../api-reference.md), [Evaluation tutorial](../tutorials/evaluation-intra-model.md)
 
 ---
 
@@ -310,7 +310,7 @@ modified_model = model.modify_model(
 - Encoded value distributions per class
 - Plots showing class separation
 
-**See also:** [API reference](../api-reference.md#encoderevaluator), [Evaluation guide](evaluation-visualization.md)
+**See also:** [API reference](../api-reference.md), [Evaluation guide](evaluation-visualization.md)
 
 ---
 
@@ -328,7 +328,7 @@ modified_model = model.modify_model(
 - Probability shift scores
 - Language modeling scores (to ensure model quality is maintained)
 
-**See also:** [API reference](../api-reference.md#decoderevaluator), [Evaluation tutorial](../tutorials/evaluation-intra-model.md)
+**See also:** [API reference](../api-reference.md), [Evaluation tutorial](../tutorials/evaluation-intra-model.md)
 
 ---
 
@@ -391,5 +391,5 @@ modified_model = model.modify_model(
 
 - **[Start here](../start.md)** — Run a complete example
 - **[API reference](../api-reference.md)** — Complete API documentation
-- **[Tutorials](../tutorials/)** — Step-by-step workflows
-- **[Guides](.)** — Detailed guides for specific topics
+- **[Tutorials](../tutorials/data-generation.md)** — Step-by-step workflows
+- **[Guides](data-handling.md)** — Detailed guides for specific topics

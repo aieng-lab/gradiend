@@ -6,7 +6,7 @@ This tutorial covers **inter-model** evaluation: comparing **multiple** trained 
 
 ## Why compare across runs?
 
-When you train GRADIEND for different feature pairs (e.g. different [Gender-Case transitions](../../gradiend/examples/gender_de_detailed.py)), a natural question is: *Do these runs modify the same parameters or different ones?* 
+When you train GRADIEND for different feature pairs (e.g. different [Gender-Case transitions](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/gender_de_detailed.py)), a natural question is: *Do these runs modify the same parameters or different ones?* 
 
 We measure this by looking at the **top-k** most important parameters (e.g. decoder weights with largest absolute value) in each GRADIEND model and seeing how much they overlap.
 Their overlap can be visualized using two main tools:
@@ -56,7 +56,7 @@ plot_topk_overlap_venn(
 )
 ```
 
-![Top-k Overlap Venn Diagram](img/topk_overlap_venn.png)
+![Top-k Overlap Venn Diagram](../img/venn_der_die.png)
 
 
 ## Overlap Heatmap
@@ -81,7 +81,7 @@ plot_topk_overlap_heatmap(
 
 High values (e.g. bright cells) mean the two runs share many of their top-k parameters; low values mean they focus on different parts of the model.
 
-![Top-k Overlap Heatmapg](img/topk_overlap_heatmap.png)
+![Top-k Overlap Heatmap](../img/topk_overlap_heatmap.png)
 
 
 ---
