@@ -39,6 +39,7 @@ class TestLoadDataframeFromPath:
         assert len(df) == 1 and df["x"].iloc[0] == 1
 
     def test_load_parquet(self, tmp_path):
+        pytest.importorskip("pyarrow")
         path = tmp_path / "data.parquet"
         pd.DataFrame({"a": [1, 2]}).to_parquet(path, index=False)
         df = _load_dataframe_from_path(path)

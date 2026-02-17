@@ -212,7 +212,38 @@ class TestTextTrainingDataset:
         assert len(dataset) > 0
         assert dataset.tokenizer == tokenizer
         assert dataset.batch_size == 1
-    
+
+    def test_text_training_dataset_raises_when_insufficient_data_for_batch_size(self):
+        """Creating a dataset with too few samples per subgroup raises a comprehensive ValueError."""
+        # One sample per (feature_class_id, label) -> subgroups of size 1; batch_size=4 cannot be satisfied
+        data = pd.DataFrame({
+            "masked": ["Hello [MASK] world", "Other [MASK] text"],
+            "factual": ["he", "they"],
+            "alternative": ["they", "he"],
+            "factual_class": ["3SG", "3PL"],
+            "alternative_class": ["3PL", "3SG"],
+            "factual_id": [1, 2],
+            "alternative_id": [2, 1],
+            "label": ["he", "they"],
+            "feature_class_id": [0, 1],
+        })
+        tokenizer = MockTokenizer()
+        tokenizer.mask_token = "[MASK]"
+        tokenizer.mask_token_id = 103
+
+        with pytest.raises(ValueError) as exc_info:
+            TextTrainingDataset(
+                data=data,
+                tokenizer=tokenizer,
+                batch_size=4,
+                balance_column="feature_class_id",
+            )
+        msg = str(exc_info.value)
+        assert "batch_size" in msg
+        assert "4" in msg
+        assert "1" in msg  # smallest subgroup has 1 sample
+        assert "Use more training data" in msg or "reduce" in msg.lower()
+
     def test_text_training_dataset_max_size(self):
         """Test that max_size limits the number of samples."""
         data = pd.DataFrame({

@@ -95,13 +95,23 @@ class TextBatchedDatasetBase(Dataset, ABC):
             self.group_batches[gname] = batches
             total_batches += len(batches)
 
+            if not batches:
+                counts = grouped.size()
+                min_count = int(counts.min()) if len(counts) else 0
+                raise ValueError(
+                    f"No batches created for balance group '{gname}'. "
+                    f"Each subgroup (by batch_criterion={batch_criterion!r}) must have at least "
+                    f"batch_size={batch_size} samples; the smallest subgroup in this group has {min_count} "
+                    f"sample(s). Use more training data (or a larger split for training) or reduce "
+                    f"train_batch_size to {min_count} or less."
+                )
+
         # ensure that each group_batches has at least one batch to avoid index errors in __getitem__
         if not self.group_batches:
-            raise ValueError("No batches created. Check batch_size and batch_criterion.")
-
-        for gname, batches in self.group_batches.items():
-            if not batches:
-                raise ValueError(f"No batches created for group '{gname}'. Check batch_size ({batch_size}) and batch_criterion ({batch_criterion}.")
+            raise ValueError(
+                "No batches created. Each subgroup (by batch_criterion) must have at least batch_size "
+                "samples. Use more training data or reduce train_batch_size."
+            )
 
         self.balance_keys = list(self.group_batches.keys())
         self.total_batches = total_batches

@@ -63,9 +63,10 @@ class TestExampleFiles:
 
 class TestEncoderDistributionViolinCount:
     """Test encoder distribution plot violin count."""
-    
+
     def test_encoder_distribution_violin_count_basic(self, temp_dir):
         """Test that encoder distribution plot has expected number of violins."""
+        pytest.importorskip("matplotlib")
         # Create mock trainer
         trainer = MagicMock()
         trainer.run_id = "test_run"
@@ -102,6 +103,7 @@ class TestEncoderDistributionViolinCount:
     
     def test_encoder_distribution_violin_count_multiple_groups(self, temp_dir):
         """Test encoder distribution with multiple violin groups."""
+        pytest.importorskip("matplotlib")
         trainer = MagicMock()
         trainer.run_id = "test_run"
         trainer.pair = None
@@ -134,6 +136,7 @@ class TestEncoderDistributionViolinCount:
     
     def test_encoder_distribution_violin_count_with_neutral(self, temp_dir):
         """Test encoder distribution with neutral data."""
+        pytest.importorskip("matplotlib")
         trainer = MagicMock()
         trainer.run_id = "test_run"
         trainer.pair = None
@@ -165,6 +168,7 @@ class TestEncoderDistributionViolinCount:
     
     def test_encoder_distribution_violin_count_with_paired_legend_labels(self, temp_dir):
         """Test encoder distribution with explicit paired_legend_labels."""
+        pytest.importorskip("matplotlib")
         trainer = MagicMock()
         trainer.run_id = "test_run"
         trainer.pair = None
@@ -200,6 +204,8 @@ class TestEncoderDistributionViolinCount:
     
     def test_encoder_distribution_violin_count_matches_data(self, temp_dir):
         """Test that violin count matches the data structure (bug-indicating test)."""
+        pytest.importorskip("matplotlib")
+        pytest.importorskip("seaborn")
         trainer = MagicMock()
         trainer.run_id = "test_run"
         trainer.pair = None

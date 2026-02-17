@@ -32,6 +32,7 @@ class TestImgFormatVisualizerOutputPath:
     """Visualizers use img_format to set the output file extension."""
 
     def test_plot_training_convergence_output_path_uses_img_format(self, tmp_path):
+        pytest.importorskip("matplotlib")
         training_stats = {
             "training_stats": {
                 "mean_by_class": {0: {"0": 0.1, "1": -0.1}},
@@ -53,6 +54,7 @@ class TestImgFormatVisualizerOutputPath:
         assert (out_base / "plot.png").exists()
 
     def test_plot_encoder_distributions_output_path_uses_img_format(self, tmp_path):
+        pytest.importorskip("matplotlib")
         trainer = MagicMock()
         trainer.run_id = "run1"
         trainer.pair = None
@@ -81,6 +83,7 @@ class TestImgFormatTrainerForwarding:
     """TextPredictionTrainer forwards img_format to plot methods."""
 
     def test_plot_encoder_distributions_receives_img_format_from_trainer(self, tmp_path):
+        pytest.importorskip("matplotlib")
         # Patch where the evaluator's visualizer calls through (visualizer holds _plot_encoder_distributions)
         with patch(
             "gradiend.visualizer.visualizer._plot_encoder_distributions",
@@ -120,6 +123,7 @@ class TestImgFormatTrainerForwarding:
             assert call_kwargs.get("img_format") == "png"
 
     def test_plot_training_convergence_receives_img_format_from_trainer(self, tmp_path):
+        pytest.importorskip("matplotlib")
         # Patch where the evaluator's visualizer calls through
         with patch(
             "gradiend.visualizer.visualizer._plot_training_convergence",
@@ -158,6 +162,7 @@ class TestConvergencePlotAutoSave:
 
     def test_explicit_plot_training_convergence_saves_when_experiment_dir_set(self, tmp_path):
         """trainer.plot_training_convergence() saves to experiment_dir when experiment_dir is set."""
+        pytest.importorskip("matplotlib")
         config = TextPredictionConfig(
             data=pd.DataFrame({
                 "masked": ["[MASK] here"],
@@ -185,6 +190,7 @@ class TestConvergencePlotAutoSave:
 
     def test_plot_automatically_called_after_training_when_experiment_dir_set(self, tmp_path):
         """train() automatically saves convergence plot when experiment_dir is set."""
+        pytest.importorskip("matplotlib")
         config = TextPredictionConfig(
             data=pd.DataFrame({
                 "masked": ["[MASK] here"],

@@ -31,18 +31,28 @@ pip install -e ".[recommended]"
 
 ## Quick start
 
+Use enough base sentences so you get at least `train_batch_size` samples per class in the training split (and a non-empty test split for evaluation). Example:
+
 ```python
 from gradiend import TextPredictionDataCreator, TextFilterConfig, TrainingArguments, TextPredictionTrainer
 
+base = [
+    "The chef tasted the soup, then he added pepper.",
+    "The players ran; they scored.",
+    "She handed the package to the courier and asked them to deliver it.",
+    "The committee met on Tuesday and they voted to postpone the decision.",
+    "He left the book on the table and she noticed the door was open.",
+    "The birds gathered on the wire; when the cat moved they flew away.",
+]
 creator = TextPredictionDataCreator(
-    base_data=["The chef tasted the soup, then he added pepper.", "The players ran; they scored."],
+    base_data=base,
     feature_targets=[
         TextFilterConfig(targets=["he", "she", "it"], id="3SG"),
         TextFilterConfig(targets=["they"], id="3PL"),
     ],
 )
-training = creator.generate_training_data(max_size_per_class=10)
-neutral = creator.generate_neutral_data(additional_excluded_words=["he", "she", "it", "they"], max_size=10)
+training = creator.generate_training_data(max_size_per_class=15)
+neutral = creator.generate_neutral_data(additional_excluded_words=["he", "she", "it", "they"], max_size=15)
 
 args = TrainingArguments(train_batch_size=4, eval_steps=5, max_steps=25, learning_rate=1e-4)
 trainer = TextPredictionTrainer(model="bert-base-uncased", data=training, eval_neutral_data=neutral, args=args)
@@ -53,7 +63,7 @@ dec = trainer.evaluate_decoder()
 changed_model = trainer.select_changed_model(decoder_results=dec, metric_key="3SG")
 ```
 
-Runnable script: `python -m gradiend.examples.start_workflow`
+Runnable script with more data: `python -m gradiend.examples.start_workflow`
 
 ## Documentation
 

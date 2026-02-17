@@ -40,6 +40,7 @@ recommended = [
     "seaborn>=0.12.0",
     "safetensors>=0.3.0",
     "datasets>=3.0.2,<=3.6.0",
+    "pyarrow>=14.0.0",
 ]
 experiments = [
     "seaborn>=0.12.0",

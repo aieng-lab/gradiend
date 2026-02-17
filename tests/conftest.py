@@ -5,6 +5,9 @@ Provides mock models, tokenizers, and common test utilities.
 """
 
 import os
+
+# Use non-interactive backend for any tests that use matplotlib (headless/CI)
+os.environ.setdefault("MPLBACKEND", "Agg")
 import tempfile
 import shutil
 from typing import Optional
