@@ -2,7 +2,7 @@
 Factory functions for creating ModelWithGradiend instances for training.
 """
 
-from typing import Optional, List, Union, Type
+from typing import Any, Optional, List, Union, Type
 
 import torch
 
@@ -21,8 +21,8 @@ def create_model_with_gradiend(
     bias_decoder: bool = True,
     torch_dtype: torch.dtype = torch.float32,
     latent_dim: int = 1,
-    **kwargs
-    ) -> ModelWithGradiend:
+    **kwargs: Any,
+) -> ModelWithGradiend:
     """
     Create a ModelWithGradiend instance.
     

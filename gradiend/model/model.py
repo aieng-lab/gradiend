@@ -12,7 +12,7 @@ import copy
 import json
 import math
 import os
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -59,8 +59,8 @@ class GradiendModel(nn.Module):
         device: Optional[torch.device] = None,
         device_encoder: Optional[torch.device] = None,
         device_decoder: Optional[torch.device] = None,
-        **kwargs,
-    ):
+        **kwargs: Any,
+    ) -> None:
         """
         Initialize a weights-only GRADIEND model (i.e., a GRADIEND encoder-decoder without base-model context
         but ).
@@ -310,7 +310,9 @@ class GradiendModel(nn.Module):
         return x
 
     # ----------------- forward -----------------
-    def forward(self, x: torch.Tensor, return_encoded: bool = False):
+    def forward(
+        self, x: torch.Tensor, return_encoded: bool = False
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         """
         Forward pass for tensor input already in GRADIEND input space.
 
@@ -337,7 +339,7 @@ class GradiendModel(nn.Module):
 
         return (decoded, encoded) if return_encoded else decoded
 
-    def forward_encoder(self, x: torch.Tensor):
+    def forward_encoder(self, x: torch.Tensor) -> torch.Tensor:
         """
         Encoder-only forward for tensor input.
 
@@ -417,7 +419,7 @@ class GradiendModel(nn.Module):
         importance: Optional[torch.Tensor] = None,
         inplace: bool = False,
         return_mask: bool = False,
-    ):
+    ) -> Union["GradiendModel", Tuple["GradiendModel", torch.Tensor]]:
         """
         Physically prune the model (reduce input_dim) by selecting important input dimensions.
         
@@ -490,7 +492,7 @@ class GradiendModel(nn.Module):
         return result
 
     # ----------------- save/load (weights-only) -----------------
-    def save_pretrained(self, save_directory: str, use_safetensors: Optional[bool] = None, **kwargs):
+    def save_pretrained(self, save_directory: str, use_safetensors: Optional[bool] = None, **kwargs: Any) -> None:
         """
         Save weights + config.json (+ optional training.json).
 
@@ -571,10 +573,10 @@ class GradiendModel(nn.Module):
     def from_pretrained(
         cls,
         load_directory: str,
-        device_encoder=None,
-        device_decoder=None,
+        device_encoder: Optional[torch.device] = None,
+        device_decoder: Optional[torch.device] = None,
         torch_dtype: Optional[torch.dtype] = None,
-    ):
+    ) -> "GradiendModel":
         """
         Load weights + config.json (weights-only).
         ParamMappedGradiendModel overrides to also load mapping.
@@ -650,7 +652,7 @@ class GradiendModel(nn.Module):
         return model
 
 
-    def pruned_length(self):
+    def pruned_length(self) -> int:
         """
         Return the current input_dim after pruning.
 
@@ -659,7 +661,7 @@ class GradiendModel(nn.Module):
         """
         return self.input_dim
 
-    def __len__(self):
+    def __len__(self) -> int:
         """
         Return the current input_dim after pruning.
 

@@ -91,8 +91,8 @@ class ParamMappedGradiendModel(GradiendModel):
         device: Optional[torch.device] = None,
         device_encoder: Optional[torch.device] = None,
         device_decoder: Optional[torch.device] = None,
-        **kwargs,
-    ):
+        **kwargs: Any,
+    ) -> None:
         """
         Initialize a GRADIEND model with a parameter mapping.
 
@@ -220,7 +220,9 @@ class ParamMappedGradiendModel(GradiendModel):
     # -----------------------------
     # gradient extraction / IO
     # -----------------------------
-    def extract_gradients(self, model, return_dict: bool = False):
+    def extract_gradients(
+        self, model: torch.nn.Module, return_dict: bool = False
+    ) -> Union[torch.Tensor, Dict[str, torch.Tensor]]:
         """
         Extract gradients from a base model (copies).
 
@@ -311,7 +313,9 @@ class ParamMappedGradiendModel(GradiendModel):
                 raise ValueError(f"Unknown param repr {r!r} for {param_name}")
         return torch.concat(parts)
 
-    def forward(self, x, return_encoded: bool = False):
+    def forward(
+        self, x: Union[torch.Tensor, Dict[str, torch.Tensor]], return_encoded: bool = False
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor], Dict[str, torch.Tensor], Tuple[Dict[str, torch.Tensor], torch.Tensor]]:
         """
         Forward that accepts:
         - tensor: already in GRADIEND input space
@@ -397,7 +401,7 @@ class ParamMappedGradiendModel(GradiendModel):
 
         return (decoded, encoded) if return_encoded else decoded
 
-    def forward_encoder(self, x):
+    def forward_encoder(self, x: Union[torch.Tensor, Dict[str, torch.Tensor]]) -> torch.Tensor:
         """
         Encoder-only forward that accepts tensor or dict input.
 
@@ -440,7 +444,7 @@ class ParamMappedGradiendModel(GradiendModel):
         importance: Optional[torch.Tensor] = None,
         inplace: bool = False,
         return_mask: bool = False,
-    ):
+    ) -> Union["ParamMappedGradiendModel", Tuple["ParamMappedGradiendModel", torch.Tensor]]:
         """
         Physically prune the model (reduce input_dim) and remap mapping spec accordingly.
         The pruning is applied based on up to three criteria: a boolean mask, an importance threshold, and/or a
@@ -579,7 +583,7 @@ class ParamMappedGradiendModel(GradiendModel):
     # -----------------------------
     # save/load (mapping-aware)
     # -----------------------------
-    def save_pretrained(self, save_directory: str, use_safetensors: Optional[bool] = None, **kwargs):
+    def save_pretrained(self, save_directory: str, use_safetensors: Optional[bool] = None, **kwargs: Any) -> None:
         """
         Save weights + config + mapping.
 
@@ -745,10 +749,10 @@ class ParamMappedGradiendModel(GradiendModel):
     def from_pretrained(
         cls,
         load_directory: str,
-        device_encoder=None,
-        device_decoder=None,
+        device_encoder: Optional[torch.device] = None,
+        device_decoder: Optional[torch.device] = None,
         torch_dtype: Optional[torch.dtype] = None,
-    ):
+    ) -> "ParamMappedGradiendModel":
         """
         Load weights + config + mapping.
 
@@ -844,7 +848,7 @@ class ParamMappedGradiendModel(GradiendModel):
             model._base_global_index_map_version = getattr(model, "_param_map_version", 0)
         return model
 
-    def unpruned_length(self):
+    def unpruned_length(self) -> int:
         """
         Compute the total number of entries in the original unpruned input space.
 

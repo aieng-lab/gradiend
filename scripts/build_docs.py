@@ -11,8 +11,10 @@ import logging
 import runpy
 import sys
 
-# Suppress griffe type/annotation warnings before mkdocstrings (and thus griffe) is loaded
-logging.getLogger("griffe").setLevel(logging.ERROR)
+# Suppress griffe type/annotation warnings; prevent griffe from re-enabling them when loaded
+_griffe_logger = logging.getLogger("griffe")
+_griffe_logger.setLevel(logging.CRITICAL)
+_griffe_logger.setLevel = lambda _: None  # no-op so griffe cannot lower the level
 
 # Invoke mkdocs the same way as "python -m mkdocs"
 sys.argv = ["mkdocs"] + (sys.argv[1:] or ["build"])

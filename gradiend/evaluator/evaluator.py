@@ -202,7 +202,7 @@ class Evaluator:
 
         return {"encoder": enc, "decoder": dec}
 
-    def plot_encoder_distributions(self, **kwargs) -> Any:
+    def plot_encoder_distributions(self, **kwargs: Any) -> Any:
         """
         Plot encoder distributions (typically a violin plot).
 
@@ -218,7 +218,7 @@ class Evaluator:
         """
         return self._delegate_to_visualizer("plot_encoder_distributions", **kwargs)
 
-    def plot_training_convergence(self, **kwargs) -> Any:
+    def plot_training_convergence(self, **kwargs: Any) -> Any:
         """
         Plot training convergence (means by class/feature_class and correlation).
 
@@ -234,7 +234,7 @@ class Evaluator:
         """
         return self._delegate_to_visualizer("plot_training_convergence", **kwargs)
 
-    def plot_encoder_scatter(self, **kwargs) -> Any:
+    def plot_encoder_scatter(self, **kwargs: Any) -> Any:
         """
         Plot interactive encoder scatter (Plotly: jitter x, encoded y, colored by label).
 

@@ -217,7 +217,7 @@ config = TextPredictionConfig(
 
 **Note:** Most users should use `ModelWithGradiend` or `TextPredictionTrainer` instead, which handle the base model integration.
 
-**See also:** [API reference](../api-reference.md#gradiendmodel)
+**See also:** [API reference](../api-reference.md)
 
 ---
 
@@ -232,7 +232,7 @@ config = TextPredictionConfig(
 
 **Key difference from `GradiendModel`:** Handles parameter name mapping, enabling gradient I/O as dictionaries.
 
-**See also:** [API reference](../api-reference.md#parammappedgradiendmodel)
+**See also:** [API reference](../api-reference.md)
 
 ---
 
@@ -270,7 +270,7 @@ modified_model = model.modify_model(
 )
 ```
 
-**See also:** [API reference](../api-reference.md#modelwithgradiend), [Saving & loading guide](saving-loading.md)
+**See also:** [API reference](../api-reference.md), [Saving & loading guide](saving-loading.md)
 
 ---
 

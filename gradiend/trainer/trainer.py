@@ -356,6 +356,8 @@ class Trainer(FeatureLearningDefinition):
     def get_model(
         self,
         use_cache: Optional[bool] = None,
+        *,
+        load_directory: Optional[Any] = None,
         **kwargs: Any,
     ) -> Any:
         """
@@ -375,7 +377,7 @@ class Trainer(FeatureLearningDefinition):
         Returns:
             ModelWithGradiend instance.
         """
-        load_directory = kwargs.pop("load_directory", None)
+        load_directory = load_directory if load_directory is not None else kwargs.pop("load_directory", None)
         # Return in-memory model when set (e.g. during training), unless loading from a specific path
         if load_directory is None and self._model_instance is not None:
             return self._model_instance

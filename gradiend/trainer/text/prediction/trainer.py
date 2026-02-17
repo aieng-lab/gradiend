@@ -919,8 +919,8 @@ class TextPredictionTrainer(Trainer):
 
     def evaluate_base_model(
             self,
-            model,
-            tokenizer,
+            model: Any,
+            tokenizer: Any,
             use_cache: Optional[bool] = None,
             cache_folder: str = '',
             model_id: Optional[str] = None,
@@ -1445,7 +1445,7 @@ class TextPredictionTrainer(Trainer):
             max_size: Optional[int] = None,
             use_cache: Optional[bool] = None,
             model_use_cache: Optional[bool] = None,
-    ):
+    ) -> str:
         """
         Train a custom MLM head on a decoder-only model. DecoderModelWithMLMHead is a
         drop-in replacement for AutoModelForMaskedLM: loading (e.g. trainer.train())
@@ -1513,7 +1513,7 @@ class TextPredictionTrainer(Trainer):
 
     def _get_decoder_eval_dataframe(
         self,
-        tokenizer,
+        tokenizer: Any,
         max_size_training_like: Optional[int] = None,
         max_size_neutral: Optional[int] = None,
         cached_training_like_df: Optional[pd.DataFrame] = None,
@@ -1629,7 +1629,7 @@ class TextPredictionTrainer(Trainer):
         alternative_token_col: Optional[str] = None,
         source_id_col: Optional[str] = None,
         target_id_col: Optional[str] = None,
-        **kwargs,
+        **kwargs: Any,
     ) -> pd.DataFrame:
         """
         Analyze encoder by encoding gradients from training data and optional neutral data.

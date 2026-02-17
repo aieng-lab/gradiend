@@ -450,7 +450,7 @@ class ModelWithGradiend(nn.Module, ABC):
 
         return enhanced_model
 
-    def with_original_base_model(self, new_base):
+    def with_original_base_model(self, new_base: nn.Module) -> "ModelWithGradiend":
         """
         Return a copy of this ModelWithGradiend with base_model replaced by new_base.
 
@@ -671,7 +671,7 @@ class ModelWithGradiend(nn.Module, ABC):
         )
 
     @classmethod
-    def from_pretrained(cls, load_directory, **kwargs):
+    def from_pretrained(cls, load_directory: Any, **kwargs: Any) -> "ModelWithGradiend":
         """
         Load a ModelWithGradiend from a directory (GRADIEND checkpoint) or create new from base model path.
 
@@ -790,14 +790,14 @@ class ModelWithGradiend(nn.Module, ABC):
     def prune_gradiend(
             self,
             *,
-            topk: float = None,
-            threshold: float = None,
-            mask: torch.Tensor = None,
+            topk: Optional[float] = None,
+            threshold: Optional[float] = None,
+            mask: Optional[torch.Tensor] = None,
             part: str = "decoder-weight",
-            importance: torch.Tensor = None,
+            importance: Optional[torch.Tensor] = None,
             inplace: bool = True,
             return_mask: bool = False,
-    ):
+    ) -> Union["ModelWithGradiend", Tuple["ModelWithGradiend", torch.Tensor]]:
         """
         Prune GRADIEND input space by selecting important input dimensions and physically reducing
         gradiend.input_dim. Converts `gradiend.param_map` list -> dict internally; the pruned gradiend

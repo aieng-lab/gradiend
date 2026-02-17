@@ -30,7 +30,7 @@ pip install mkdocs mkdocs-material
 mkdocs build
 ```
 
-To treat warnings as errors (broken links, missing images, griffe/type hints), run `mkdocs build --strict`; fix any reported issues for the build to succeed.
+To treat warnings as errors, run `mkdocs build --strict`. Passing strict mode requires fixing all reported issues: broken links, missing images, and griffe warnings (missing type/annotation in docstrings). Add type hints and fix docstring parameter docs to clear griffe warnings over time.
 
 ## Hosting (public access)
 
