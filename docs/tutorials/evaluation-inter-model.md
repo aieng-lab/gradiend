@@ -56,7 +56,7 @@ plot_topk_overlap_venn(
 )
 ```
 
-![Top-k Overlap Venn Diagram](../img/venn_der_die.png)
+*Run the code above to generate the Venn diagram; use `output_path="topk_overlap_venn.pdf"` (or `.png`) to save.*
 
 
 ## Overlap Heatmap
@@ -81,7 +81,7 @@ plot_topk_overlap_heatmap(
 
 High values (e.g. bright cells) mean the two runs share many of their top-k parameters; low values mean they focus on different parts of the model.
 
-![Top-k Overlap Heatmap](../img/topk_overlap_heatmap.png)
+*Run the code above to generate the heatmap; use `output_path="topk_overlap_heatmap.pdf"` (or `.png`) to save.*
 
 
 ---

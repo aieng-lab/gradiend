@@ -33,8 +33,20 @@ jobs:
       - name: Build site
         run: mkdocs build
 
+      # Requires: repo Settings → Pages → Source = "GitHub Actions" (enable once)
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
           path: site
+
+  deploy:
+    needs: build
+    permissions:
+      pages: write
+      id-token: write
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
       - uses: actions/deploy-pages@v4

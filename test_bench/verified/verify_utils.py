@@ -12,31 +12,29 @@ from gradiend import load_training_stats
 
 
 # More iterations for test bench (vs examples) to ensure proper conversion.
-# encoder_eval_max_size caps all encoder evaluation (training, seed selection, evaluate_encoder).
+# Keys must match TrainingArguments field names (for train(**BENCH_TRAIN_CONFIG) overrides).
 BENCH_TRAIN_CONFIG = dict(
-    batch_size=8,
-    eval_max_size=50,
-    n_evaluation=250,
-    epochs=1,
-    max_iterations=1000,
+    train_batch_size=8,
+    encoder_eval_max_size=200,
+    eval_steps=250,
+    num_train_epochs=1,
+    max_steps=1000,
     source="alternative",
     target="diff",
     eval_batch_size=8,
     learning_rate=1e-5,
-    encoder_eval_max_size=200,
 )
 
-# Config with pre/post pruning (for efficiency)
+# Config with pre/post pruning (for efficiency); use as much as possible per user request.
 try:
     from gradiend.trainer import PrePruneConfig, PostPruneConfig
-    
+
     BENCH_TRAIN_CONFIG_WITH_PRUNING = {
         **BENCH_TRAIN_CONFIG,
         "pre_prune_config": PrePruneConfig(n_samples=16, topk=0.01, source="diff"),
         "post_prune_config": PostPruneConfig(topk=0.05, part="decoder-weight"),
     }
 except ImportError:
-    # Fallback if imports fail
     BENCH_TRAIN_CONFIG_WITH_PRUNING = BENCH_TRAIN_CONFIG
 
 # Config for decoder-only MLM head training

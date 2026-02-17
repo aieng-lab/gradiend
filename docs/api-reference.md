@@ -17,16 +17,19 @@ The following pages are **auto-generated from the source code** (docstrings and 
 
 ## Core models
 
+<span id="gradiendmodel"></span>
 ::: gradiend.model.model.GradiendModel
     options:
       show_root_heading: false
       heading_level: 2
 
+<span id="parammappedgradiendmodel"></span>
 ::: gradiend.model.param_mapped.ParamMappedGradiendModel
     options:
       show_root_heading: false
       heading_level: 2
 
+<span id="modelwithgradiend"></span>
 ::: gradiend.model.model_with_gradiend.ModelWithGradiend
     options:
       show_root_heading: false

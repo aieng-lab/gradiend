@@ -162,7 +162,7 @@ plot_topk_overlap_heatmap(
     output_path="topk_overlap_heatmap.png",
 )
 ```
-![Top-k Overlap Heatmap](../img/topk_overlap_heatmap.png)
+*Run the code above to generate the heatmap; save with `output_path="topk_overlap_heatmap.png"` to view.*
 
 ### Parameters
 
@@ -219,8 +219,7 @@ plot_topk_overlap_venn(
 )
 ```
 
-![3 Set Venn Diagram](../img/venn_das_dem.png)
-![5 Set Venn Diagram](../img/venn_der_die.png)
+*Run the code above to generate Venn diagrams (e.g. 3-set or 5-set). Save with `output_path="venn.png"` to view.*
 
 ### Parameters
 

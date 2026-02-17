@@ -20,24 +20,12 @@ mkdocs serve
 
 Then open [http://127.0.0.1:8000](http://127.0.0.1:8000). The **Reference → API reference** section is generated from the code (docstrings and type hints) via [mkdocstrings](https://mkdocstrings.github.io/).
 
-### Test the same build as CI
-
-CI runs `mkdocs build` (no `--strict`). To match it locally:
-
-```bash
-pip install -e ".[dev]"
-pip install mkdocs mkdocs-material
-mkdocs build
-```
-
-To treat warnings as errors, run `mkdocs build --strict`. Passing strict mode requires fixing all reported issues: broken links, missing images, and griffe warnings (missing type/annotation in docstrings). Add type hints and fix docstring parameter docs to clear griffe warnings over time.
-
 ## Hosting (public access)
 
 ### GitHub Pages
 
-1. In the repo: **Settings → Pages → Source**: choose **GitHub Actions** (or “Deploy from a branch” and select `gh-pages`).
-2. Add a workflow under `.github/workflows/` that runs `pip install -e ".[dev]"`, then `mkdocs gh-deploy` (or `mkdocs build` and upload `site/` to the `gh-pages` branch).
+1. **Enable Pages first** (required before the workflow can deploy): In the repo go to **Settings → Pages**. Under **Build and deployment**, set **Source** to **GitHub Actions**. Save. (If you skip this, the workflow will fail with "Get Pages site failed" / Not Found.)
+2. The workflow in `.github/workflows/docs.yml` builds the site and deploys it on push to `main`. No extra workflow setup needed.
 3. Set **Project URLs** in `pyproject.toml` so **Documentation** points to the Pages URL, e.g. `https://<org>.github.io/gradiend/`.
 
 Once configured, every push to the docs (or to main) can update the published site. Users and package index will see the documentation link in the project metadata.

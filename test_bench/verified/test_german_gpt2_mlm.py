@@ -13,10 +13,11 @@ from pathlib import Path
 import pytest
 import torch
 
-from gradiend import TextPredictionTrainer
+from gradiend import TextPredictionTrainer, TrainingArguments
 
 from .verify_utils import (
-    BENCH_TRAIN_CONFIG,
+    BENCH_MLM_HEAD_CONFIG,
+    BENCH_TRAIN_CONFIG_WITH_PRUNING,
     assert_correlation_threshold,
     assert_model_files_exist,
 )
@@ -43,16 +44,20 @@ def test_german_gpt2_mlm_gender_de_verified(temp_output_dir):
 
     base_model = "dbmdz/german-gpt2"
     pair = ("masc_nom", "fem_nom")
+    args = TrainingArguments(
+        experiment_dir=temp_output_dir,
+        add_identity_for_other_classes=True,
+        use_cache=False,
+    )
     trainer = TextPredictionTrainer(
         model=base_model,
         run_id="gender_de_masc_nom_fem_nom",
         data="aieng-lab/de-gender-case-articles",
-        classes="all",
-        pair=pair,
+        target_classes=list(pair),
         masked_col="masked",
         split_col="split",
-        add_identity_for_other_classes=True,
         eval_neutral_data="aieng-lab/wortschatz-leipzig-de-grammar-neutral",
+        args=args,
     )
 
     # 1) Train decoder-only MLM head (needed for decoder-only model on this setup)
@@ -60,16 +65,13 @@ def test_german_gpt2_mlm_gender_de_verified(temp_output_dir):
     mlm_head_path = trainer.train_decoder_only_mlm_head(
         base_model,
         output=mlm_output,
-        epochs=3,
-        batch_size=4,
-        max_size=1000,
-        use_cache=True,
+        **BENCH_MLM_HEAD_CONFIG,
     )
     assert os.path.isdir(mlm_head_path), f"MLM head should exist at {mlm_head_path}"
 
-    # 2) Train GRADIEND (resolve_model_path will use MLM head)
+    # 2) Train GRADIEND (resolve_model_path will use MLM head); use pruning
     gradiend_output = os.path.join(temp_output_dir, "models", trainer.run_id or "run", "german-gpt2")
-    trainer.train(output=gradiend_output, **BENCH_TRAIN_CONFIG)
+    trainer.train(output=gradiend_output, **BENCH_TRAIN_CONFIG_WITH_PRUNING)
     result_path = trainer.model_path
 
     assert result_path is not None

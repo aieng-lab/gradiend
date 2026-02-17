@@ -13,7 +13,7 @@ import os
 import copy
 import json
 from abc import ABC, abstractmethod
-from typing import Iterator, List, Optional, Dict, Any, Tuple
+from typing import Iterator, List, Optional, Dict, Any, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -671,7 +671,14 @@ class ModelWithGradiend(nn.Module, ABC):
         )
 
     @classmethod
-    def from_pretrained(cls, load_directory: Any, **kwargs: Any) -> "ModelWithGradiend":
+    def from_pretrained(
+        cls,
+        load_directory: Any,
+        *,
+        require_gradiend_model: bool = False,
+        feature_definition: Optional[Any] = None,
+        **kwargs: Any,
+    ) -> "ModelWithGradiend":
         """
         Load a ModelWithGradiend from a directory (GRADIEND checkpoint) or create new from base model path.
 
@@ -703,8 +710,8 @@ class ModelWithGradiend(nn.Module, ABC):
                     val = getattr(training_args, key, None)
                     if val is not None:
                         kwargs.setdefault(key, val)
-        require_gradiend_model = kwargs.pop("require_gradiend_model", False)
-        feature_definition = kwargs.pop("feature_definition", None)
+        require_gradiend_model = kwargs.pop("require_gradiend_model", require_gradiend_model)
+        feature_definition = kwargs.pop("feature_definition", feature_definition)
         device_config = cls._get_device_config(load_directory_str, **kwargs)
         gradiend_device_config = {k: v for k, v in device_config.items() if k != "base_model_device"}
 

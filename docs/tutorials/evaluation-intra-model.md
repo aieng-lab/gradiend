@@ -46,7 +46,7 @@ We consider different types of datasets/ gradient as GRADIEND encoder inputs:
 
 An easy overview of the encoder’s behavior is the **distribution plot**: a violin plot showing how the encoded values distribute for 
 
-![Encoder Distribution Plot](img/encoder_distribution_plot.png)
+*Run encoder evaluation with `plot=True` (or `trainer.plot_encoder_distributions()`) to generate the distribution plot.*
 
 We expect that the target training classes encode to polarly different values  (+-1), while the neutral variants (if present) should cluster around 0.
 To visually highlight the special role of target classes, we mark their violins and legend entries in **bold**.

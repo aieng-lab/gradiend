@@ -13,10 +13,9 @@ from pathlib import Path
 import pytest
 import torch
 
-from gradiend import TextPredictionTrainer
+from gradiend import TextPredictionTrainer, TrainingArguments
 
 from .verify_utils import (
-    BENCH_TRAIN_CONFIG,
     BENCH_TRAIN_CONFIG_WITH_PRUNING,
     assert_correlation_threshold,
     assert_model_files_exist,
@@ -49,16 +48,19 @@ def test_race_religion_distilbert_verified(temp_output_dir):
     religion_christian_muslim = ("religion", ("christian", "muslim"), ["jewish"])
 
     for bias_type, pair, other_classes in [race_white_black, religion_christian_muslim]:
-        classes = list(pair) + other_classes
+        args = TrainingArguments(
+            experiment_dir=temp_output_dir,
+            add_identity_for_other_classes=False,
+            use_cache=False,
+        )
         trainer = TextPredictionTrainer(
             model=model_name,
             run_id=f"{bias_type}_{pair[0]}_{pair[1]}",
             data=f"aieng-lab/gradiend_{bias_type}_data",
-            classes=classes,
-            pair=pair,
+            target_classes=list(pair),
             masked_col="masked",
-            add_identity_for_other_classes=False,
             eval_neutral_data="aieng-lab/biasneutral",
+            args=args,
         )
         output = os.path.join(temp_output_dir, f"{bias_type}_{pair[0]}_{pair[1]}", model_name)
 

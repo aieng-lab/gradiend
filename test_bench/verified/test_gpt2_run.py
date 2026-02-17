@@ -13,10 +13,10 @@ from pathlib import Path
 import pytest
 import torch
 
-from gradiend import TextPredictionTrainer
+from gradiend import TextPredictionTrainer, TrainingArguments
 
 from .verify_utils import (
-    BENCH_TRAIN_CONFIG,
+    BENCH_TRAIN_CONFIG_WITH_PRUNING,
     assert_correlation_threshold,
     assert_model_files_exist,
 )
@@ -43,21 +43,23 @@ def test_gpt2_race_verified(temp_output_dir):
 
     model_name = "gpt2"
     pair = ("white", "black")
-    other_classes = ["asian"]
-    classes = list(pair) + other_classes
+    args = TrainingArguments(
+        experiment_dir=temp_output_dir,
+        add_identity_for_other_classes=False,
+        use_cache=False,
+    )
     trainer = TextPredictionTrainer(
         model=model_name,
         run_id=f"race_{pair[0]}_{pair[1]}",
         data="aieng-lab/gradiend_race_data",
-        classes=classes,
-        pair=pair,
+        target_classes=list(pair),
         masked_col="masked",
-        add_identity_for_other_classes=False,
         eval_neutral_data="aieng-lab/biasneutral",
+        args=args,
     )
     output = os.path.join(temp_output_dir, trainer.run_id or "run", model_name)
 
-    trainer.train(output=output, **BENCH_TRAIN_CONFIG)
+    trainer.train(output=output, **BENCH_TRAIN_CONFIG_WITH_PRUNING)
     result_path = trainer.model_path
 
     assert result_path is not None

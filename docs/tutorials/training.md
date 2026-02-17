@@ -169,7 +169,7 @@ trainer.plot_training_convergence()
 
 
 
-![Training Convergence Plot](img/training_convergence_example.png)
+*Run `trainer.plot_training_convergence()` to generate this plot; use the `output` option to save to a file.*
 
 Options (passed as kwargs):
 
