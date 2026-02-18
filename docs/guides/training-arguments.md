@@ -1,6 +1,6 @@
 # Training Arguments
 
-This guide explains `TrainingArguments` in detail. For a conceptual overview and minimal usage, see [Tutorial: Training](../tutorials/training.md). For the full API (including defaults), see [API reference](../api-reference.md).
+This guide explains `TrainingArguments` in detail. For a conceptual overview and minimal usage, see [Tutorial: Training](../tutorials/training.md). For the full API (including defaults), see [API reference](../api/index.md).
 
 `TrainingArguments` follows Hugging Face Trainer conventions where applicable (e.g. `num_train_epochs`, `learning_rate`, `eval_steps`).
 

@@ -79,7 +79,32 @@ nav:
     - Testing: guides/testing.md
   - Reference:
     - Examples: examples.md
-    - API reference: api-reference.md
+    - API reference:
+        - API overview: api/index.md
+        - Models:
+            - Overview: api/models/index.md
+            - GradiendModel: api/models/GradiendModel.md
+            - ParamMappedGradiendModel: api/models/ParamMappedGradiendModel.md
+            - ModelWithGradiend: api/models/ModelWithGradiend.md
+        - Data:
+            - Overview: api/data/index.md
+            - TextFilterConfig: api/data/TextFilterConfig.md
+            - TextPredictionDataCreator: api/data/TextPredictionDataCreator.md
+            - TextPreprocessConfig: api/data/TextPreprocessConfig.md
+        - Training:
+            - Overview: api/training/index.md
+            - TrainingArguments: api/training/TrainingArguments.md
+            - Trainer: api/training/Trainer.md
+            - TextPredictionConfig: api/training/TextPredictionConfig.md
+            - TextPredictionTrainer: api/training/TextPredictionTrainer.md
+            - PrePruneConfig: api/training/PrePruneConfig.md
+            - PostPruneConfig: api/training/PostPruneConfig.md
+        - Evaluation:
+            - Overview: api/evaluation/index.md
+            - Evaluator: api/evaluation/Evaluator.md
+            - EncoderEvaluator: api/evaluation/EncoderEvaluator.md
+            - DecoderEvaluator: api/evaluation/DecoderEvaluator.md
+            - Visualizer: api/evaluation/Visualizer.md
     - FAQ: faq.md
   - Project:
     - Publishing the documentation: publishing-docs.md

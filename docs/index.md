@@ -61,7 +61,7 @@ When you need to understand a topic or look up options:
 ## Reference
 
 - [Examples](examples.md) — All example scripts with short descriptions.
-- [API reference](api-reference.md) — **Auto-generated** from docstrings; main classes and entry points.
+- [API reference](api/index.md) — **Auto-generated** from docstrings; main classes and entry points.
 - [FAQ](faq.md) — Troubleshooting and common pitfalls.
 
 To **publish** the docs (e.g. GitHub Pages or Read the Docs) so they are publicly accessible with the package, see [Publishing the documentation](publishing-docs.md).

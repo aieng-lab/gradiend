@@ -157,4 +157,4 @@ changed_model = trainer.select_changed_model(decoder_results=dec_results, metric
 
 - [Tutorial: Evaluation (inter-model)](evaluation-inter-model.md) — Top-k overlap and heatmaps for comparing multiple runs.
 - [Evaluation & visualization](../guides/evaluation-visualization.md) — Plot customization (convergence, encoder, heatmap, Venn).
-- [API reference](../api-reference.md) — `Evaluator`, `EncoderEvaluator`, `DecoderEvaluator`.
+- [API reference](../api/index.md) — `Evaluator`, `EncoderEvaluator`, `DecoderEvaluator`.

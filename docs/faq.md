@@ -20,7 +20,7 @@ You should check the training log and inspect the mean probabilities per label c
 - **Data Quality** — Check the quality of your data and labels (spaCy misclassifies, etc.).
 - **Pruning** — try first to train the full (un-pruned) model to check if pre-pruning may accidently removes actually important weigths that are required for convergence
 
-See [TrainingArguments](api-reference.md) and the [start here](start.md) / [detailed workflow](tutorials/detailed-workflow.md) tutorials for all training options.
+See [TrainingArguments](api/training/TrainingArguments.md) and the [start here](start.md) / [detailed workflow](tutorials/detailed-workflow.md) tutorials for all training options.
 
 
 ## I get a CUDA out of memory error. How can I reduce memory usage?

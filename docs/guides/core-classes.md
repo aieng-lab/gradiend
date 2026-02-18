@@ -1,6 +1,6 @@
 # Core classes and use cases
 
-This guide explains the most important classes in GRADIEND and when to use them. For complete API details, see the [API reference](../api-reference.md).
+This guide explains the most important classes in GRADIEND and when to use them. For complete API details, see the [API reference](../api/index.md).
 
 ---
 
@@ -217,7 +217,7 @@ config = TextPredictionConfig(
 
 **Note:** Most users should use `ModelWithGradiend` or `TextPredictionTrainer` instead, which handle the base model integration.
 
-**See also:** [API reference](../api-reference.md)
+**See also:** [API reference](../api/index.md)
 
 ---
 
@@ -232,7 +232,7 @@ config = TextPredictionConfig(
 
 **Key difference from `GradiendModel`:** Handles parameter name mapping, enabling gradient I/O as dictionaries.
 
-**See also:** [API reference](../api-reference.md)
+**See also:** [API reference](../api/index.md)
 
 ---
 
@@ -270,7 +270,7 @@ modified_model = model.modify_model(
 )
 ```
 
-**See also:** [API reference](../api-reference.md), [Saving & loading guide](saving-loading.md)
+**See also:** [API reference](../api/index.md), [Saving & loading guide](saving-loading.md)
 
 ---
 
@@ -292,7 +292,7 @@ modified_model = model.modify_model(
 
 **Note:** `TextPredictionTrainer` already has an `Evaluator` instance, so you typically call `trainer.evaluate_encoder()` directly.
 
-**See also:** [API reference](../api-reference.md), [Evaluation tutorial](../tutorials/evaluation-intra-model.md)
+**See also:** [API reference](../api/index.md), [Evaluation tutorial](../tutorials/evaluation-intra-model.md)
 
 ---
 
@@ -310,7 +310,7 @@ modified_model = model.modify_model(
 - Encoded value distributions per class
 - Plots showing class separation
 
-**See also:** [API reference](../api-reference.md), [Evaluation guide](evaluation-visualization.md)
+**See also:** [API reference](../api/index.md), [Evaluation guide](evaluation-visualization.md)
 
 ---
 
@@ -328,7 +328,7 @@ modified_model = model.modify_model(
 - Probability shift scores
 - Language modeling scores (to ensure model quality is maintained)
 
-**See also:** [API reference](../api-reference.md), [Evaluation tutorial](../tutorials/evaluation-intra-model.md)
+**See also:** [API reference](../api/index.md), [Evaluation tutorial](../tutorials/evaluation-intra-model.md)
 
 ---
 
@@ -390,6 +390,6 @@ modified_model = model.modify_model(
 ## Next steps
 
 - **[Start here](../start.md)** — Run a complete example
-- **[API reference](../api-reference.md)** — Complete API documentation
+- **[API reference](../api/index.md)** — Complete API documentation
 - **[Tutorials](../tutorials/data-generation.md)** — Step-by-step workflows
 - **[Guides](data-handling.md)** — Detailed guides for specific topics

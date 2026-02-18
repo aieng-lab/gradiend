@@ -196,4 +196,4 @@ If `experiment_dir` is set, the plot is saved automatically under that directory
 
 - [Training arguments guide](../guides/training-arguments.md) — Detailed documentation of each argument.
 - [Pruning](../guides/pruning-guide.md) — Manual masks and full pruning API.
-- [API reference](../api-reference.md) — `TrainingArguments`, `PrePruneConfig`, `PostPruneConfig`.
+- [API reference](../api/index.md) — `TrainingArguments`, `PrePruneConfig`, `PostPruneConfig`.

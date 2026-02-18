@@ -90,4 +90,4 @@ High values (e.g. bright cells) mean the two runs share many of their top-k para
 
 - [Tutorial: Evaluation (intra-model)](evaluation-intra-model.md) — Encoder/decoder evaluation and selecting the changed model.
 - [Evaluation & visualization](../guides/evaluation-visualization.md) — Heatmap and Venn customization options.
-- [API reference](../api-reference.md) — `plot_topk_overlap_heatmap`, `plot_topk_overlap_venn`.
+- [API reference](../api/index.md) — `plot_topk_overlap_heatmap`, `plot_topk_overlap_venn`.
