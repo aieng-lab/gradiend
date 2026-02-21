@@ -84,6 +84,36 @@ class TestGetEncoderMetricsFromDataframe:
         with pytest.raises(ValueError, match="empty"):
             get_encoder_metrics_from_dataframe(encoder_df)
 
+    def test_single_instance_raises(self):
+        """Single non-neutral instance cannot define correlation."""
+        encoder_df = pd.DataFrame({
+            "encoded": [0.5],
+            "label": [1.0],
+            "type": ["training"],
+        })
+        with pytest.raises(ValueError, match="at least 2 non-neutral"):
+            get_encoder_metrics_from_dataframe(encoder_df)
+
+    def test_single_class_raises(self):
+        """Single label class (all labels identical) cannot define correlation."""
+        encoder_df = pd.DataFrame({
+            "encoded": [0.1, 0.2, 0.3],
+            "label": [1.0, 1.0, 1.0],
+            "type": ["training", "training", "training"],
+        })
+        with pytest.raises(ValueError, match="only one label class"):
+            get_encoder_metrics_from_dataframe(encoder_df)
+
+    def test_all_neutral_raises(self):
+        """All-neutral eval data cannot define correlation."""
+        encoder_df = pd.DataFrame({
+            "encoded": [0.1, -0.2, 0.3],
+            "label": [0.0, 0.0, 0.0],
+            "type": ["neutral_dataset", "neutral_dataset", "neutral_training_masked"],
+        })
+        with pytest.raises(ValueError, match="All encoder eval data is neutral"):
+            get_encoder_metrics_from_dataframe(encoder_df)
+
     def test_mean_by_class_includes_identity_label_0(self):
         """mean_by_class must include identity classes (label 0) for convergence plot."""
         import numpy as np
@@ -481,7 +511,7 @@ class TestEvaluateEncoderWithEncoderDf:
         assert "mean_by_class" in result
 
     def test_encoder_evaluator_with_empty_encoder_df_returns_empty(self):
-        """EncoderEvaluator.evaluate_encoder(encoder_df=empty) should return empty dict."""
+        """EncoderEvaluator.evaluate_encoder(encoder_df=empty) returns n_samples=0, correlation=None."""
         from gradiend.evaluator.encoder import EncoderEvaluator
         from tests.test_evaluator import MockTrainer
 
@@ -492,7 +522,7 @@ class TestEvaluateEncoderWithEncoderDf:
         encoder_df = pd.DataFrame(columns=["encoded", "label", "type"])
         result = evaluator.evaluate_encoder(trainer, encoder_df=encoder_df)
 
-        assert result == {}
+        assert result == {"n_samples": 0, "correlation": None}
 
 
 class TestUseCacheWithoutExperimentDir:

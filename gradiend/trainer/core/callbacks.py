@@ -181,7 +181,10 @@ class NormalizationCallback(TrainingCallback):
         if model.gradiend.latent_dim == 1 and 'mean_by_class' in eval_result:
             # For normalization, if the correlation is strongly negative, invert the encoding.
             try:
-                corr = float(eval_result.get('correlation', 0.0))
+                corr_raw = eval_result.get('correlation')
+                if corr_raw is None:
+                    return  # Empty eval data; no correlation to normalize
+                corr = float(corr_raw)
                 if corr < -0.6:
                     logger.info(f'Inverting encoding since correlation is {corr} < -0.5')
                     model.invert_encoding(update_direction=False)
@@ -273,20 +276,25 @@ class CheckpointCallback(TrainingCallback):
             is_better = self.best_score is None or loss < self.best_score
             score_for_log = loss
         else:
-            corr = training_stats.get('correlation', -1.0)
-            is_better = self.best_score is None or abs(corr) > abs(self.best_score)
-            score_for_log = corr
+            corr = training_stats.get('correlation')
+            # No valid correlation (e.g. empty eval data); do not update best checkpoint
+            if corr is None:
+                is_better = False
+                score_for_log = None
+            else:
+                is_better = self.best_score is None or abs(corr) > abs(self.best_score)
+                score_for_log = corr
 
         if is_better:
             was_first = self.best_score is None
             old_score = self.best_score
-            self.best_score = loss if self.use_loss_for_best else training_stats.get('correlation', -1.0)
+            self.best_score = loss if self.use_loss_for_best else training_stats.get('correlation')
             self.best_step = step
             self.best_epoch = kwargs.get('epoch', 0)
 
             if was_first:
                 logger.debug(f'First {"loss" if self.use_loss_for_best else "correlation"}: {score_for_log:.4f} at step {step}')
-            else:
+            elif score_for_log is not None:
                 logger.debug(f'New best {"loss" if self.use_loss_for_best else "correlation"}: {score_for_log:.4f} at step {step} (previous: {old_score:.4f})')
 
             if step > 1:
@@ -357,7 +365,7 @@ class LoggingCallback(TrainingCallback):
         )
         # Log if we should log AND (have losses OR have eval results for step 0)
         if should_log and (last_losses or (step == 0 and eval_result is not None)):
-            corr = training_stats.get('correlation', -1.0)
+            corr = training_stats.get('correlation')
 
             # Try to get mean encoded values per class for the current step
             mean_by_class_hist = training_stats.get('mean_by_class', {})
@@ -388,12 +396,12 @@ class LoggingCallback(TrainingCallback):
                 mean_str = ", ".join(parts)
 
             suffix = ""
-            if not self.loss_only and kwargs.get('best_score_checkpoint'):
+            if not self.loss_only and kwargs.get('best_score_checkpoint') and corr is not None:
                 bsc = kwargs['best_score_checkpoint']
-                best_corr = bsc.get('correlation', -1.0)
+                best_corr = bsc.get('correlation')
                 if best_corr is not None and abs(corr) > abs(best_corr):
                     suffix = " (new best)"
-            corr_str = "N/A" if self.loss_only else f"{corr:.4f}"
+            corr_str = "N/A" if (self.loss_only or corr is None) else f"{corr:.4f}"
             logger.info(
                 f'Step {step}, Correlation: {corr_str}, '
                 + (f', mean: {mean_str}' if mean_str else '')

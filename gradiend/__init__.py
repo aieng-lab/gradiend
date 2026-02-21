@@ -21,10 +21,10 @@ Sub-packages (use when you need modality-specific or internal APIs):
     - gradiend.data: same as top-level data API (alternative import path)
 
 For experimental features (analysis, plotting, LaTeX export), install with:
-    pip install gradiend[experiments]
+    pip install gradiend[recommended]
 """
 
-__version__ = "0.1.0"
+__version__ = "1.0.0"
 
 # Core model classes
 from gradiend.model import GradiendModel, ParamMappedGradiendModel, ModelWithGradiend

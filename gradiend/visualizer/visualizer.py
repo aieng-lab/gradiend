@@ -5,11 +5,12 @@ Holds a reference to the trainer; exposes single-model visualization helpers.
 Option A: Evaluator holds a Visualizer for evaluation-related plots.
 """
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from gradiend.visualizer.encoder_distributions import plot_encoder_distributions as _plot_encoder_distributions
 from gradiend.visualizer.convergence import plot_training_convergence as _plot_training_convergence
 from gradiend.visualizer.encoder_scatter import plot_encoder_scatter as _plot_encoder_scatter
+from gradiend.visualizer.probability_shifts import plot_probability_shifts as _plot_probability_shifts
 from gradiend.visualizer.topk.venn_ import (
     compute_topk_sets,
     plot_topk_overlap_venn,
@@ -57,6 +58,36 @@ class Visualizer:
     ) -> Any:
         """Interactive 1D encoder scatter (jitter x, encoded y), colored by label, with hover. For Jupyter."""
         return _plot_encoder_scatter(trainer=self._trainer, encoder_df=encoder_df, **kwargs)
+
+    def plot_probability_shifts(
+        self,
+        decoder_results: Optional[Dict[str, Any]] = None,
+        class_ids: Optional[List[str]] = None,
+        use_cache: Optional[bool] = None,
+        **kwargs: Any,
+    ) -> str:
+        """
+        Plot decoder probability shifts vs learning rate.
+        
+        Automatically calls analyze_decoder_for_plotting if needed to extend decoder results
+        with probabilities for all classes on all datasets.
+        """
+        if decoder_results is None:
+            decoder_results = self.trainer.evaluate_decoder(use_cache=use_cache)
+        
+        plotting_data = self.trainer.analyze_decoder_for_plotting(
+            decoder_results=decoder_results,
+            class_ids=class_ids,
+            use_cache=use_cache,
+        )
+        
+        return _plot_probability_shifts(
+            trainer=self.trainer,
+            decoder_results=decoder_results,
+            plotting_data=plotting_data,
+            class_ids=class_ids,
+            **kwargs
+        )
 
     @staticmethod
     def compute_topk_sets(models: Dict[str, Any], topk: int = 100, part: str = "decoder-weight"):

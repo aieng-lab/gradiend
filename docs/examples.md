@@ -13,4 +13,4 @@ These examples are intended as inspiration for data handling and workflow variat
 ## Data creation
 
 - [data_creator_demo.py](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/data_creator_demo.py) — Build training and neutral data with `TextPredictionDataCreator`.
-- [pronoun_workflow.py](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/pronoun_workflow.py) — Pronoun-focused data creation and training.
+- [english_pronoun_singular_plural.py](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/english_pronoun_singular_plural.py) — English pronouns (3SG vs 3PL); optional class_merge_map for number/person.

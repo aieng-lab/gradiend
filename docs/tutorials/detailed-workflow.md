@@ -102,7 +102,7 @@ trainer.train()
 trainer.plot_training_convergence()
 enc_eval = trainer.evaluate_encoder(max_size=100, return_df=True, plot=True)
 dec_results = trainer.evaluate_decoder()
-changed_model = trainer.select_changed_model(decoder_results=dec_results, metric_key="masc_nom")
+changed_model = trainer.rewrite_base_model(decoder_results=dec_results, metric_key="masc_nom")
 ```
 
 For **why** each option matters and what to change when, follow the part tutorials: [Data generation](data-generation.md) → [Training](training.md) → [Evaluation (intra-model)](evaluation-intra-model.md) and [Evaluation (inter-model)](evaluation-inter-model.md).

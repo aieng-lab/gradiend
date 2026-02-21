@@ -113,7 +113,7 @@ class TestTextPredictionDataCreator:
             ],
             seed=42,
         )
-        training = creator.generate_training_data(format="per_class")
+        training = creator.generate_training_data(format="per_class", min_rows_per_class_for_split=0)
         assert "der" in training
         assert "die" in training
         assert len(training["der"]) == 1
@@ -129,7 +129,7 @@ class TestTextPredictionDataCreator:
                 TextFilterConfig(targets=["die"]),
             ],
         )
-        df = creator.generate_training_data(format="minimal")
+        df = creator.generate_training_data(format="minimal", min_rows_per_class_for_split=0)
         assert "masked" in df.columns
         assert "label" in df.columns
         assert "label_class" in df.columns

@@ -221,8 +221,7 @@ class Trainer(FeatureLearningDefinition):
         post_prune(): Run post-pruning after training.
         plot_encoder_distributions(): Plot encoder distribution visualizations.
         plot_training_convergence(): Plot training convergence metrics.
-        select_changed_model(): Return modified model(s) in memory from decoder evaluation.
-        select_and_save_changed_model(): Save modified models based on decoder evaluation.
+        rewrite_base_model(): Rewrite base model(s) using decoder evaluation results, optionally save to disk.
     
     **See Also:**
         - `FeatureLearningDefinition`: Abstract base class providing data creation and evaluation protocols
@@ -1096,6 +1095,8 @@ class Trainer(FeatureLearningDefinition):
 
     def evaluate_decoder(
             self,
+            lrs: Optional[Sequence[float]] = None,
+            feature_factors: Optional[Sequence[float]] = None,
             use_cache: Optional[bool] = None,
             max_size_training_like: Optional[int] = None,
             max_size_neutral: Optional[int] = None,
@@ -1107,6 +1108,7 @@ class Trainer(FeatureLearningDefinition):
             summary_metrics: Optional[Sequence[str]] = None,
     ) -> Dict[str, Any]:
         """Delegate to evaluator.evaluate_decoder. When use_cache=True and experiment_dir is set, uses cached grid results.
+        Override lrs/feature_factors via arguments or decoder_eval_lrs/decoder_eval_feature_factors in TrainingArguments.
         Pass selector (SelectionPolicy), summary_extractor (to add custom metrics to candidates), and summary_metrics (e.g. ["bpi", "fpi", "mpi"]) for custom decoder summary behavior."""
         use_cache = self._default_from_training_args(use_cache, "use_cache", fallback=False)
         max_size_training_like = self._default_from_training_args(
@@ -1115,7 +1117,11 @@ class Trainer(FeatureLearningDefinition):
         max_size_neutral = self._default_from_training_args(
             max_size_neutral, "decoder_eval_max_size_neutral"
         )
+        lrs = self._default_from_training_args(lrs, "decoder_eval_lrs")
+        feature_factors = self._default_from_training_args(feature_factors, "decoder_eval_feature_factors")
         return self.evaluator.evaluate_decoder(
+            lrs=lrs,
+            feature_factors=feature_factors,
             use_cache=use_cache,
             max_size_training_like=max_size_training_like,
             max_size_neutral=max_size_neutral,
@@ -1243,113 +1249,7 @@ class Trainer(FeatureLearningDefinition):
         path = model_path if model_path is not None else self.model_path
         return super().get_encoder_metrics(path, **kwargs)
 
-    def select_changed_model(
-        self,
-        decoder_results: Optional[Dict[str, Any]] = None,
-        metric_key: Optional[Union[str, List[str]]] = None,
-        base_model: Optional[Any] = None,
-        decoder_stats_metric_name: Optional[str] = None,
-        **decoder_stats_kwargs: Any,
-    ) -> Union[Any, List[Any]]:
-        """
-        Select best decoder configuration from decoder evaluation results and return changed model(s) in memory.
-
-        Does not save to disk. Use select_and_save_changed_model() to also persist.
-
-        When called on a Trainer, the trained model is used automatically (base_model not needed).
-        When experiment_dir is set, decoder_results can be omitted and will be loaded from cache
-        (requires evaluate_decoder to have been run with use_cache=True so the decoder stats cache exists).
-
-        Args:
-            decoder_results: Output from evaluate_decoder. Optional when
-                experiment_dir is set (then loaded from cache).
-            metric_key: Metric name(s) present in decoder_results (e.g. "combined_score",
-                or per-class key like "white"). Pass a list to get one changed model per key.
-            base_model: ModelWithGradiend to modify; if None, uses current trainer model.
-            decoder_stats_metric_name: When loading decoder_results from cache, metric_name
-                used to locate the cache file. Defaults to first metric_key or "combined_score".
-            **decoder_stats_kwargs: Used to locate the cache file (feature_factors, lrs, etc.).
-
-        Returns:
-            Modified model when metric_key is a single string; list of models when metric_key is a list.
-        """
-        if base_model is None:
-            base_model = self.get_model()
-        if base_model is None:
-            raise ValueError(
-                "Base model is required to select changed model. "
-                "Provide a ModelWithGradiend instance or ensure the trainer has a valid model path."
-            )
-
-        if decoder_results is None:
-            experiment_dir = self.experiment_dir
-            if not experiment_dir:
-                raise ValueError(
-                    "decoder_results is required when experiment_dir is not set. "
-                    "Run evaluate_decoder() first or set experiment_dir on TrainingArguments."
-                )
-            load_metric = (
-                decoder_stats_metric_name
-                or (metric_key[0] if isinstance(metric_key, list) and metric_key else metric_key)
-                or "combined_score"
-            )
-            stats_file = resolve_decoder_stats_path(
-                experiment_dir,
-                metric_name=load_metric,
-                feature_factors=decoder_stats_kwargs.get("feature_factors"),
-                lrs=decoder_stats_kwargs.get("lrs"),
-                topk=decoder_stats_kwargs.get("topk"),
-                part=decoder_stats_kwargs.get("part"),
-                topk_part=decoder_stats_kwargs.get("topk_part"),
-            )
-            if stats_file and os.path.isfile(stats_file):
-                try:
-                    decoder_results = read_decoder_stats_file(stats_file)
-                except Exception as e:
-                    raise ValueError(
-                        f"Failed to load decoder results from cache at {stats_file}: {e}. "
-                        "Run evaluate_decoder() first or provide decoder_results explicitly."
-                    )
-            else:
-                raise ValueError(
-                    f"No decoder results cache found at {stats_file}. "
-                    "Run evaluate_decoder() first or provide decoder_results explicitly."
-                )
-
-        summary_source = decoder_results.get("summary", decoder_results)
-        keys_to_save: List[str] = (
-            [metric_key] if isinstance(metric_key, str) else (metric_key or [])
-        )
-        if not keys_to_save:
-            raise ValueError(
-                "metric_key must be a non-empty string or list of strings present in decoder results. "
-                f"Available keys: {list(summary_source.keys())}"
-            )
-
-        changed_models: List[Any] = []
-        for key in keys_to_save:
-            summary = summary_source.get(key)
-            if summary is None:
-                prefixed = f"prob::{key}"
-                summary = summary_source.get(prefixed)
-                if summary is not None:
-                    key = prefixed
-            if not summary or "feature_factor" not in summary or "learning_rate" not in summary:
-                raise ValueError(
-                    f"Decoder results do not contain summary for metric '{key}'. "
-                    f"Available keys: {list(summary_source.keys())}"
-                )
-            feature_factor = summary["feature_factor"]
-            lr = summary["learning_rate"]
-            changed = base_model.modify_model(
-                learning_rate=lr,
-                feature_factor=feature_factor,
-            )
-            changed_models.append(changed)
-
-        return changed_models[0] if len(changed_models) == 1 else changed_models
-
-    def select_and_save_changed_model(
+    def rewrite_base_model(
         self,
         decoder_results: Optional[Dict[str, Any]] = None,
         metric_key: Optional[Union[str, List[str]]] = None,
@@ -1357,12 +1257,13 @@ class Trainer(FeatureLearningDefinition):
         base_model: Optional[Any] = None,
         decoder_stats_metric_name: Optional[str] = None,
         **decoder_stats_kwargs: Any,
-    ) -> Union[str, List[str]]:
+    ) -> Union[Any, List[Any], str, List[str]]:
         """
-        Select best decoder configuration from decoder evaluation results and save changed model(s).
+        Rewrite the base model by applying GRADIEND decoder updates based on decoder evaluation results.
 
-        Calls select_changed_model() then saves to disk. Requires experiment_dir on TrainingArguments
-        or output_dir (for a single metric_key) so that a save path is available.
+        Accepts/loads internally the cached decoder results and selects feature factor and learning rate
+        automatically (but also accepts manual parameters via decoder_results). Optionally saves the
+        rewritten model(s) to disk if output_dir is provided.
 
         When called on a Trainer, the trained model is used automatically (base_model not needed).
         When experiment_dir is set, decoder_results can be omitted and will be loaded from cache
@@ -1372,23 +1273,27 @@ class Trainer(FeatureLearningDefinition):
             decoder_results: Output from evaluate_decoder. Optional when
                 experiment_dir is set (then loaded from cache).
             metric_key: Metric name(s) present in decoder_results (e.g. "combined_score",
-                or per-class key like "white"). Pass a list to save one changed model per key.
-            output_dir: Directory where the changed model should be saved (single key), or
-                parent directory when multiple metric_keys. If None, resolved from experiment_dir.
-            base_model: ModelWithGradiend to modify; if None, uses current trainer model.
+                or per-class key like "white"). Pass a list to get one rewritten model per key.
+            output_dir: Optional directory where the rewritten model(s) should be saved.
+                If provided, models are saved to disk. If None, models are returned in memory only.
+                For a single metric_key, this is the exact save directory. For multiple metric_keys,
+                experiment_dir must be set (output_dir is only used for a single metric_key).
+            base_model: ModelWithGradiend to rewrite; if None, uses current trainer model.
             decoder_stats_metric_name: When loading decoder_results from cache, metric_name
                 used to locate the cache file. Defaults to first metric_key or "combined_score".
             **decoder_stats_kwargs: Used to locate the cache file (feature_factors, lrs, etc.).
 
         Returns:
-            Path to the saved changed model directory, or list of paths when metric_key is a list.
+            If output_dir is None:
+                Rewritten model when metric_key is a single string; list of models when metric_key is a list.
+            If output_dir is provided:
+                Path to the saved rewritten model directory, or list of paths when metric_key is a list.
         """
-        # Resolve base model and decoder results to know keys_to_save (needed for save-path check)
         if base_model is None:
             base_model = self.get_model()
         if base_model is None:
             raise ValueError(
-                "Base model is required to select and save changed model. "
+                "Base model is required to rewrite base model. "
                 "Provide a ModelWithGradiend instance or ensure the trainer has a valid model path."
             )
 
@@ -1428,59 +1333,73 @@ class Trainer(FeatureLearningDefinition):
                 )
 
         summary_source = decoder_results.get("summary", decoder_results)
-        keys_to_save: List[str] = (
+        keys_to_process: List[str] = (
             [metric_key] if isinstance(metric_key, str) else (metric_key or [])
         )
-        if not keys_to_save:
+        if not keys_to_process:
             raise ValueError(
                 "metric_key must be a non-empty string or list of strings present in decoder results. "
                 f"Available keys: {list(summary_source.keys())}"
             )
 
-        # Require a save path: experiment_dir or output_dir (single key only)
-        has_experiment_dir = bool(self.experiment_dir and str(self.experiment_dir).strip())
-        has_output_dir = bool(output_dir is not None and str(output_dir).strip())
-        if not has_experiment_dir and not has_output_dir:
+        # When output_dir is passed but empty, user intended to save but gave no path
+        if output_dir is not None and not str(output_dir).strip():
             raise ValueError(
-                "Cannot save changed model: no output path. "
-                "Set experiment_dir on TrainingArguments or pass output_dir to select_and_save_changed_model."
-            )
-        if len(keys_to_save) > 1 and not has_experiment_dir:
-            raise ValueError(
-                "Cannot save multiple changed models without experiment_dir. "
-                "Set experiment_dir on TrainingArguments (output_dir is only used for a single metric_key)."
+                "Cannot save rewritten model: no output path. "
+                "Set experiment_dir on TrainingArguments or pass a non-empty output_dir to rewrite_base_model."
             )
 
-        changed_models = self.select_changed_model(
-            decoder_results=decoder_results,
-            metric_key=metric_key,
-            base_model=base_model,
-            decoder_stats_metric_name=decoder_stats_metric_name,
-            **decoder_stats_kwargs,
-        )
-        if not isinstance(changed_models, list):
-            changed_models = [changed_models]
+        # Check if we need to save
+        should_save = output_dir is not None and str(output_dir).strip()
+        if should_save:
+            has_experiment_dir = bool(self.experiment_dir and str(self.experiment_dir).strip())
+            has_output_dir = bool(output_dir is not None and str(output_dir).strip())
+            if not has_experiment_dir and not has_output_dir:
+                raise ValueError(
+                    "Cannot save rewritten model: no output path. "
+                    "Set experiment_dir on TrainingArguments or pass output_dir to rewrite_base_model."
+                )
+            if len(keys_to_process) > 1 and not has_experiment_dir:
+                raise ValueError(
+                    "Cannot save multiple rewritten models without experiment_dir. "
+                    "Set experiment_dir on TrainingArguments (output_dir is only used for a single metric_key)."
+                )
 
-        saved_paths: List[str] = []
-        for i, key in enumerate(keys_to_save):
+        rewritten_models: List[Any] = []
+        for key in keys_to_process:
             summary = summary_source.get(key)
-            if summary is None:
-                prefixed = f"prob::{key}"
-                summary = summary_source.get(prefixed)
-                if summary is not None:
-                    key = prefixed
+            if not summary or "feature_factor" not in summary or "learning_rate" not in summary:
+                raise ValueError(
+                    f"Decoder results do not contain summary for metric '{key}'. "
+                    f"Available keys: {list(summary_source.keys())}"
+                )
             feature_factor = summary["feature_factor"]
             lr = summary["learning_rate"]
-            explicit = output_dir if len(keys_to_save) == 1 else None
-            key_output_dir = require_output_path(
-                self.experiment_dir, explicit, ARTIFACT_MODEL_CHANGED, metric_key=key
+            rewritten = base_model.rewrite_base_model(
+                learning_rate=lr,
+                feature_factor=feature_factor,
             )
-            os.makedirs(key_output_dir, exist_ok=True)
-            changed_models[i].save_pretrained(key_output_dir)
-            logger.info(
-                f"Saved changed model to {key_output_dir} "
-                f"(feature_factor={feature_factor}, lr={lr}, metric={key})"
-            )
-            saved_paths.append(key_output_dir)
+            rewritten_models.append(rewritten)
 
-        return saved_paths[0] if len(saved_paths) == 1 else saved_paths
+        # Save if output_dir was provided
+        if should_save:
+            saved_paths: List[str] = []
+            for i, key in enumerate(keys_to_process):
+                summary = summary_source.get(key)
+                feature_factor = summary["feature_factor"]
+                lr = summary["learning_rate"]
+                explicit = output_dir if len(keys_to_process) == 1 else None
+                key_output_dir = require_output_path(
+                    self.experiment_dir, explicit, ARTIFACT_MODEL_CHANGED, metric_key=key
+                )
+                os.makedirs(key_output_dir, exist_ok=True)
+                rewritten_models[i].save_pretrained(key_output_dir)
+                logger.info(
+                    f"Saved rewritten model to {key_output_dir} "
+                    f"(feature_factor={feature_factor}, lr={lr}, metric={key})"
+                )
+                saved_paths.append(key_output_dir)
+            return saved_paths[0] if len(saved_paths) == 1 else saved_paths
+
+        # Return models in memory
+        return rewritten_models[0] if len(rewritten_models) == 1 else rewritten_models

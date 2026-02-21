@@ -8,13 +8,13 @@
 Run the test suite in `tests/` (excludes slow and integration tests by default in CI):
 
 ```bash
-pytest tests/ -v --tb=short
+python -m pytest tests/ -v --tb=long
 ```
 
 Exclude slow/integration tests explicitly:
 
 ```bash
-pytest tests/ -v -m "not slow and not integration"
+python -m pytest tests/ -v -m "not slow and not integration"
 ```
 
 Run a single test file or test:

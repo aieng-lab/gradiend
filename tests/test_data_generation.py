@@ -42,7 +42,9 @@ class TestCreatorOutputFormats:
             ],
             seed=42,
         )
-        result = creator.generate_training_data(max_size_per_class=10, format="unified")
+        result = creator.generate_training_data(
+            max_size_per_class=10, format="unified", min_rows_per_class_for_split=0
+        )
         assert "label_class" in result.columns
         assert "label" in result.columns
         assert "masked" in result.columns
@@ -85,7 +87,26 @@ class TestCreatorOutputFormats:
                 train_ratio=0.5,
                 val_ratio=0.2,
                 test_ratio=0.2,
+                min_rows_per_class_for_split=0,
             )
+
+    def test_generate_training_data_raises_when_too_few_rows_for_split(self):
+        """Splitting fewer than 10 rows per class raises ValueError."""
+        creator = TextPredictionDataCreator(
+            base_data=["He walks.", "She runs.", "They play."],
+            feature_targets=[
+                TextFilterConfig(id="3SG", targets=["he", "she"]),
+                TextFilterConfig(id="3PL", targets=["they"]),
+            ],
+            seed=42,
+        )
+        with pytest.raises(ValueError, match="at least 10 rows per class"):
+            creator.generate_training_data(max_size_per_class=5, format="unified")
+        # With min_rows_per_class_for_split=0, should succeed
+        result = creator.generate_training_data(
+            max_size_per_class=5, format="unified", min_rows_per_class_for_split=0
+        )
+        assert len(result) > 0
 
 
 class TestCreatorOutputDirAndSave:
@@ -104,7 +125,9 @@ class TestCreatorOutputDirAndSave:
                 output_format="csv",
                 seed=42,
             )
-            creator.generate_training_data(max_size_per_class=5, format="unified")
+            creator.generate_training_data(
+                max_size_per_class=5, format="unified", min_rows_per_class_for_split=0
+            )
             training_csv = base / "training.csv"
             assert training_csv.is_file()
             df = pd.read_csv(training_csv)

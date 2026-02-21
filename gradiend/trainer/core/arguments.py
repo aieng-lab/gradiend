@@ -98,6 +98,12 @@ class TrainingArguments:
     decoder_eval_max_size_neutral: Optional[int] = None
     """Max samples for decoder neutral evaluation data (also LMS text cap). None = use default behavior."""
 
+    decoder_eval_lrs: Optional[List[float]] = None
+    """Learning rates for decoder grid search. None = DecoderEvaluator defaults ([1e-2, 1e-3, 1e-4, 1e-5])."""
+
+    decoder_eval_feature_factors: Optional[List[float]] = None
+    """Feature factors for decoder grid search. None = derive from trainer target classes."""
+
     eval_batch_size: int = 32
     """Batch size for evaluation."""
 

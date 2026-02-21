@@ -53,17 +53,9 @@ conda activate "${ENV_NAME}"
 echo "Upgrading pip..."
 pip install --upgrade pip setuptools wheel
 
-# Install core dependencies from requirements.txt
-echo "Installing core dependencies from requirements.txt..."
-pip install -r "${PROJECT_ROOT}/requirements.txt"
-
-# Install development dependencies
-echo "Installing development dependencies from requirements-dev.txt..."
+# Install gradiend with recommended + dev extras (source: pyproject.toml)
+echo "Installing gradiend with recommended and dev extras..."
 pip install -r "${PROJECT_ROOT}/requirements-dev.txt"
-
-# Install package in editable mode
-echo "Installing GRADIEND package in editable mode..."
-pip install -e "${PROJECT_ROOT}"
 
 echo ""
 echo "============================================================"

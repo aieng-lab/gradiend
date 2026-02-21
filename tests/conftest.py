@@ -34,7 +34,6 @@ class SimpleMockModel(nn.Module):
             'hidden_size': hidden_size,
             'num_hidden_layers': num_layers,
         })()
-        
         self.embeddings = nn.Embedding(vocab_size, hidden_size)
         self.encoder = nn.ModuleList([
             nn.Sequential(
@@ -45,10 +44,14 @@ class SimpleMockModel(nn.Module):
         ])
         self.classifier = nn.Linear(hidden_size, vocab_size)
         self.cls = type('Cls', (), {'predictions': self.classifier})()
-        
-        # Initialize parameters with the specified dtype
         self.to(dtype=dtype)
-    
+
+    @property
+    def device(self):
+        """Device of the first parameter (required by rewrite_base_model)."""
+        params = list(self.parameters())
+        return params[0].device if params else torch.device("cpu")
+
     @property
     def dtype(self):
         """Return the dtype of the first parameter (PyTorch convention)."""

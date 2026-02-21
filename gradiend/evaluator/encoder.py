@@ -186,7 +186,7 @@ class EncoderEvaluator:
 
         if encoder_df is not None:
             if encoder_df.empty:
-                return {}
+                return {"n_samples": 0, "correlation": None}
             result = get_encoder_metrics_from_dataframe(encoder_df)
         else:
             if eval_data is None:
@@ -209,7 +209,7 @@ class EncoderEvaluator:
                 pass
             training_rows = encode_dataset_to_rows(model_with_gradiend, eval_data)
             if not training_rows:
-                return {}
+                return {"n_samples": 0, "correlation": None}
             df = _rows_to_encoder_df(training_rows)
             result = get_encoder_metrics_from_dataframe(df)
 

@@ -71,7 +71,7 @@ def main():
         print("Install with:")
         print(f"  pip install {' '.join(missing_deps)}")
         print("  or")
-        print("  pip install -r requirements.txt")
+        print("  pip install -r requirements-dev.txt")
         return 1
     
     print()

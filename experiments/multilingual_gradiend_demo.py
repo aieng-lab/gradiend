@@ -7,6 +7,7 @@ Derived from gender_de_detailed.py. Trains GRADIENDs for:
 - Race (3 GRADIENDs: white-black, white-asian, black-asian)
 - Religion (3 GRADIENDs: christian-muslim, christian-jewish, muslim-jewish)
 - English pronouns (10 GRADIENDs: all pairs from 1SG, 1PL, 2, 3SG, 3PL)
+- English pronoun merged groups (4 GRADIENDs: Number SG vs PL; Person 1st↔2nd, 2nd↔3rd, 1st↔3rd)
 
 Uses a single multilingual model (EuroBERT-210m) and the same TrainingArguments
 as gender_de_detailed. At the end, plots one large top-k overlap heatmap over
@@ -108,7 +109,7 @@ religion_configs = [
     ("religion", ("muslim", "jewish"), ["christian"]),
 ]
 
-# Pronoun pairs (from pronoun_workflow / data_creation_pronouns: 1SG, 1PL, 2, 3SG, 3PL)
+# Pronoun pairs (from english_pronoun_singular_plural / data_creation_pronouns: 1SG, 1PL, 2, 3SG, 3PL)
 # Data assumed at data/english_pronouns/ (training.csv, neutral.csv)
 PRONOUN_DATA_DIR = "data/english_pronouns"
 PRONOUN_CLASSES = ["1SG", "1PL", "2", "3SG", "3PL"]
@@ -116,6 +117,14 @@ pronoun_pairs = [
     (PRONOUN_CLASSES[i], PRONOUN_CLASSES[j])
     for i in range(len(PRONOUN_CLASSES))
     for j in range(i + 1, len(PRONOUN_CLASSES))
+]
+
+# Merged pronoun groups (class_merge_map): English Number (SG vs PL), English Person (1st vs 2nd, 2nd vs 3rd, 1st vs 3rd)
+pronoun_merged_configs = [
+    ("pronoun_number_singular_plural", {"singular": ["1SG", "3SG"], "plural": ["1PL", "3PL"]}, "English Number"),
+    ("pronoun_person_1st_2nd", {"1st": ["1SG", "1PL"], "2nd": ["2"]}, "English Person 1st↔2nd"),
+    ("pronoun_person_2nd_3rd", {"2nd": ["2"], "3rd": ["3SG", "3PL"]}, "English Person 2nd↔3rd"),
+    ("pronoun_person_1st_3rd", {"1st": ["1SG", "1PL"], "3rd": ["3SG", "3PL"]}, "English Person 1st↔3rd"),
 ]
 
 models_for_heatmap = {}
@@ -209,21 +218,55 @@ def train_pronoun():
         models_for_heatmap[trainer.run_id] = trainer.get_model()
 
 
+def train_pronoun_merged():
+    """Train merged pronoun GRADIENDs (English Number: SG vs PL; English Person: 1st vs 2nd, 2nd vs 3rd, 1st vs 3rd)."""
+    base = Path(PRONOUN_DATA_DIR)
+    training_path = base / "training.csv"
+    neutral_path = base / "neutral.csv"
+    if not training_path.is_file() or not neutral_path.is_file():
+        raise FileNotFoundError(
+            f"Pronoun data not found at {PRONOUN_DATA_DIR}. "
+            "Run gradiend.examples.data_creation_pronouns to generate training.csv and neutral.csv."
+        )
+    for run_id_prefix, class_merge_map, label in pronoun_merged_configs:
+        merged_keys = list(class_merge_map.keys())
+        trainer = TextPredictionTrainer(
+            model=model_name,
+            run_id=run_id_prefix,
+            data=str(training_path),
+            class_merge_map=class_merge_map,
+            masked_col="masked",
+            split_col="split",
+            eval_neutral_data=str(neutral_path),
+            args=args,
+        )
+        print(f"=== {label}: {merged_keys[0]} vs {merged_keys[1]} ===")
+        trainer.train()
+        stats = trainer.get_training_stats()
+        ts = stats.get("training_stats", {}) if stats else {}
+        print(f"  correlation={ts.get('correlation')}, mean_by_class={ts.get('mean_by_class')}")
+        trainer.cpu()
+        models_for_heatmap[trainer.run_id] = trainer.get_model()
+
+
 def main():
     os.makedirs(args.experiment_dir, exist_ok=True)
 
     train_pronoun()
+    train_pronoun_merged()
     train_race_religion()
     train_gender_en()
     train_gender_de()
 
     all_ids = list(models_for_heatmap.keys())
     gender_de_ids = sorted([m for m in all_ids if m.startswith("gender_de_")])
-    pronoun_ids = sorted([m for m in all_ids if m.startswith("pronoun_")])
+    pronoun_ids = sorted([m for m in all_ids if m.startswith("pronoun_") and not m.startswith("pronoun_number_") and not m.startswith("pronoun_person_")])
+    pronoun_number_ids = sorted([m for m in all_ids if m.startswith("pronoun_number_")])
+    pronoun_person_ids = sorted([m for m in all_ids if m.startswith("pronoun_person_")])
     race_ids = sorted([m for m in all_ids if m.startswith("race_")])
     religion_ids = sorted([m for m in all_ids if m.startswith("religion_")])
     gender_en_ids = [m for m in all_ids if m == "gender_en"]
-    ordered = gender_de_ids + gender_en_ids + pronoun_ids + race_ids + religion_ids
+    ordered = gender_de_ids + gender_en_ids + pronoun_ids + pronoun_number_ids + pronoun_person_ids + race_ids + religion_ids
 
     # Pretty labels: feature_class_id -> display name
     CASE_PRETTY = {
@@ -277,6 +320,14 @@ def main():
             if len(parts) >= 4:  # two case names (gender_case)
                 a, b = "_".join(parts[:2]), "_".join(parts[2:])
                 return f"{CASE_PRETTY.get(a, a)}$\longleftrightarrow${CASE_PRETTY.get(b, b)}"
+        if mid.startswith("pronoun_number_"):
+            return "SG$\longleftrightarrow$PL"
+        if mid.startswith("pronoun_person_"):
+            rest = mid.replace("pronoun_person_", "")
+            if "_" in rest:
+                c1, c2 = rest.split("_", 1)
+                return f"{c1}$\longleftrightarrow${c2}"
+            return rest
         if mid.startswith("pronoun_"):
             c1, c2 = mid.replace("pronoun_", "").split("_")
             return f"{c1}$\longleftrightarrow${c2}"
@@ -294,6 +345,8 @@ def main():
         **gender_de_transitions_to_ids,
         "English Gender": gender_en_ids,
         "English Pronouns": pronoun_ids,
+        "English Number": pronoun_number_ids,
+        "English Person": pronoun_person_ids,
         "Race": race_ids,
         "Religion": religion_ids,
     }

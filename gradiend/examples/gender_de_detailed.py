@@ -160,7 +160,7 @@ for transition, pairs in configs.items():
         dec_results = trainer.evaluate_decoder()
         print(f"  decoder summary: {list(dec_results['summary'])}")
 
-        #trainer.select_and_save_changed_model(decoder_results=dec_stats, metric_key=pair[0])
+        #trainer.rewrite_base_model(decoder_results=dec_stats, metric_key=pair[0], output_dir="./output")
         trainer.cpu()  # move model to CPU to free GPU for next config
         models_for_heatmap[trainer.run_id] = trainer.get_model()
         models_by_transition.setdefault(transition, {})[" - ".join(pair)] = trainer.get_model()

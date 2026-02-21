@@ -9,8 +9,8 @@ site_url: https://github.com/aieng-lab/gradiend
 theme:
   name: material
   language: en
-  logo: img/gradiend.svg
-  favicon: img/gradiend.svg
+  logo: img/gradiend-bw.svg
+  favicon: img/gradiend-bw.svg
   features:
     - content.code.copy
     - content.code.annotate   # Hover/click markers in code blocks show rich content (links, tips)

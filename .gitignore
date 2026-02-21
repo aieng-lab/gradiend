@@ -19,7 +19,6 @@ gradiend/trainer/decoder_only_mlm/decoder_mlm_model/
 test_bench/results/
 
 # Setup script
-setup_and_run_test_bench.sh
 gradiend/trainer/__pycache__/
 
 *.pyc

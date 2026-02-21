@@ -10,6 +10,7 @@ import json
 import random
 import numpy as np
 import pandas as pd
+import torch
 from dataclasses import dataclass
 from dataclasses import fields as dc_fields
 from typing import Dict, List, Optional, Union, Any, Tuple, Type
@@ -132,7 +133,7 @@ class TextPredictionConfig:
 
     decoder_eval_prob_on_other_class: bool = True
     # If True, each target's probability is evaluated on the other class's data only (e.g. P(target1) on target2 rows).
-    # Requires eval data to have alternative_id (or data_class_col). Set False for legacy "all rows" behavior.
+    # Requires eval data to have alternative_id (or data_class_col).
 
     decoder_eval_ignore_tokens: Optional[List[str]] = None
     # Tokens to ignore in LMS evaluation
@@ -140,6 +141,11 @@ class TextPredictionConfig:
 
     decoder_eval_lms_max_samples: Optional[int] = None
     # Max number of texts used for LMS in decoder evaluation. None = use all.
+
+    # Class merging: map base classes to higher-level classes (e.g. {"singular": ["1SG", "3SG"], "plural": ["1PL", "3PL"]})
+    class_merge_map: Optional[Dict[str, List[str]]] = None
+    # When set, target_classes and pair use merged names (keys). Values list base classes to merge.
+    # Base classes not in any value remain as neutral. When exactly 2 keys, target_classes can be omitted.
 
     # Neutral evaluation data
     eval_neutral_data: Optional[Union[pd.DataFrame, str, Path]] = None
@@ -252,6 +258,7 @@ class TextPredictionTrainer(Trainer):
             eval_neutral_data: Optional[Union[pd.DataFrame, str, Path]] = None,
             eval_neutral_max_rows: Optional[int] = None,
             img_format: Optional[str] = None,
+            class_merge_map: Optional[Dict[str, List[str]]] = None,
     ):
         """
         Initialize TextPredictionTrainer (Trainer with model at creation time).
@@ -333,6 +340,7 @@ class TextPredictionTrainer(Trainer):
                 "eval_neutral_data": eval_neutral_data,
                 "eval_neutral_max_rows": eval_neutral_max_rows,
                 "img_format": img_format,
+                "class_merge_map": class_merge_map,
             }
             cfg_kwargs = {k: v for k, v in cfg_kwargs.items() if v is not None}
             if target_classes is not None:
@@ -342,6 +350,9 @@ class TextPredictionTrainer(Trainer):
         if target_classes:
             config.target_classes = list(target_classes) if isinstance(target_classes, tuple) else target_classes
         elif config.target_classes:
+            target_classes = config.target_classes
+        elif config.class_merge_map and len(config.class_merge_map) == 2:
+            config.target_classes = list(config.class_merge_map.keys())
             target_classes = config.target_classes
 
         self.config: TextPredictionConfig = config
@@ -367,6 +378,7 @@ class TextPredictionTrainer(Trainer):
         self.data = None
         self.class_datasets = None
         self._combined_data: Optional[pd.DataFrame] = None
+        self._effective_combined_data: Optional[pd.DataFrame] = None
         self._data_loaded = False
 
     def _set_all_classes(self, classes: Optional[List[str]]) -> None:
@@ -428,7 +440,8 @@ class TextPredictionTrainer(Trainer):
                 self._set_all_classes(config.all_classes)
             else:
                 self._set_all_classes(sorted(inferred_classes))
-            pair = (tuple(config.target_classes) if config.target_classes and len(config.target_classes) == 2 else None)
+            merge_map = getattr(config, "class_merge_map", None)
+            pair = None if merge_map else (tuple(config.target_classes) if config.target_classes and len(config.target_classes) == 2 else None)
             unified = per_class_dict_to_unified(
                 class_dfs,
                 classes=inferred_classes,
@@ -451,7 +464,8 @@ class TextPredictionTrainer(Trainer):
                     self._target_classes = classes_for_transitions
                 self.data = config.data
                 self.class_datasets = config.data
-                pair = (tuple(config.target_classes) if config.target_classes and len(config.target_classes) == 2 else tuple(self._target_classes) if self._target_classes and len(self._target_classes) == 2 else None)
+                merge_map = getattr(config, "class_merge_map", None)
+                pair = None if merge_map else (tuple(config.target_classes) if config.target_classes and len(config.target_classes) == 2 else tuple(self._target_classes) if self._target_classes and len(self._target_classes) == 2 else None)
                 unified = per_class_dict_to_unified(
                     config.data,
                     classes=classes_for_transitions,
@@ -501,6 +515,16 @@ class TextPredictionTrainer(Trainer):
                     self._set_all_classes(sorted(set(src) | set(tgt)))
         self._check_data_non_empty()
         self._data_loaded = True
+
+        merge_map = getattr(config, "class_merge_map", None)
+        if merge_map and self._combined_data is not None:
+            self._effective_combined_data = self._apply_class_merge(self._combined_data, merge_map)
+            effective_src = self._effective_combined_data[UNIFIED_FACTUAL_CLASS].unique().tolist()
+            effective_tgt = self._effective_combined_data[UNIFIED_ALTERNATIVE_CLASS].unique().tolist()
+            self._set_all_classes(sorted(set(effective_src) | set(effective_tgt)))
+        else:
+            self._effective_combined_data = None
+
         if self._all_classes is None and self._combined_data is not None:
             src = self._combined_data[UNIFIED_FACTUAL_CLASS].unique().tolist()
             tgt = self._combined_data[UNIFIED_ALTERNATIVE_CLASS].unique().tolist()
@@ -516,11 +540,34 @@ class TextPredictionTrainer(Trainer):
             except Exception as e:
                 logger.warning(f"Could not auto-infer decoder_eval_targets: {e}")
 
+    def _apply_class_merge(self, df: pd.DataFrame, merge_map: Dict[str, List[str]]) -> pd.DataFrame:
+        """Apply class_merge_map: map base factual_class/alternative_class to merged names."""
+        base_to_merged: Dict[str, str] = {}
+        for merged, bases in merge_map.items():
+            for b in bases:
+                if b in base_to_merged:
+                    raise ValueError(
+                        f"class_merge_map: base class {b!r} appears in multiple merged classes."
+                    )
+                base_to_merged[b] = merged
+        out = df.copy()
+        out[UNIFIED_FACTUAL_CLASS] = out[UNIFIED_FACTUAL_CLASS].astype(str).map(
+            lambda x: base_to_merged.get(x, x)
+        )
+        out[UNIFIED_ALTERNATIVE_CLASS] = out[UNIFIED_ALTERNATIVE_CLASS].astype(str).map(
+            lambda x: base_to_merged.get(x, x)
+        )
+        out[UNIFIED_TRANSITION] = out.apply(
+            lambda r: transition_id(str(r[UNIFIED_FACTUAL_CLASS]), str(r[UNIFIED_ALTERNATIVE_CLASS])),
+            axis=1,
+        )
+        return out
+
     @property
     def combined_data(self) -> Optional[pd.DataFrame]:
-        """Unified training data (lazy-loaded on first access)."""
+        """Unified training data (lazy-loaded on first access). When class_merge_map is set, returns merged view."""
         self._ensure_data()
-        return self._combined_data
+        return self._effective_combined_data if self._effective_combined_data is not None else self._combined_data
 
     def plot_training_convergence(self, **kwargs: Any) -> Any:
         if "img_format" not in kwargs:
@@ -531,6 +578,23 @@ class TextPredictionTrainer(Trainer):
         if "img_format" not in kwargs:
             kwargs["img_format"] = getattr(self.config, "img_format", "pdf")
         return super().plot_encoder_distributions(**kwargs)
+
+    def plot_probability_shifts(
+        self,
+        decoder_results: Optional[Dict[str, Any]] = None,
+        class_ids: Optional[List[str]] = None,
+        use_cache: Optional[bool] = None,
+        **kwargs: Any
+    ) -> str:
+        """Plot decoder evaluation probability shifts vs learning rate."""
+        if "img_format" not in kwargs:
+            kwargs["img_format"] = getattr(self.config, "img_format", "pdf")
+        return self.visualizer.plot_probability_shifts(
+            decoder_results=decoder_results,
+            class_ids=class_ids,
+            use_cache=use_cache,
+            **kwargs
+        )
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -1003,18 +1067,72 @@ class TextPredictionTrainer(Trainer):
                 )
 
         # Compute feature score (target token probabilities)
+        # Determine dataset class column for grouping by dataset
+        dataset_class_col = None
+        if "label_class" in training_like_df.columns:
+            dataset_class_col = "label_class"
+        elif "factual_id" in training_like_df.columns:
+            dataset_class_col = "factual_id"
+        
+        # Determine if we need counterfactual filtering (for backward compatibility with selection logic)
         data_class_col = None
         if getattr(self.config, "decoder_eval_prob_on_other_class", True):
             if "alternative_id" in training_like_df.columns:
                 data_class_col = "alternative_id"
-        feature_score = evaluate_probability_shift_score(
+        
+        # Compute probabilities for all classes on all datasets
+        probability_results = evaluate_probability_shift_score(
             model,
             tokenizer,
             targets=targets,
             eval_data_df=training_like_df,
             key_text=self.config.masked_col,
-            data_class_col=data_class_col,
+            data_class_col=data_class_col,  # For backward compatibility: filters to counterfactual if provided
+            dataset_class_col=dataset_class_col,  # For new structure: groups by dataset class
         )
+
+        # Extract probs_by_dataset and probs (for backward compatibility)
+        # Check if probability_results is new structure (nested dict) or old structure (flat dict)
+        is_new_structure = (
+            isinstance(probability_results, dict) 
+            and probability_results 
+            and isinstance(next(iter(probability_results.values())), dict)
+        )
+        
+        if is_new_structure:
+            # New structure: {dataset_class: {class_name: prob, ...}, ...}
+            probs_by_dataset = probability_results
+            
+            # For backward compatibility with selection logic, extract counterfactual probs if data_class_col was used
+            if data_class_col and dataset_class_col:
+                # Extract counterfactual probabilities: P(class_name) evaluated on OTHER class's dataset
+                counterfactual_probs = {}
+                for row in training_like_df.to_dict("records"):
+                    alternative_class = row.get(data_class_col)  # e.g., "3PL"
+                    dataset_class = row.get(dataset_class_col)   # e.g., "3SG"
+                    if alternative_class is not None and dataset_class is not None:
+                        for class_name in targets.keys():
+                            if alternative_class != class_name:
+                                # Get probability of class_name evaluated on dataset_class
+                                if dataset_class in probs_by_dataset:
+                                    if class_name in probs_by_dataset[dataset_class]:
+                                        if class_name not in counterfactual_probs:
+                                            counterfactual_probs[class_name] = []
+                                        counterfactual_probs[class_name].append(probs_by_dataset[dataset_class][class_name])
+                
+                # Average counterfactual probabilities
+                if counterfactual_probs:
+                    probs = {g: float(np.mean(v)) for g, v in counterfactual_probs.items() if v}
+                else:
+                    # Fallback: use first dataset
+                    probs = next(iter(probs_by_dataset.values())) if probs_by_dataset else {}
+            else:
+                # No counterfactual filtering: use first dataset as fallback
+                probs = next(iter(probs_by_dataset.values())) if probs_by_dataset else {}
+        else:
+            # Old structure: {class_name: prob, ...} (backward compatibility with mocks/tests)
+            probs = probability_results
+            probs_by_dataset = None
 
         # Compute LMS
         ignore_tokens = self.config.decoder_eval_ignore_tokens
@@ -1041,11 +1159,14 @@ class TextPredictionTrainer(Trainer):
             batch_size=eval_batch_size,
         )
 
-        # Return in standard format
+        # Return in standard format with new structure
         result = {
-            'probs': feature_score,
+            'probs': probs,  # Backward compatibility: counterfactual probs for selection
             'lms': lms,
         }
+        # Add probs_by_dataset if available
+        if probs_by_dataset is not None:
+            result['probs_by_dataset'] = probs_by_dataset
 
         # Save cache
         if cache_file:
@@ -1054,6 +1175,144 @@ class TextPredictionTrainer(Trainer):
                 json.dump(result, f, indent=2)
 
         return result
+
+    def analyze_decoder_for_plotting(
+        self,
+        decoder_results: Optional[Dict[str, Any]] = None,
+        model_with_gradiend: Optional[Any] = None,
+        class_ids: Optional[List[str]] = None,
+        use_cache: Optional[bool] = None,
+        **kwargs: Any
+    ) -> Dict[str, Any]:
+        """
+        Analyze decoder for plotting: extends decoder results with probabilities for all classes
+        evaluated on all datasets.
+
+        Args:
+            decoder_results: Standard decoder evaluation results (with 'summary' and 'grid').
+                If None, calls evaluate_decoder() to get base results.
+            model_with_gradiend: ModelWithGradiend instance. If None, uses self.get_model().
+            class_ids: Classes to evaluate probabilities for. If None, uses all_classes if available,
+                else target_classes.
+            use_cache: Whether to use cached results when re-evaluating.
+
+        Returns:
+            Dict with 'plotting_data' (extended grid with probs_by_dataset) and 'summary' (from decoder_results).
+        """
+        if decoder_results is None:
+            decoder_results = self.evaluate_decoder(use_cache=use_cache, **kwargs)
+        
+        grid = decoder_results.get("grid", {})
+        summary = decoder_results.get("summary", {})
+        
+        # Determine classes to evaluate
+        if class_ids is None:
+            class_ids = self.all_classes if self.all_classes else self.target_classes
+        
+        if not class_ids:
+            raise ValueError("No classes specified for plotting analysis. Provide class_ids or ensure all_classes/target_classes are set.")
+        
+        # Get model and tokenizer
+        if model_with_gradiend is None:
+            model_with_gradiend = self.get_model()
+        
+        if model_with_gradiend is None:
+            raise ValueError("No model available. Provide model_with_gradiend or ensure model is loaded.")
+        
+        base_model = model_with_gradiend.base_model
+        tokenizer = model_with_gradiend.tokenizer
+        
+        # Get training_like_df for evaluation
+        training_like_df, neutral_df = self._get_decoder_eval_dataframe(
+            tokenizer,
+            cached_training_like_df=None,
+            cached_neutral_df=None,
+        )
+        
+        # Build extended targets dict for all classes
+        targets = self.config.decoder_eval_targets or self._infer_decoder_eval_targets()
+        extended_targets = {}
+        for cls in class_ids:
+            if cls in targets:
+                extended_targets[cls] = targets[cls]
+            else:
+                # Infer tokens for this class
+                # For now, try to infer from data - this is a placeholder
+                # TODO: implement _infer_tokens_for_class helper
+                logger.warning(f"Class {cls} not in decoder_eval_targets, skipping token inference for now")
+                continue
+        
+        if not extended_targets:
+            raise ValueError(f"Could not build targets for classes {class_ids}. Ensure decoder_eval_targets includes these classes.")
+        
+        # Extend grid entries with probs_by_dataset if missing
+        extended_grid = {}
+        for candidate_id, entry in grid.items():
+            extended_entry = dict(entry)  # Copy entry
+            
+            # Check if probs_by_dataset already exists
+            if "probs_by_dataset" not in extended_entry:
+                # Need to re-evaluate this candidate
+                if candidate_id == "base":
+                    # Evaluate base model
+                    base_result = self.evaluate_base_model(
+                        base_model,
+                        tokenizer,
+                        training_like_df=training_like_df,
+                        neutral_df=neutral_df,
+                        use_cache=use_cache,
+                    )
+                    if "probs_by_dataset" in base_result:
+                        extended_entry["probs_by_dataset"] = base_result["probs_by_dataset"]
+                    else:
+                        # Fallback: create probs_by_dataset from probs if available
+                        if "probs" in base_result:
+                            extended_entry["probs_by_dataset"] = {"default": base_result["probs"]}
+                else:
+                    # Extract feature_factor and lr from candidate_id
+                    if isinstance(candidate_id, tuple) and len(candidate_id) == 2:
+                        feature_factor, lr = candidate_id
+                    elif isinstance(candidate_id, dict):
+                        feature_factor = candidate_id.get("feature_factor")
+                        lr = candidate_id.get("learning_rate")
+                    else:
+                        logger.warning(f"Unknown candidate_id format: {candidate_id}, skipping")
+                        extended_grid[candidate_id] = extended_entry
+                        continue
+                    
+                    # Create modified model
+                    modified_model = model_with_gradiend.rewrite_base_model(
+                        learning_rate=lr,
+                        feature_factor=feature_factor,
+                        part=getattr(self.config, "decoder_eval_part", "decoder"),
+                    )
+                    
+                    # Evaluate modified model
+                    modified_result = self.evaluate_base_model(
+                        modified_model,
+                        tokenizer,
+                        training_like_df=training_like_df,
+                        neutral_df=neutral_df,
+                        use_cache=use_cache,
+                    )
+                    
+                    if "probs_by_dataset" in modified_result:
+                        extended_entry["probs_by_dataset"] = modified_result["probs_by_dataset"]
+                    else:
+                        # Fallback: create probs_by_dataset from probs if available
+                        if "probs" in modified_result:
+                            # Use probs as fallback (single dataset)
+                            extended_entry["probs_by_dataset"] = {"default": modified_result["probs"]}
+                    
+                    del modified_model
+                    torch.cuda.empty_cache()
+            
+            extended_grid[candidate_id] = extended_entry
+        
+        return {
+            "plotting_data": extended_grid,
+            "summary": summary,
+        }
 
     def _encode_training_rows(
             self,

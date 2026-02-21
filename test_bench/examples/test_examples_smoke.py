@@ -27,12 +27,17 @@ EXAMPLE_RUNS_DIR = PROJECT_ROOT / "runs" / "examples"
 
 # Example modules to run (under gradiend.examples)
 # start_workflow is the self-contained tutorial script used by docs/start.md
+# data_creation_pronouns must run before english_pronoun_singular_plural (creates data it needs)
 EXAMPLE_MODULES = [
     "gradiend.examples.start_workflow",
     "gradiend.examples.race_religion",
     "gradiend.examples.gender_en",
     "gradiend.examples.gender_de",
     "gradiend.examples.gender_de_decoder_only",
+    "gradiend.examples.data_creator_demo",
+    "gradiend.examples.data_creation_pronouns",
+    "gradiend.examples.english_pronoun_singular_plural",
+    "gradiend.examples.gender_de_detailed",
 ]
 
 

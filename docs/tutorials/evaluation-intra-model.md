@@ -113,9 +113,9 @@ The result is a grid of scores; the “best” configuration is the one that max
 
 The decoder results dict has one or more **metric keys**:  per-class keys (e.g. your `target_classes` ids like `"masc_nom"`, `"fem_nom"`). Each key has a recommended **feature_factor** and **learning_rate**.
 
-- **select_changed_model(decoder_results=..., metric_key="masc_nom")** builds the modified model **in memory** only: it takes the trainer’s trained model and applies the decoder with the best config for that key. It returns the modified model (e.g. a `BertForMaskedLM`) that you can use for inference or further evaluation. It does **not** save to disk.
+- **rewrite_base_model(decoder_results=..., metric_key="masc_nom")** rewrites the base model **in memory** only: it takes the trainer’s trained model and applies the decoder with the best config for that key. It returns the rewritten model (e.g. a `BertForMaskedLM`) that you can use for inference or further evaluation. By default, it does **not** save to disk.
 - **metric_key** can be a single string (one model) or a list of strings (one model per key). Use the class id when you want the model biased toward that class (e.g. `metric_key="masc_nom"` for “stronger masculine nominative”).
-- If you set **experiment_dir** and have already run **evaluate_decoder(use_cache=True)**, you can omit **decoder_results**: the trainer will load the cached decoder stats from disk when available (so you can call **select_changed_model(metric_key="masc_nom")** without keeping the large dict in memory). This requires **use_cache=True** when running **evaluate_decoder** so that the decoder results cache is populated.
+- If you set **experiment_dir** and have already run **evaluate_decoder(use_cache=True)**, you can omit **decoder_results**: the trainer will load the cached decoder stats from disk when available (so you can call **rewrite_base_model(metric_key="masc_nom")** without keeping the large dict in memory). This requires **use_cache=True** when running **evaluate_decoder** so that the decoder results cache is populated.
 
 
 
@@ -123,7 +123,7 @@ The decoder results dict has one or more **metric keys**:  per-class keys (e.g. 
 
 ### Saving the changed model to disk
 
-**select_and_save_changed_model(...)** does the same selection as **select_changed_model** but then **saves** the modified model to disk. You need a place to save: either **experiment_dir** in `TrainingArguments` (then the path is derived from the run and metric key) or **output_dir** for a single metric key.
+Pass **output_dir** to **rewrite_base_model(...)** to save the rewritten model(s) to disk. You need a place to save: either **experiment_dir** in `TrainingArguments` (then the path is derived from the run and metric key) or **output_dir** for a single metric key.
 
 ---
 
@@ -147,8 +147,8 @@ enc_eval = trainer.evaluate_encoder(max_size=100, return_df=True, plot=True)
 dec_results = trainer.evaluate_decoder()
 # Optional: dec_results = trainer.evaluate_decoder(use_cache=True) when re-running
 
-changed_model = trainer.select_changed_model(decoder_results=dec_results, metric_key="masc_nom")
-# Or save: trainer.select_and_save_changed_model(decoder_results=dec_results, metric_key="masc_nom")
+changed_model = trainer.rewrite_base_model(decoder_results=dec_results, metric_key="masc_nom")
+# Or save: trainer.rewrite_base_model(decoder_results=dec_results, metric_key="masc_nom", output_dir="./output")
 ```
 
 ---

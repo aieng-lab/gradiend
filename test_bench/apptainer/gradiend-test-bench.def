@@ -2,10 +2,10 @@ Bootstrap: docker
 From: continuumio/miniconda3:latest
 
 %files
-    # Copy environment files into container
-    ../../environment.yml /opt/gradiend/environment.yml
-    ../../requirements.txt /opt/gradiend/requirements.txt
-    ../../requirements-dev.txt /opt/gradiend/requirements-dev.txt
+    # Copy project for pip install (pyproject.toml is source of truth)
+    ../../pyproject.toml /opt/gradiend/pyproject.toml
+    ../../README.md /opt/gradiend/README.md
+    ../../gradiend /opt/gradiend/gradiend
 
 %environment
     export LC_ALL=C.UTF-8
@@ -34,9 +34,9 @@ From: continuumio/miniconda3:latest
         git \
         && rm -rf /var/lib/apt/lists/*
     
-    # Create conda environment (will be overridden by user's env in /scratch)
-    # This is just to have a base environment in the image
-    /opt/conda/bin/conda env create -f /opt/gradiend/environment.yml -n gradiend || true
+    # Create conda env with Python, install gradiend from pyproject.toml
+    /opt/conda/bin/conda create -n gradiend python=3.10 -y
+    /opt/conda/bin/conda run -n gradiend pip install --no-cache-dir -e "/opt/gradiend[recommended,dev]" || true
     
     # Clean up
     /opt/conda/bin/conda clean -afy

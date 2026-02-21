@@ -84,7 +84,9 @@ def main():
     )
 
     print("=== Training data (per_class) ===")
-    training = creator.generate_training_data(max_size_per_class=5, format="per_class")
+    training = creator.generate_training_data(
+        max_size_per_class=5, format="per_class", min_rows_per_class_for_split=0
+    )
     for class_id, df in training.items():
         print(f"\n  {class_id} ({len(df)} rows):")
         for _, row in df.head(3).iterrows():
@@ -94,7 +96,9 @@ def main():
             print(f"    ... and {len(df) - 3} more")
 
     print("\n=== Training data (minimal) ===")
-    minimal = creator.generate_training_data(format="minimal")
+    minimal = creator.generate_training_data(
+        format="minimal", min_rows_per_class_for_split=0
+    )
     print(minimal.head(20).to_string())
 
     print("\n=== Neutral data (target words + articles + DET/3rd-person PRON excluded) ===")

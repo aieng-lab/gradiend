@@ -168,7 +168,7 @@ def default_extract_candidates(results: Mapping[Any, Mapping[str, Any]]) -> Tupl
     Convert current `results` format to a list of Candidates.
 
     Metrics convention:
-      - group probs -> keys "prob::<class_name>" (stringified, no sanitizing)
+      - group probs -> keys "<class_name>" (stringified, no sanitizing)
       - any scalar numeric field at top-level of entry (excluding lms/probs) -> metric with same key
     """
     base_lms = float(results["base"]["lms"]["lms"]) if "base" in results else None
@@ -183,7 +183,7 @@ def default_extract_candidates(results: Mapping[Any, Mapping[str, Any]]) -> Tupl
 
         probs = entry.get("probs") or {}
         for cls, p in probs.items():
-            metrics[f"prob::{cls}"] = float(p)
+            metrics[str(cls)] = float(p)
 
         for k, v in entry.items():
             if k in ("probs", "lms"):
@@ -217,16 +217,7 @@ def compute_metric_summaries(
     available_metrics: set = set()
     for c in candidates:
         available_metrics.update(c.metrics.keys())
-    normalized_metrics: List[str] = []
-    for m in metrics:
-        if m in available_metrics:
-            normalized_metrics.append(m)
-            continue
-        prefixed = f"prob::{m}"
-        if prefixed in available_metrics:
-            normalized_metrics.append(prefixed)
-            continue
-        normalized_metrics.append(m)
+    normalized_metrics: List[str] = list(metrics)
 
     missing = [m for m in normalized_metrics if m not in available_metrics]
     if missing:
@@ -430,7 +421,7 @@ class DecoderEvaluator:
                 cached_neutral_df=neutral_df,
             )
 
-        _LARGE_DATASET = 500
+        _LARGE_DATASET = 10000
         if max_size_training_like is None and len(training_like_df) > _LARGE_DATASET:
             logger.warning(
                 "decoder eval: max_size_training_like is not set and training data has %d rows. "
@@ -466,7 +457,7 @@ class DecoderEvaluator:
             if id_key in relevant_results and use_cache:
                 continue
 
-            modified_model = model_with_gradiend.modify_model(
+            modified_model = model_with_gradiend.rewrite_base_model(
                 learning_rate=lr,
                 feature_factor=feature_factor,
                 part=part,

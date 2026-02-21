@@ -13,8 +13,10 @@ GRADIEND works by:
 
 The method is described in detail in the paper: **[GRADIEND: Feature Learning within Neural Networks Exemplified through Biases](https://arxiv.org/abs/2502.01406)** (Drechsel & Herbold, 2025).
 
-The library currently supports **text** models (MLM/CLM). Example use cases:
+> While GRADIEND is methodologically defined to work with any *gradient-learned* and *weight-based* model, this library currently only supports *text prediction* models (specifically `transformers.AutoModelForMaskedLM` and `transformers.AutoModelForCausalLM`).
+> However, the library is designed to be modular and we plan to support more models in the future (e.g., text classification, vision, ...).
 
+Example use cases:
 - **[English gender (pronouns)](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/gender_en.py)**
 - **[German gender–case](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/gender_de_detailed.py)**
 - **[Race and religion](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/race_religion.py)**

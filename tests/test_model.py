@@ -290,8 +290,8 @@ class TestModelWithGradiend:
         assert hasattr(model_with_gradiend, 'encode')
         assert callable(model_with_gradiend.encode)
     
-    def test_model_with_gradiend_modify(self, mock_model):
-        """Test model modification (feature_factor, learning_rate)."""
+    def test_model_with_gradiend_rewrite_base_model(self, mock_model):
+        """Test rewrite_base_model method with decoder part."""
         from gradiend.trainer.text.prediction.model_with_gradiend import TextPredictionModelWithGradiend
         from gradiend.trainer.text.common.model_base import TextModelWithGradiend
         
@@ -305,11 +305,104 @@ class TestModelWithGradiend:
                 n_features=1,
             )
         
-        # Test that model has expected attributes
-        # Note: modify_model may not exist - this test verifies basic model structure
-        assert hasattr(model_with_gradiend, 'base_model')
-        assert hasattr(model_with_gradiend, 'gradiend')
-        assert model_with_gradiend.base_model == mock_model
+        # Test that rewrite_base_model exists and works
+        assert hasattr(model_with_gradiend, 'rewrite_base_model')
+        assert callable(model_with_gradiend.rewrite_base_model)
+        
+        # Test rewrite_base_model with decoder part
+        learning_rate = 1e-4
+        feature_factor = 1.0
+        
+        rewritten_model = model_with_gradiend.rewrite_base_model(
+            learning_rate=learning_rate,
+            feature_factor=feature_factor,
+            part="decoder"
+        )
+        
+        # Should return a model (not the same instance as base_model)
+        assert rewritten_model is not None
+        assert rewritten_model is not model_with_gradiend.base_model
+    
+    def test_model_with_gradiend_rewrite_base_model_with_different_parts(self, mock_model):
+        """Test rewrite_base_model with different part options."""
+        from gradiend.trainer.text.prediction.model_with_gradiend import TextPredictionModelWithGradiend
+        from gradiend.trainer.text.common.model_base import TextModelWithGradiend
+        
+        def mock_load_model(cls, load_directory, base_model_id=None, tokenizer=None, **kwargs):
+            from tests.conftest import MockTokenizer
+            return mock_model, MockTokenizer()
+        
+        with patch.object(TextModelWithGradiend, '_load_model', classmethod(mock_load_model)):
+            model_with_gradiend = TextPredictionModelWithGradiend.from_pretrained(
+                mock_model,
+                n_features=1,
+            )
+        
+        learning_rate = 1e-4
+        
+        # Test different part options
+        parts = ["decoder", "decoder-weight", "decoder-bias", "decoder-sum", "encoder-weight"]
+        
+        for part in parts:
+            try:
+                rewritten_model = model_with_gradiend.rewrite_base_model(
+                    learning_rate=learning_rate,
+                    feature_factor=1.0,
+                    part=part
+                )
+                assert rewritten_model is not None
+            except ValueError as e:
+                # Some parts might not be available depending on model structure
+                # That's okay - we're just testing that the method handles them
+                pass
+    
+    def test_model_with_gradiend_rewrite_base_model_with_list_feature_factor(self, mock_model):
+        """Test rewrite_base_model with list feature_factor (requires latent_dim=2)."""
+        from gradiend.trainer.text.prediction.model_with_gradiend import TextPredictionModelWithGradiend
+        from gradiend.trainer.text.common.model_base import TextModelWithGradiend
+        
+        def mock_load_model(cls, load_directory, base_model_id=None, tokenizer=None, **kwargs):
+            from tests.conftest import MockTokenizer
+            return mock_model, MockTokenizer()
+        
+        with patch.object(TextModelWithGradiend, '_load_model', classmethod(mock_load_model)):
+            model_with_gradiend = TextPredictionModelWithGradiend.from_pretrained(
+                mock_model,
+                latent_dim=2,
+            )
+        
+        # Test with list feature_factor (must match latent_dim)
+        rewritten_model = model_with_gradiend.rewrite_base_model(
+            learning_rate=1e-4,
+            feature_factor=[1.0, -1.0],
+            part="decoder"
+        )
+        
+        assert rewritten_model is not None
+    
+    def test_model_with_gradiend_rewrite_base_model_raises_invalid_part(self, mock_model):
+        """Test rewrite_base_model raises ValueError for invalid part."""
+        from gradiend.trainer.text.prediction.model_with_gradiend import TextPredictionModelWithGradiend
+        from gradiend.trainer.text.common.model_base import TextModelWithGradiend
+        
+        def mock_load_model(cls, load_directory, base_model_id=None, tokenizer=None, **kwargs):
+            from tests.conftest import MockTokenizer
+            return mock_model, MockTokenizer()
+        
+        with patch.object(TextModelWithGradiend, '_load_model', classmethod(mock_load_model)):
+            model_with_gradiend = TextPredictionModelWithGradiend.from_pretrained(
+                mock_model,
+                n_features=1,
+            )
+        
+        with pytest.raises(ValueError) as exc_info:
+            model_with_gradiend.rewrite_base_model(
+                learning_rate=1e-4,
+                feature_factor=1.0,
+                part="invalid_part"
+            )
+        
+        assert "part must be" in str(exc_info.value).lower()
     
     def test_model_with_gradiend_prune_gradiend(self, mock_model):
         """Test pruning via prune_gradiend method."""

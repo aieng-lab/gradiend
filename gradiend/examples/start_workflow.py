@@ -140,7 +140,7 @@ def train_and_evaluate(training, neutral):
     enc_result = trainer.evaluate_encoder(plot=True)
     print("Correlation:", enc_result.get("correlation"))
     dec = trainer.evaluate_decoder()
-    changed_base_model = trainer.select_changed_model(decoder_results=dec, metric_key="3SG")
+    changed_base_model = trainer.rewrite_base_model(decoder_results=dec, metric_key="3SG")
 
     return trainer, enc_result, dec, changed_base_model
 

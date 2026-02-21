@@ -12,9 +12,10 @@ ENV LC_ALL=C.UTF-8 LANG=C.UTF-8 PYTHONUNBUFFERED=1
 WORKDIR /workspace
 COPY . /workspace
 
-# Create conda env from repo (Python from environment.yml; override base image for different Python)
+# Create conda env with Python, install gradiend from pyproject.toml
 RUN conda update -n base -c defaults conda -y \
- && conda env create -f environment.yml -n gradiend \
+ && conda create -n gradiend python=3.10 -y \
+ && conda run -n gradiend pip install --no-cache-dir -e ".[recommended,dev]" \
  && conda clean -afy
 
 # Default: run test bench with fresh cache; results go to test_bench/results/

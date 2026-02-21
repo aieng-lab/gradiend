@@ -98,7 +98,7 @@ config = TextFilterConfig(
 - `train()` — Start training
 - `evaluate_encoder()` — Evaluate encoder correlation and separation
 - `evaluate_decoder()` — Evaluate decoder's ability to modify the base model
-- `select_changed_model()` — Get the best modified model from decoder evaluation
+- `rewrite_base_model()` — Rewrite base model(s) using decoder evaluation results, optionally save to disk
 - `plot_training_convergence()` — Visualize training progress
 
 **Example:**
@@ -122,7 +122,7 @@ trainer.train()
 # Evaluate
 enc_result = trainer.evaluate_encoder(plot=True)
 dec_result = trainer.evaluate_decoder()
-changed_model = trainer.select_changed_model(decoder_results=dec_result)
+changed_model = trainer.rewrite_base_model(decoder_results=dec_result)
 ```
 
 **See also:** [Start here](../start.md), [Training tutorial](../tutorials/training.md)
@@ -178,6 +178,7 @@ args = TrainingArguments(
 - `data` — Training data (DataFrame, dict, HF dataset ID, or file path)
 - `hf_dataset` — HuggingFace dataset ID
 - `target_classes` — Classes to train on (pair is auto-inferred if len=2)
+- `class_merge_map` — Map base classes to merged classes (e.g. `{"singular": ["1SG", "3SG"], "plural": ["1PL", "3PL"]}`); when set, `target_classes` uses merged names; when exactly two keys, `target_classes` can be omitted
 - `masked_col`, `split_col` — Column names
 - `eval_neutral_data` — Neutral evaluation data
 
@@ -247,7 +248,7 @@ config = TextPredictionConfig(
 
 **Key methods:**
 - `encode()` — Encode gradients to latent feature value
-- `modify_model()` — Apply decoder update to create a modified base model
+- `rewrite_base_model()` — Rewrite the base model by applying decoder updates
 - `from_pretrained()` — Load base model + GRADIEND model
 
 **Example:**
@@ -262,8 +263,8 @@ model = ModelWithGradiend.from_pretrained(
 # Encode a gradient
 feature_value = model.encode(gradient_dict)
 
-# Modify the base model
-modified_model = model.modify_model(
+# Rewrite the base model
+modified_model = model.rewrite_base_model(
     learning_rate=1e-4,
     feature_factor=1.0,
     part='decoder'
@@ -382,7 +383,7 @@ modified_model = model.modify_model(
 | **Evaluate encoder** | `TextPredictionTrainer.evaluate_encoder()` | `EncoderEvaluator` |
 | **Evaluate decoder** | `TextPredictionTrainer.evaluate_decoder()` | `DecoderEvaluator` |
 | **Load a trained model** | `ModelWithGradiend.from_pretrained()` | `GradiendModel.from_pretrained()` |
-| **Modify a model** | `ModelWithGradiend.modify_model()` | `TextPredictionTrainer.select_changed_model()` |
+| **Rewrite a model** | `ModelWithGradiend.rewrite_base_model()` | `TextPredictionTrainer.rewrite_base_model()` |
 | **Configure pruning** | `PrePruneConfig`, `PostPruneConfig` | Used via `TrainingArguments` |
 
 ---

@@ -102,6 +102,24 @@ def _compute_metrics_from_df(
 	# includes identity transitions (label 0). Ternary classification (-1, 0, 1).
 	non_neutral_mask = ~df_all["type"].astype(str).str.contains("neutral", case=False, na=False)
 	df_training = df_all[non_neutral_mask]
+
+	# Fail fast: encoder correlation is undefined for invalid eval setups
+	if len(df_training) == 0:
+		raise ValueError(
+			"All encoder eval data is neutral. Encoder correlation requires non-neutral (training-like) "
+			"examples. Add eval data with distinct feature classes (e.g. 3SG vs 3PL)."
+		)
+	if len(df_training) < 2:
+		raise ValueError(
+			f"Encoder eval has only {len(df_training)} non-neutral instance(s). "
+			"Correlation requires at least 2 non-neutral samples."
+		)
+	if df_training["label"].astype(float).std() == 0:
+		raise ValueError(
+			"Encoder eval has only one label class (all labels identical). "
+			"Correlation requires at least two distinct classes in eval data."
+		)
+
 	# target_classes_only: same as training_only but exclude identity (label 0). Binary classification.
 	target_only_mask = non_neutral_mask & (df_all["label"] != 0)
 	target_only_df = df_all[target_only_mask]

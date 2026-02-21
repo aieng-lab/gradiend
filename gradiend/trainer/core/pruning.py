@@ -6,6 +6,7 @@ Post-prune: weight-based prune after training (same prune(), importance from get
 """
 
 import random
+import sys
 from dataclasses import dataclass
 from typing import Any, List, Optional, Union
 
@@ -266,38 +267,45 @@ def pre_prune(
     running_sum: Optional[torch.Tensor] = None
     count = 0
 
-    logger.info(f"Computing gradient mean over {len(indices)} samples for pre-pruning...")
-    with tqdm(total=len(indices), desc="Pre-prune gradient computation", unit="sample") as pbar:
-        for start in range(0, len(indices), config.batch_size):
-            chunk = indices[start : start + config.batch_size]
-            for idx in chunk:
-                item = data[idx]
-                factual_in = item["factual"]
-                alternative_in = item["alternative"]
+    _tqdm_kw = dict(
+        total=len(indices),
+        desc="Pre-prune",
+        unit="datapoint",
+        leave=True,
+        ncols=80,
+        dynamic_ncols=False,
+        ascii=True,
+        mininterval=0.5,
+        position=0,
+        disable=not sys.stderr.isatty(),
+    )
+    for idx in tqdm(indices, **_tqdm_kw):
+        item = data[idx]
+        factual_in = item["factual"]
+        alternative_in = item["alternative"]
 
-                fact_g = None
-                if requires_factual:
-                    fact_g = gradient_creator(factual_in)
-                alt_g = None
-                if requires_alternative:
-                    alt_g = gradient_creator(alternative_in)
+        fact_g = None
+        if requires_factual:
+            fact_g = gradient_creator(factual_in)
+        alt_g = None
+        if requires_alternative:
+            alt_g = gradient_creator(alternative_in)
 
-                if source == "factual":
-                    g = fact_g
-                elif source == "alternative":
-                    g = alt_g
-                else:
-                    if isinstance(fact_g, dict):
-                        g = {k: fact_g[k] - alt_g[k] for k in fact_g}
-                    else:
-                        g = fact_g - alt_g
+        if source == "factual":
+            g = fact_g
+        elif source == "alternative":
+            g = alt_g
+        else:
+            if isinstance(fact_g, dict):
+                g = {k: fact_g[k] - alt_g[k] for k in fact_g}
+            else:
+                g = fact_g - alt_g
 
-                vec = _gradient_to_vector(g, gradiend)
-                if running_sum is None:
-                    running_sum = torch.zeros_like(vec)
-                running_sum.add_(vec)
-                count += 1
-                pbar.update(1)
+        vec = _gradient_to_vector(g, gradiend)
+        if running_sum is None:
+            running_sum = torch.zeros_like(vec)
+        running_sum.add_(vec)
+        count += 1
 
     if running_sum is None or count == 0:
         raise RuntimeError("No gradients accumulated in pre_prune.")

@@ -52,16 +52,28 @@ def compute_probability_shift_score_clm(
     key_text='masked',
     batch_size=16,
     data_class_col=None,
+    dataset_class_col=None,
 ):
     """
-    Compute bias score per-example, then average (generative / single-token targets).
-    Each example produces: similarity across groups, magnitude of target probability,
-    combined score = similarity * magnitude. Results are averaged.
+    Compute probabilities for all classes evaluated on all datasets.
 
-    If data_class_col is set (e.g. "alternative_id"), each target's probability is
-    evaluated only on the other class's data: P(target1) on rows where data_class_col==target2,
-    P(target2) on rows where data_class_col==target1. This yields a proper counterfactual
-    (bias) measure: how much the model predicts class A when the context is class B.
+    Args:
+        model: Model to evaluate
+        tokenizer: Tokenizer
+        df: DataFrame with evaluation data
+        targets: Dict mapping class_name -> list of tokens
+        key_text: Column name for masked text
+        batch_size: Batch size for evaluation
+        data_class_col: DEPRECATED - kept for backward compatibility. If set, filters results
+            to counterfactual probabilities only (for selection logic).
+        dataset_class_col: Column name identifying dataset class (e.g., "label_class" or "factual_id").
+            If None, uses "label_class" if available, else "factual_id".
+
+    Returns:
+        If dataset_class_col is provided or can be inferred:
+            Dict[str, Dict[str, float]]: {dataset_class: {class_name: prob, ...}, ...}
+        Otherwise (backward compatibility):
+            Dict[str, float]: {class_name: prob, ...} (filtered by data_class_col if provided)
     """
     model.eval()
     device = model.device
@@ -100,8 +112,17 @@ def compute_probability_shift_score_clm(
         if not ids:
             raise ValueError(f"Target group '{g}' has no valid token ids; check your target words and tokenizer.")
 
-    all_scores, all_sims, all_mags = [], [], []
-    group_probs_all = defaultdict(list)
+    # Determine dataset class column
+    if dataset_class_col is None:
+        if "label_class" in df.columns:
+            dataset_class_col = "label_class"
+        elif "factual_id" in df.columns:
+            dataset_class_col = "factual_id"
+        else:
+            dataset_class_col = None
+
+    # Group probabilities by dataset class: {dataset_class: {class_name: [probs]}}
+    probs_by_dataset = defaultdict(lambda: defaultdict(list))
     rows = df.to_dict("records")
     n_batches = (len(rows) + batch_size - 1) // batch_size
 
@@ -138,28 +159,41 @@ def compute_probability_shift_score_clm(
                 if b_idx not in example_probs:
                     continue
                 p = example_probs[b_idx]
-                per_group_probs = {}
+                
+                # Get dataset class for this row
+                dataset_class = None
+                if dataset_class_col:
+                    dataset_class = row.get(dataset_class_col)
+                
+                # Compute probabilities for all classes
                 for g, ids in targets_ids.items():
                     if ids:
-                        per_group_probs[g] = float(p[ids].sum())
-                        group_probs_all[g].append(per_group_probs[g])
-                if len(per_group_probs) < 2:
-                    continue
-                values = np.array(list(per_group_probs.values()))
-                l1_diff = values.max() - values.min()
-                similarity = 1.0 - l1_diff
-                magnitude = float(values.min())
-                score = similarity * magnitude
-                all_sims.append(similarity)
-                all_mags.append(magnitude)
-                all_scores.append(score)
+                        prob = float(p[ids].sum())  # Sum multiple tokens per class
+                        if dataset_class is not None:
+                            probs_by_dataset[dataset_class][g].append(prob)
+                        else:
+                            # Fallback: use class name as dataset identifier
+                            probs_by_dataset[g][g].append(prob)
 
-    if not group_probs_all:
-        raise ValueError("No valid group probabilities computed; check your data and targets.")
-    group_means = {g: float(np.mean(v)) for g, v in group_probs_all.items() if v}
-    means_str = ", ".join(f"{k}={v:.4f}" for k, v in sorted(group_means.items()))
-    logger.debug(f"Decoder eval probability means: {means_str}")
-    return group_means
+    # Compute means per dataset class
+    probs_by_dataset_means = {}
+    for dataset_class, class_probs in probs_by_dataset.items():
+        probs_by_dataset_means[dataset_class] = {
+            class_name: float(np.mean(probs)) if probs else 0.0
+            for class_name, probs in class_probs.items()
+        }
+
+    # Always return probs_by_dataset structure
+    # Backward compatibility filtering happens in evaluate_base_model
+    if probs_by_dataset_means:
+        means_str = ", ".join(
+            f"{ds_cls}: {', '.join(f'{cls}={prob:.4f}' for cls, prob in sorted(cls_probs.items()))}"
+            for ds_cls, cls_probs in sorted(probs_by_dataset_means.items())
+        )
+        logger.debug(f"Decoder eval probability means by dataset: {means_str}")
+        return probs_by_dataset_means
+    
+    raise ValueError("No valid group probabilities computed; check your data and targets.")
 
 
 _token_cache = {}
@@ -173,11 +207,28 @@ def compute_probability_shift_score_mlm(
     key_text='masked',
     batch_size=16,
     data_class_col=None,
+    dataset_class_col=None,
 ):
     """
-    Compute bias score per-example, then average. Supports multi-token targets for MaskedLM.
-    Returns dict with 'correlation', 'similarity', 'magnitude', 'group_probs'.
-    If data_class_col is set, each target's probability is evaluated only on the other class's data.
+    Compute probabilities for all classes evaluated on all datasets.
+
+    Args:
+        model: Model to evaluate
+        tokenizer: Tokenizer
+        df: DataFrame with evaluation data
+        targets: Dict mapping class_name -> list of tokens
+        key_text: Column name for masked text
+        batch_size: Batch size for evaluation
+        data_class_col: DEPRECATED - kept for backward compatibility. If set, filters results
+            to counterfactual probabilities only (for selection logic).
+        dataset_class_col: Column name identifying dataset class (e.g., "label_class" or "factual_id").
+            If None, uses "label_class" if available, else "factual_id".
+
+    Returns:
+        If dataset_class_col is provided or can be inferred:
+            Dict[str, Dict[str, float]]: {dataset_class: {class_name: prob, ...}, ...}
+        Otherwise (backward compatibility):
+            Dict[str, float]: {class_name: prob, ...} (filtered by data_class_col if provided)
     """
     model.eval()
     device = model.device
@@ -213,7 +264,17 @@ def compute_probability_shift_score_mlm(
         if not id_lists:
             raise ValueError(f"Target group '{g}' has no valid token ids; check your targets.")
 
-    group_probs_all = defaultdict(list)
+    # Determine dataset class column
+    if dataset_class_col is None:
+        if "label_class" in df.columns:
+            dataset_class_col = "label_class"
+        elif "factual_id" in df.columns:
+            dataset_class_col = "factual_id"
+        else:
+            dataset_class_col = None
+
+    # Group probabilities by dataset class: {dataset_class: {class_name: [probs]}}
+    probs_by_dataset = defaultdict(lambda: defaultdict(list))
     rows = df.to_dict("records")
     n_batches = (len(rows) + batch_size - 1) // batch_size
 
@@ -251,19 +312,42 @@ def compute_probability_shift_score_mlm(
                             logp += torch.log(probs[local_idx, pos, tok_id] + 1e-12)
                         p = torch.exp(logp).item()
                         example_probs[b_idx][g] = example_probs[b_idx].get(g, 0.0) + p
+            
             for b_idx, row in enumerate(batch):
                 per_group_probs = example_probs.get(b_idx, {})
-                data_class = row.get(data_class_col) if data_class_col else None
+                
+                # Get dataset class for this row
+                dataset_class = None
+                if dataset_class_col:
+                    dataset_class = row.get(dataset_class_col)
+                
+                # Store probabilities grouped by dataset class
                 for g, p in per_group_probs.items():
-                    if data_class_col is None or data_class != g:
-                        group_probs_all[g].append(p)
+                    if dataset_class is not None:
+                        probs_by_dataset[dataset_class][g].append(p)
+                    else:
+                        # Fallback: use class name as dataset identifier
+                        probs_by_dataset[g][g].append(p)
 
-    if not group_probs_all:
-        raise ValueError("No valid group probabilities computed; check your data and targets.")
-    group_means = {g: float(np.mean(v)) for g, v in group_probs_all.items() if v}
-    means_str = ", ".join(f"{k}={v:.4f}" for k, v in sorted(group_means.items()))
-    logger.debug(f"Decoder eval probability means: {means_str}")
-    return group_means
+    # Compute means per dataset class
+    probs_by_dataset_means = {}
+    for dataset_class, class_probs in probs_by_dataset.items():
+        probs_by_dataset_means[dataset_class] = {
+            class_name: float(np.mean(probs)) if probs else 0.0
+            for class_name, probs in class_probs.items()
+        }
+
+    # Always return probs_by_dataset structure
+    # Backward compatibility filtering happens in evaluate_base_model
+    if probs_by_dataset_means:
+        means_str = ", ".join(
+            f"{ds_cls}: {', '.join(f'{cls}={prob:.4f}' for cls, prob in sorted(cls_probs.items()))}"
+            for ds_cls, cls_probs in sorted(probs_by_dataset_means.items())
+        )
+        logger.debug(f"Decoder eval probability means by dataset: {means_str}")
+        return probs_by_dataset_means
+    
+    raise ValueError("No valid group probabilities computed; check your data and targets.")
 
 
 def compute_lms(model, tokenizer, texts, ignore, max_texts=None, batch_size=32):
@@ -288,13 +372,26 @@ def compute_lms(model, tokenizer, texts, ignore, max_texts=None, batch_size=32):
     return result
 
 
-def evaluate_probability_shift_score(model, tokenizer, targets, eval_data_df, key_text='masked', data_class_col=None):
+def evaluate_probability_shift_score(model, tokenizer, targets, eval_data_df, key_text='masked', data_class_col=None, dataset_class_col=None):
     """
-    Generic feature score evaluation: target token probabilities grouped by feature class.
-    Returns dict with 'correlation', 'similarity', 'magnitude', 'group_probs'.
+    Generic feature score evaluation: computes probabilities for all classes on all datasets.
 
-    When data_class_col is set (e.g. "alternative_id"), each target's probability is
-    evaluated only on the other class's data: P(target1) on target2 rows, P(target2) on target1 rows.
+    Args:
+        model: Model to evaluate
+        tokenizer: Tokenizer
+        targets: Dict mapping class_name -> list of tokens
+        eval_data_df: DataFrame with evaluation data
+        key_text: Column name for masked text
+        data_class_col: DEPRECATED - kept for backward compatibility. If set, returns filtered
+            counterfactual probabilities (for selection logic).
+        dataset_class_col: Column name identifying dataset class (e.g., "label_class" or "factual_id").
+            If None, auto-detects from dataframe columns.
+
+    Returns:
+        If dataset_class_col is provided or can be inferred:
+            Dict[str, Dict[str, float]]: {dataset_class: {class_name: prob, ...}, ...}
+        Otherwise (backward compatibility):
+            Dict[str, float]: {class_name: prob, ...} (filtered by data_class_col if provided)
 
     Probabilities are taken from the model's forward only: for decoder/generative models
     we use next-token (CLM) logits at the position after the prefix; for MaskedLM we use
@@ -302,7 +399,8 @@ def evaluate_probability_shift_score(model, tokenizer, targets, eval_data_df, ke
     pass the CLM (base decoder) when using a decoder-only MLM-head model.
     """
     return compute_probability_shift_score_mlm(
-        model, tokenizer, eval_data_df, targets=targets, key_text=key_text, data_class_col=data_class_col
+        model, tokenizer, eval_data_df, targets=targets, key_text=key_text, 
+        data_class_col=data_class_col, dataset_class_col=dataset_class_col
     )
 
 

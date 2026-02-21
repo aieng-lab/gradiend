@@ -130,7 +130,7 @@ test_bench/
 
 ## Use cases
 
-- **Example smoke tests** (`examples/`): Run all `gradiend.setups.examples` (race_religion, gender_en, german_de, german_de_decoder_only) as they are; only assert they complete successfully (no metric verification). Use the examples’ own iteration counts for quick runs.
+- **Example smoke tests** (`examples/`): Run all `gradiend.examples` (race_religion, gender_en, gender_de, gender_de_decoder_only) as they are; only assert they complete successfully (no metric verification). Use the examples’ own iteration counts for quick runs.
 - **Verified runs** (`verified/`): Run with **more iterations** (e.g. 500) than examples to ensure proper conversion; verify **correlation ≥ threshold** and **existence of files** (config.json, weights, training.json).
   - One run for **race and religion** (BERT)
   - One run for **gender EN** (RoBERTa)
@@ -159,7 +159,7 @@ Each setup defines `expected_metrics.json` with:
 
 ## Adding New Setups
 
-1. For **smoke only**: add a new example under `gradiend.setups.examples`; it will be run by `test_examples_smoke.py`.
+1. For **smoke only**: add a new example under `gradiend.examples`; it will be run by `test_examples_smoke.py`.
 2. For **verified**: create `test_bench/verified/test_<name>.py`, use `verify_utils.BENCH_TRAIN_CONFIG` and `assert_model_files_exist` / `assert_correlation_threshold`.
 3. Ensure tests are marked `@pytest.mark.slow` and `@pytest.mark.integration` so `run_all.py` picks them up.
 

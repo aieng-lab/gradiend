@@ -261,6 +261,7 @@ target_classes=["masc_nom", "fem_nom"]   # Pair for training (currently: must ha
 ```
 
 - When `all_classes` (usually determined by data automatically) has exactly two elements, the trainer uses these two classes automatically as `target_classes`.
+- **Merged classes**: Use `class_merge_map` to merge base classes (e.g. `{"singular": ["1SG", "3SG"], "plural": ["1PL", "3PL"]}`); then `target_classes` refers to merged names. With exactly two merged keys, `target_classes` can be omitted.
 
 ---
 

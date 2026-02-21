@@ -82,7 +82,7 @@ class MockTrainerForTest(Trainer):
         return {"x": ["x"]}
 
     def evaluate_base_model(self, model, tokenizer, **kwargs):
-        return {"lms": {"lms": 0.5}, "prob::x": 0.5}
+        return {"lms": {"lms": 0.5}, "x": 0.5}
 
     def _analyze_encoder(self, model_with_gradiend=None, **kwargs):
         import pandas as pd
@@ -183,97 +183,97 @@ class TestRequireGradiendModel:
 
 
 class TestSelectAndSaveChangedModel:
-    """Test select_changed_model and select_and_save_changed_model behavior."""
+    """Test rewrite_base_model behavior."""
 
-    def _decoder_results_with_prob_keys(self):
-        """Decoder results in typical evaluate_decoder format (prob::<class_id> keys)."""
+    def _decoder_results_with_class_keys(self):
+        """Decoder results in typical evaluate_decoder format (<class_id> keys)."""
         return {
             "summary": {
-                "prob::masc_nom": {"feature_factor": 1.0, "learning_rate": 1e-4, "value": 0.8},
-                "prob::fem_nom": {"feature_factor": -1.0, "learning_rate": 1e-4, "value": 0.7},
+                "masc_nom": {"feature_factor": 1.0, "learning_rate": 1e-4, "value": 0.8},
+                "fem_nom": {"feature_factor": -1.0, "learning_rate": 1e-4, "value": 0.7},
             },
             "grid": {},
         }
 
-    def test_select_changed_model_accepts_raw_metric_key_without_prob_prefix(self):
-        """metric_key as raw class id (e.g. 'masc_nom') should resolve to 'prob::masc_nom' in summary."""
+    def test_rewrite_base_model_accepts_metric_key_as_class_id(self):
+        """metric_key as class id (e.g. 'masc_nom') should match summary key directly."""
         args = TrainingArguments(experiment_dir=None)
         trainer = MockTrainerForTest(model="mock-base", args=args)
         mock_model = MagicMock()
-        mock_model.modify_model = MagicMock(return_value=MagicMock())
+        mock_model.rewrite_base_model = MagicMock(return_value=MagicMock())
         trainer._model_instance = mock_model
         trainer._model_arg = "mock-base"
 
-        decoder_results = self._decoder_results_with_prob_keys()
+        decoder_results = self._decoder_results_with_class_keys()
 
-        changed = trainer.select_changed_model(
+        changed = trainer.rewrite_base_model(
             decoder_results=decoder_results,
             metric_key="masc_nom",
         )
 
         assert changed is not None
-        mock_model.modify_model.assert_called_once_with(
+        mock_model.rewrite_base_model.assert_called_once_with(
             learning_rate=1e-4,
             feature_factor=1.0,
         )
 
-    def test_select_changed_model_accepts_metric_key_with_prob_prefix(self):
-        """metric_key with 'prob::' prefix should match directly."""
+    def test_rewrite_base_model_accepts_metric_key_as_class_id_for_fem_nom(self):
+        """metric_key 'fem_nom' should match summary key directly."""
         args = TrainingArguments(experiment_dir=None)
         trainer = MockTrainerForTest(model="mock-base", args=args)
         mock_model = MagicMock()
-        mock_model.modify_model = MagicMock(return_value=MagicMock())
+        mock_model.rewrite_base_model = MagicMock(return_value=MagicMock())
         trainer._model_instance = mock_model
         trainer._model_arg = "mock-base"
 
-        decoder_results = self._decoder_results_with_prob_keys()
+        decoder_results = self._decoder_results_with_class_keys()
 
-        changed = trainer.select_changed_model(
+        changed = trainer.rewrite_base_model(
             decoder_results=decoder_results,
-            metric_key="prob::fem_nom",
+            metric_key="fem_nom",
         )
 
         assert changed is not None
-        mock_model.modify_model.assert_called_once_with(
+        mock_model.rewrite_base_model.assert_called_once_with(
             learning_rate=1e-4,
             feature_factor=-1.0,
         )
 
-    def test_select_changed_model_metric_key_list_accepts_both_formats(self):
-        """metric_key as list can mix raw and prefixed keys."""
+    def test_rewrite_base_model_metric_key_list_accepts_multiple_class_ids(self):
+        """metric_key as list can specify multiple class ids."""
         args = TrainingArguments(experiment_dir=None)
         trainer = MockTrainerForTest(model="mock-base", args=args)
         mock_model = MagicMock()
-        mock_model.modify_model = MagicMock(side_effect=lambda **kw: MagicMock())
+        mock_model.rewrite_base_model = MagicMock(side_effect=lambda **kw: MagicMock())
         trainer._model_instance = mock_model
         trainer._model_arg = "mock-base"
 
-        decoder_results = self._decoder_results_with_prob_keys()
+        decoder_results = self._decoder_results_with_class_keys()
 
-        changed_list = trainer.select_changed_model(
+        changed_list = trainer.rewrite_base_model(
             decoder_results=decoder_results,
-            metric_key=["masc_nom", "prob::fem_nom"],
+            metric_key=["masc_nom", "fem_nom"],
         )
 
         assert len(changed_list) == 2
-        assert mock_model.modify_model.call_count == 2
-        calls = mock_model.modify_model.call_args_list
+        assert mock_model.rewrite_base_model.call_count == 2
+        calls = mock_model.rewrite_base_model.call_args_list
         assert calls[0][1]["feature_factor"] == 1.0  # masc_nom
         assert calls[1][1]["feature_factor"] == -1.0  # fem_nom
 
-    def test_select_changed_model_loads_from_cache_when_decoder_results_omitted(self, tmp_path):
+    def test_rewrite_base_model_loads_from_cache_when_decoder_results_omitted(self, tmp_path):
         """When decoder_results=None and decoder stats cache exists, load from disk."""
         args = TrainingArguments(experiment_dir=str(tmp_path))
         trainer = MockTrainerForTest(model="mock-base", args=args)
         mock_model = MagicMock()
-        mock_model.modify_model = MagicMock(return_value=MagicMock())
+        mock_model.rewrite_base_model = MagicMock(return_value=MagicMock())
         trainer._model_instance = mock_model
         trainer._model_arg = "mock-base"
 
         # Write decoder_stats cache (as evaluate_decoder with use_cache=True would populate)
         stats_content = {
             "summary": {
-                "prob::masc_nom": {"feature_factor": 1.0, "learning_rate": 1e-4, "value": 0.8},
+                "masc_nom": {"feature_factor": 1.0, "learning_rate": 1e-4, "value": 0.8},
             },
             "grid": [],
         }
@@ -285,18 +285,18 @@ class TestSelectAndSaveChangedModel:
         with open(stats_path, "w") as f:
             json.dump(stats_content, f, indent=2)
 
-        changed = trainer.select_changed_model(
+        changed = trainer.rewrite_base_model(
             decoder_results=None,
             metric_key="masc_nom",
         )
 
         assert changed is not None
-        mock_model.modify_model.assert_called_once_with(
+        mock_model.rewrite_base_model.assert_called_once_with(
             learning_rate=1e-4,
             feature_factor=1.0,
         )
 
-    def test_select_changed_model_raises_when_decoder_results_omitted_and_no_cache(self, tmp_path):
+    def test_rewrite_base_model_raises_when_decoder_results_omitted_and_no_cache(self, tmp_path):
         """When decoder_results=None and no decoder stats cache exists, raise."""
         args = TrainingArguments(experiment_dir=str(tmp_path))
         trainer = MockTrainerForTest(model="mock-base", args=args)
@@ -304,7 +304,7 @@ class TestSelectAndSaveChangedModel:
         trainer._model_arg = "mock-base"
 
         with pytest.raises(ValueError) as exc_info:
-            trainer.select_changed_model(
+            trainer.rewrite_base_model(
                 decoder_results=None,
                 metric_key="masc_nom",
             )
@@ -312,8 +312,8 @@ class TestSelectAndSaveChangedModel:
         assert "No decoder results cache found" in str(exc_info.value)
         assert "evaluate_decoder" in str(exc_info.value)
 
-    def test_select_and_save_changed_model_raises_without_save_path(self):
-        """When experiment_dir is not set and output_dir is not passed, select_and_save_changed_model raises."""
+    def test_rewrite_base_model_raises_without_save_path_when_output_dir_provided(self):
+        """When experiment_dir is not set and output_dir is empty, rewrite_base_model raises when trying to save."""
         args = TrainingArguments(experiment_dir=None)
         trainer = MockTrainerForTest(model="mock-base", args=args)
         trainer._model_instance = MagicMock()
@@ -325,11 +325,158 @@ class TestSelectAndSaveChangedModel:
         }
 
         with pytest.raises(ValueError) as exc_info:
-            trainer.select_and_save_changed_model(
+            trainer.rewrite_base_model(
                 decoder_results=decoder_results,
                 metric_key="x",
-                output_dir=None,
+                output_dir="",  # Empty string should trigger save path check
             )
 
-        assert "Cannot save" in str(exc_info.value)
+        assert "Cannot save" in str(exc_info.value) or "no output path" in str(exc_info.value)
         assert "experiment_dir" in str(exc_info.value) or "output_dir" in str(exc_info.value)
+
+    def test_rewrite_base_model_saves_when_output_dir_provided(self, tmp_path):
+        """When output_dir is provided, rewrite_base_model saves models and returns paths."""
+        args = TrainingArguments(experiment_dir=str(tmp_path))
+        trainer = MockTrainerForTest(model="mock-base", args=args)
+        
+        # Create a mock model that can be saved
+        mock_model = MagicMock()
+        mock_rewritten = MagicMock()
+        mock_model.rewrite_base_model = MagicMock(return_value=mock_rewritten)
+        trainer._model_instance = mock_model
+        trainer._model_arg = "mock-base"
+
+        decoder_results = {
+            "summary": {
+                "masc_nom": {"feature_factor": 1.0, "learning_rate": 1e-4, "value": 0.8},
+            },
+            "grid": {},
+        }
+
+        output_dir = os.path.join(tmp_path, "saved_model")
+        os.makedirs(output_dir, exist_ok=True)
+
+        result = trainer.rewrite_base_model(
+            decoder_results=decoder_results,
+            metric_key="masc_nom",
+            output_dir=output_dir,
+        )
+
+        # Should return a path (string), not a model
+        assert isinstance(result, str)
+        assert os.path.exists(result)
+        mock_model.rewrite_base_model.assert_called_once_with(
+            learning_rate=1e-4,
+            feature_factor=1.0,
+        )
+        # Verify save_pretrained was called
+        assert mock_rewritten.save_pretrained.called
+
+    def test_rewrite_base_model_returns_model_when_output_dir_not_provided(self):
+        """When output_dir is not provided, rewrite_base_model returns models in memory."""
+        args = TrainingArguments(experiment_dir=None)
+        trainer = MockTrainerForTest(model="mock-base", args=args)
+        mock_model = MagicMock()
+        mock_rewritten = MagicMock()
+        mock_model.rewrite_base_model = MagicMock(return_value=mock_rewritten)
+        trainer._model_instance = mock_model
+        trainer._model_arg = "mock-base"
+
+        decoder_results = {
+            "summary": {
+                "masc_nom": {"feature_factor": 1.0, "learning_rate": 1e-4, "value": 0.8},
+            },
+            "grid": {},
+        }
+
+        result = trainer.rewrite_base_model(
+            decoder_results=decoder_results,
+            metric_key="masc_nom",
+            # No output_dir
+        )
+
+        # Should return a model, not a path
+        assert result is mock_rewritten
+        mock_model.rewrite_base_model.assert_called_once_with(
+            learning_rate=1e-4,
+            feature_factor=1.0,
+        )
+        # save_pretrained should not be called when output_dir is not provided
+        if hasattr(mock_rewritten, 'save_pretrained'):
+            assert not mock_rewritten.save_pretrained.called
+
+    def test_rewrite_base_model_saves_multiple_models_with_experiment_dir(self, tmp_path):
+        """When multiple metric_keys and experiment_dir, rewrite_base_model saves all models."""
+        args = TrainingArguments(experiment_dir=str(tmp_path))
+        trainer = MockTrainerForTest(model="mock-base", args=args)
+        
+        mock_model = MagicMock()
+        mock_rewritten1 = MagicMock()
+        mock_rewritten2 = MagicMock()
+        mock_model.rewrite_base_model = MagicMock(side_effect=[mock_rewritten1, mock_rewritten2])
+        trainer._model_instance = mock_model
+        trainer._model_arg = "mock-base"
+
+        decoder_results = self._decoder_results_with_class_keys()
+
+        result = trainer.rewrite_base_model(
+            decoder_results=decoder_results,
+            metric_key=["masc_nom", "fem_nom"],
+            output_dir=str(tmp_path),  # With experiment_dir, this is used as parent
+        )
+
+        # Should return list of paths
+        assert isinstance(result, list)
+        assert len(result) == 2
+        assert all(isinstance(p, str) for p in result)
+        assert mock_model.rewrite_base_model.call_count == 2
+        assert mock_rewritten1.save_pretrained.called
+        assert mock_rewritten2.save_pretrained.called
+
+    def test_rewrite_base_model_raises_when_multiple_keys_without_experiment_dir(self):
+        """When multiple metric_keys without experiment_dir, rewrite_base_model raises."""
+        args = TrainingArguments(experiment_dir=None)
+        trainer = MockTrainerForTest(model="mock-base", args=args)
+        trainer._model_instance = MagicMock()
+
+        decoder_results = self._decoder_results_with_class_keys()
+
+        with pytest.raises(ValueError) as exc_info:
+            trainer.rewrite_base_model(
+                decoder_results=decoder_results,
+                metric_key=["masc_nom", "fem_nom"],
+                output_dir="./output",  # Single output_dir not enough for multiple keys
+            )
+
+        assert "multiple" in str(exc_info.value).lower() or "experiment_dir" in str(exc_info.value)
+
+    def test_rewrite_base_model_returns_single_path_for_single_key_with_output_dir(self, tmp_path):
+        """When single metric_key with output_dir, rewrite_base_model returns single path string."""
+        args = TrainingArguments(experiment_dir=str(tmp_path))
+        trainer = MockTrainerForTest(model="mock-base", args=args)
+        
+        mock_model = MagicMock()
+        mock_rewritten = MagicMock()
+        mock_model.rewrite_base_model = MagicMock(return_value=mock_rewritten)
+        trainer._model_instance = mock_model
+        trainer._model_arg = "mock-base"
+
+        decoder_results = {
+            "summary": {
+                "masc_nom": {"feature_factor": 1.0, "learning_rate": 1e-4, "value": 0.8},
+            },
+            "grid": {},
+        }
+
+        output_dir = os.path.join(tmp_path, "saved_model")
+        os.makedirs(output_dir, exist_ok=True)
+
+        result = trainer.rewrite_base_model(
+            decoder_results=decoder_results,
+            metric_key="masc_nom",  # Single key
+            output_dir=output_dir,
+        )
+
+        # Should return a single string path, not a list
+        assert isinstance(result, str)
+        assert not isinstance(result, list)

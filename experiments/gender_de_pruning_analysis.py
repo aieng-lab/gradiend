@@ -3,8 +3,8 @@ German DE pruning analysis (pre-prune, post-prune, and combined).
 
 Goal: find a good default topk proportion balancing efficiency vs recall.
 - Pre-prune heuristic quality: compare pre-prune mask vs weight-based top-k mask (recall/precision/F1).
-- Encoder metric: correlation from EncoderEvaluator.
-- Decoder metric: prob::<target_class> from DecoderEvaluator (evaluate_decoder()).
+- Encoder metric: correlation from trainer.evaluate_encoder().
+- Decoder metric: <target_class> from trainer.evaluate_decoder().
 
 Suggested settings (per user request): 1000 steps, eval_steps=500.
 """
@@ -21,8 +21,6 @@ import torch
 from matplotlib import pyplot as plt
 
 from gradiend import TextPredictionTrainer, TrainingArguments
-from gradiend.evaluator.encoder import EncoderEvaluator
-from gradiend.evaluator.decoder import DecoderEvaluator
 from gradiend.trainer import PrePruneConfig, PostPruneConfig
 from gradiend.trainer.core.pruning import pre_prune
 
@@ -82,23 +80,23 @@ def _mask_metrics(heuristic_mask: torch.Tensor, oracle_mask: torch.Tensor) -> Tu
     return recall, precision, f1
 
 
-def _run_encoder_eval(trainer: TextPredictionTrainer) -> float:
-    evaluator = EncoderEvaluator()
-    result = evaluator.evaluate_encoder(trainer)
+def _run_encoder_eval(trainer: TextPredictionTrainer, max_size: int = 200) -> float:
+    result = trainer.evaluate_encoder(max_size=max_size, use_cache=True)
     return float(result.get("correlation", 0.0)) if result else 0.0
 
 
-def _run_decoder_eval(trainer: TextPredictionTrainer, target_class: str) -> float:
-    evaluator = DecoderEvaluator()
-    result = evaluator.evaluate_decoder(
-        trainer=trainer,
+
+def _run_decoder_eval(
+    trainer: TextPredictionTrainer, target_class: str, max_size: int = 200
+) -> float:
+    result = trainer.evaluate_decoder(
         lrs=[1e-3],
-        feature_factors=None,
-        max_eval_size=200,
+        max_size_training_like=max_size,
+        max_size_neutral=max_size,
         use_cache=True,
     )
     summary = result.get("summary", {}) if result else {}
-    key = f"prob::{target_class}"
+    key = target_class
     if key in summary:
         return float(summary[key].get("value", 0.0))
     return 0.0
@@ -150,8 +148,15 @@ def _compute_oracle_mask(
     topk: float,
     part: str = "decoder-weight",
 ) -> torch.Tensor:
+    """
+    Compute the weight-based top-k mask (oracle) for pre-prune heuristic quality.
+
+    Used to compare the pre-prune heuristic (gradient-mean based) against the
+    post-training weight-based selection. Recall/precision/F1 measure how well
+    the gradient heuristic approximates the ideal weight-based top-k.
+    """
     model = trainer.get_model()
-    importance = model.gradiend.get_weight_importance(part=part).to("cpu")
+    importance = model.get_weight_importance(part=part).to("cpu")
     return _topk_mask(importance, topk)
 
 
@@ -165,15 +170,17 @@ def run_analysis(
 
     base_args = dict(
         experiment_dir=output_dir,
-        train_batch_size=8,
-        eval_max_size=200,
-        eval_steps=500,
+        train_batch_size=32,
+        encoder_eval_max_size=500,
+        decoder_eval_max_size_training_like=500,
+        decoder_eval_max_size_neutral=1000,
+        eval_steps=1000,
         num_train_epochs=1,
-        max_steps=1000,
+        max_steps=5000,
         source="alternative",
         target="diff",
         eval_batch_size=8,
-        learning_rate=1e-4,
+        learning_rate=1e-5,
         use_cache=True,
         add_identity_for_other_classes=True,
     )
@@ -301,9 +308,9 @@ def _save_results(results: List[RunResult], output_path: str) -> None:
 
 
 if __name__ == "__main__":
-    topk_values = [0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1]
+    topk_values = [0.00001, 0.0002, 0.0005, 0.0001, 0.0002, 0.0005, 0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.0]
     pair = ("fem_nom", "fem_dat")
-    output_dir = os.path.join("results", "pruning_analysis", "german_de")
+    output_dir = os.path.join("runs", "pruning_analysis", "german_de")
 
     results = run_analysis(topk_values=topk_values, pair=pair, output_dir=output_dir)
 
@@ -317,7 +324,7 @@ if __name__ == "__main__":
     _plot_metric(
         results,
         metric="decoder_prob",
-        title=f"Decoder prob::{pair[1]} vs topk",
+        title=f"Decoder {pair[1]} vs topk",
         output_path=os.path.join(output_dir, "decoder_prob_vs_topk.pdf"),
     )
     _plot_pre_prune_heuristics(

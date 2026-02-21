@@ -184,6 +184,40 @@ If `experiment_dir` is set, the plot is saved automatically under that directory
 
 ---
 
+## Accessing the GRADIEND model
+
+After training, you typically work with a **ModelWithGradiend**: it wraps the base model plus the trained GRADIEND encoder/decoder. You can obtain it in two ways:
+
+1. **From the trainer** — Use `trainer.get_model()` to get the trainer’s cached ModelWithGradiend.
+2. **From disk** — Load from a checkpoint path with `ModelWithGradiend.from_pretrained(load_directory)`.
+
+```python
+# From the trainer
+model = trainer.get_model()
+
+# Or load from a saved checkpoint
+from gradiend import ModelWithGradiend
+model = ModelWithGradiend.from_pretrained("experiment_dir/run_id/model")
+```
+
+**Model variants:**
+
+| Class | Purpose |
+|-------|---------|
+| **ModelWithGradiend** | Base model + GRADIEND. Use for evaluation, encoding gradients, or applying decoder updates via `rewrite_base_model()`. |
+| **ParamMappedGradiendModel** | GRADIEND encoder/decoder with parameter mapping (dict I/O). Access via `model.gradiend` on a ModelWithGradiend. |
+| **GradiendModel** | Weights-only encoder/decoder (no base model). For low-level access or saving/loading GRADIEND weights independently. |
+
+All three are exported from `gradiend`:
+
+```python
+from gradiend import GradiendModel, ParamMappedGradiendModel, ModelWithGradiend
+```
+
+For more detail, see [Core classes](../guides/core-classes.md) and the [API reference](../api/index.md).
+
+---
+
 ## Next steps
 
 - **[Example Code](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/gender_de_detailed.py)** — See an example of training several GRADIENDs for the German Article paradigm, and plotting venn diagrams and heatmap.

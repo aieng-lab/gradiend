@@ -10,7 +10,7 @@ to use GENTypes-based name-prediction metrics (paper-style BPI, FPI, MPI; see
 https://arxiv.org/abs/2502.01406). Custom metrics are exposed via a summary_extractor
 (that adds bpi/fpi/mpi to candidates from raw results) and summary_metrics; the
 default SelectionPolicy in compute_metric_summaries then selects the best candidate
-per metric. Use metric_key='bpi' (etc.) with select_and_save_changed_model.
+per metric. Use metric_key='bpi' (etc.) with rewrite_base_model(output_dir=...).
 """
 
 import json
@@ -439,8 +439,9 @@ if __name__ == "__main__":
             print(f"  best {key} (argmax({key}*lms)): value={b.get('value')}, feature_factor={b.get('feature_factor')}, lr={b.get('learning_rate')}")
 
     # Save model that maximizes _bpi * lms
-    changed_path = trainer.select_and_save_changed_model(
+    changed_path = trainer.rewrite_base_model(
         decoder_results=dec,
         metric_key="_bpi",
+        output_dir="./output",
     )
     print(f"Changed model: {changed_path}")

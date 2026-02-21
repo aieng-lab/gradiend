@@ -28,6 +28,9 @@ from gradiend.util.logging import get_logger
 
 logger = get_logger(__name__)
 
+MIN_ROWS_PER_CLASS_FOR_SPLIT = 10
+"""Minimum rows per class to perform train/val/test split. Splitting fewer rows yields tiny splits (e.g. 80/10/10 of 5 rows)."""
+
 def _save_data(
     path: str,
     fmt: Literal["csv", "parquet", "hf"],
@@ -189,6 +192,7 @@ class TextPredictionDataCreator:
         train_ratio: float = 0.8,
         val_ratio: float = 0.1,
         test_ratio: float = 0.1,
+        min_rows_per_class_for_split: int = MIN_ROWS_PER_CLASS_FOR_SPLIT,
     ) -> Union[Dict[str, pd.DataFrame], pd.DataFrame]:
         """Generate training data by filtering and masking.
 
@@ -203,6 +207,8 @@ class TextPredictionDataCreator:
             train_ratio: Fraction of each class for train (default 0.8).
             val_ratio: Fraction of each class for validation (default 0.1).
             test_ratio: Fraction of each class for test (default 0.1). Must sum to 1.0 with train_ratio and val_ratio.
+            min_rows_per_class_for_split: Minimum rows per class to perform train/val/test split. Splitting fewer rows
+                yields meaningless splits (e.g. 80/10/10 of 5 rows). Default 10. Set to 0 to disable this check.
 
         Returns:
             Per format: dict of DataFrames, or single DataFrame.
@@ -292,7 +298,10 @@ class TextPredictionDataCreator:
                         n=max_size_per_class, random_state=self.seed
                     ).reset_index(drop=True)
 
-        _apply_auto_split(class_dfs, train_ratio, val_ratio, test_ratio, self.seed)
+        _apply_auto_split(
+            class_dfs, train_ratio, val_ratio, test_ratio, self.seed,
+            min_rows_per_class=min_rows_per_class_for_split,
+        )
 
         if format == "per_class":
             result: Union[Dict[str, pd.DataFrame], pd.DataFrame] = class_dfs
@@ -570,8 +579,22 @@ def _apply_auto_split(
     val_ratio: float,
     test_ratio: float,
     seed: int,
+    min_rows_per_class: int = 0,
 ) -> None:
     """Assign train/validation/test split per class by ratio. Modifies class_dfs in place."""
+    if min_rows_per_class > 0:
+        too_small = [
+            (cid, len(df))
+            for cid, df in class_dfs.items()
+            if len(df) > 0 and len(df) < min_rows_per_class
+        ]
+        if too_small:
+            msg = (
+                f"Data split requires at least {min_rows_per_class} rows per class. "
+                f"Classes with too few rows: {too_small}. "
+                "Use more base data, increase max_size_per_class, or set min_rows_per_class_for_split=0 to disable."
+            )
+            raise ValueError(msg)
     for class_id in list(class_dfs.keys()):
         df = class_dfs[class_id]
         if len(df) == 0:

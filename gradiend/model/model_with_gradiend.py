@@ -5,7 +5,7 @@ Generic interface across modalities (text, vision, ...). Owns:
 - base_model (frozen or trainable; modality-specific)
 - gradiend (encoder/decoder over gradients)
 - interpretation metadata (source/target)
-- glue logic: create_gradients -> encode / modify_model
+- glue logic: create_gradients -> encode / rewrite_base_model
 - persistence of gradiend_context.json + feature_class_encoding_direction.json
 """
 
@@ -152,7 +152,7 @@ class ModelWithGradiend(nn.Module, ABC):
     The GRADIEND model holds encoder/decoder weights. This adapter:
     - interprets GRADIEND IO (source/target),
     - defines how gradients are created (create_gradients),
-    - provides encode() and modify_model(),
+    - provides encode() and rewrite_base_model(),
     - persists adapter-level config next to the GRADIEND checkpoint.
 
     Important refactor invariant:
@@ -380,9 +380,9 @@ class ModelWithGradiend(nn.Module, ABC):
     # ----------------------------
     # Model modification
     # ----------------------------
-    def modify_model(self, learning_rate, feature_factor, part="decoder"):
+    def rewrite_base_model(self, learning_rate, feature_factor, part="decoder"):
         """
-        Create a modified version of the base model by adding GRADIEND-derived updates.
+        Rewrite the base model by applying GRADIEND-derived updates.
 
         General form: $base\\_model + learning\\_rate * enhancer(part, feature\\_factor)$,
         where enhancer(part, feature_factor) is defined by the selected part below.
@@ -469,7 +469,7 @@ class ModelWithGradiend(nn.Module, ABC):
         """
         other = copy.copy(self)
         other.base_model = new_base
-        # Recompute param_lookup so modify_model works with the new base
+        # Recompute param_lookup so rewrite_base_model works with the new base
         other.param_lookup = {k: v for k, v in new_base.named_parameters()}
         return other
 

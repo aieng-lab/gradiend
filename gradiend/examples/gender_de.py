@@ -45,7 +45,8 @@ dec_results = trainer.evaluate_decoder()
 print(f"  decoder summary: {list(dec_results['summary'].keys())}")
 print(f"  decoder grid size: {len(dec_results['grid'])}")
 
-trainer.select_and_save_changed_model(
+trainer.rewrite_base_model(
     decoder_results=dec_results,
+    output_dir="./output",
     metric_key="masc_nom",
 )

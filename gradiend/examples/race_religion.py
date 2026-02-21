@@ -44,11 +44,11 @@ for bias_type, pair, other_classes in [race_white_black_config, religion_christi
     print(f"  encoder metrics: {enc_metrics['all_data']}")
 
     dec_results = trainer.evaluate_decoder()
-    stats = dec_results['summary'][f"prob::{pair[0]}"]
+    stats = dec_results['summary'][pair[0]]
     print(f"  decoder {pair[0]} statistics: {stats}")
 
     # Save one changed model biasing towards the first class in the pair
-    changed_model = trainer.select_changed_model(
+    changed_model = trainer.rewrite_base_model(
         decoder_results=dec_results,
         metric_key=pair[0],  # or metric_key=list(pair) to save one model per class
     )

@@ -62,16 +62,16 @@ class MockTrainer:
         # The "lms" key should contain a dict with "lms" key (nested structure)
         return {
             "lms": {"lms": 0.5},  # Nested structure expected by decoder.py:163
-            "prob::positive": 0.7,
-            "prob::negative": 0.3
+            "positive": 0.7,
+            "negative": 0.3
         }
     
     def _evaluate_model_for_decoder(self, model_with_gradiend, df, **kwargs):
         """Mock decoder evaluation."""
         return {
             "lms": 0.5,
-            "prob::positive": 0.7,
-            "prob::negative": 0.3
+            "positive": 0.7,
+            "negative": 0.3
         }
     
     def _model_for_decoder_eval(self, model_with_gradiend):
@@ -79,7 +79,7 @@ class MockTrainer:
         return model_with_gradiend
     
     def create_eval_data(self, model_with_gradiend, **kwargs):
-        """Mock eval data creation."""
+        """Mock eval data creation. Need at least 2 non-neutral samples for correlation."""
         training_data = MockTrainingData([
             {
                 "factual": torch.randn(10),
@@ -87,7 +87,14 @@ class MockTrainer:
                 "label": 1.0,
                 "factual_id": 1,
                 "alternative_id": 2
-            }
+            },
+            {
+                "factual": torch.randn(10),
+                "alternative": torch.randn(10),
+                "label": -1.0,
+                "factual_id": 2,
+                "alternative_id": 1
+            },
         ])
         
         def gradient_creator(inputs):
@@ -148,8 +155,8 @@ class MockModelWithGradiend:
         """Mock decode method."""
         return torch.randn(100)
     
-    def modify_model(self, **kwargs):
-        """Mock modify_model method."""
+    def rewrite_base_model(self, **kwargs):
+        """Mock rewrite_base_model method."""
         return self
 
 
@@ -327,8 +334,8 @@ class TestEncoderEvaluator:
         
         result = evaluator.evaluate_encoder(trainer, eval_data=eval_data)
         
-        # Should return empty result
-        assert result == {}
+        # Empty eval data returns explicit empty result (no correlation to report)
+        assert result == {"n_samples": 0, "correlation": None}
 
 
 class TestDecoderEvaluator:
