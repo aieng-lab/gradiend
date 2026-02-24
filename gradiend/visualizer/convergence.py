@@ -6,7 +6,7 @@ Requires matplotlib. If missing, raises ImportError with install instructions.
 """
 
 import os
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union, Set
 
 import numpy as np
 
@@ -84,6 +84,52 @@ def _steps_and_values(
     return steps, series_by_class, series_by_fc
 
 
+def _class_names_from_series(
+    series_by_class: Dict[str, List],
+    label_value_to_class_name: Optional[Dict[str, str]],
+) -> Set[str]:
+    """Map series_by_class keys (label values) to class names via label_value_to_class_name."""
+    names: Set[str] = set()
+    lv2name = label_value_to_class_name or {}
+    for k in series_by_class:
+        v = lv2name.get(k)
+        if isinstance(v, str):
+            names.add(v)
+            continue
+        try:
+            k_float = float(k)
+            v = lv2name.get(k_float)
+            if isinstance(v, str):
+                names.add(v)
+                continue
+        except (TypeError, ValueError):
+            pass
+        names.add(str(k))
+    return names
+
+
+def _is_mean_by_feature_class_redundant(
+    training_stats: Dict[str, Any],
+    series_by_class: Dict[str, List],
+    series_by_fc: Dict[str, List],
+) -> bool:
+    """
+    True if mean_by_feature_class adds no information beyond mean_by_class.
+
+    This happens when all_classes == target_classes or no identity transitions are added:
+    both plots would show the same curves (target pair only). In that case the default
+    for plotting mean_by_feature_class should be False.
+    """
+    if not series_by_fc:
+        return True
+    if not series_by_class:
+        return False  # feature_class has data, class doesn't -> show it
+    lv2name = training_stats.get("label_value_to_class_name")
+    class_names = _class_names_from_series(series_by_class, lv2name)
+    fc_keys = set(series_by_fc.keys())
+    return class_names == fc_keys
+
+
 def _correlation_series(training_stats: Dict[str, Any]) -> List[Tuple[int, float]]:
     """(step, correlation) from training_stats['scores']."""
     scores = training_stats.get("scores") or {}
@@ -98,18 +144,22 @@ def draw_convergence_axes(
     best_corr: Optional[float] = None,
     label_name_mapping: Optional[Dict[str, str]] = None,
     plot_mean_by_class: bool = True,
-    plot_mean_by_feature_class: bool = True,
+    plot_mean_by_feature_class: Optional[bool] = None,
     plot_correlation: bool = True,
 ) -> None:
     """
     Draw convergence curves into existing axes (live or static).
     axes[0] = mean_by_class (if plot_mean_by_class), axes[1] = mean_by_feature_class (if plot_mean_by_feature_class),
     axes[2] = correlation (if plot_correlation). Caller must pass enough axes for the enabled options.
+
+    plot_mean_by_feature_class: None = auto (False when redundant with mean_by_class, True otherwise).
     """
     ts = training_stats
     steps, series_by_class, series_by_fc = _steps_and_values(
-        ts, mean_by_class=plot_mean_by_class, mean_by_feature_class=plot_mean_by_feature_class
+        ts, mean_by_class=plot_mean_by_class, mean_by_feature_class=plot_mean_by_feature_class is not False
     )
+    if plot_mean_by_feature_class is None:
+        plot_mean_by_feature_class = not _is_mean_by_feature_class_redundant(ts, series_by_class, series_by_fc)
     corr_series = _correlation_series(ts) if plot_correlation else []
 
     def _name(k: str) -> str:
@@ -145,7 +195,7 @@ def draw_convergence_axes(
             ax.plot(xs, ys, label=_name(label_key), marker=".", markersize=2)
         if best_step_val is not None:
             ax.axvline(x=best_step_val, color="gray", linestyle="--", alpha=0.8, label="best step")
-        ax.set_ylabel("Mean encoded value")
+        ax.set_ylabel("encoded value")
         ax.set_xlabel("Step" if not (plot_mean_by_feature_class or plot_correlation) else "")
         ax.legend(loc="best", fontsize=8)
         ax.grid(True, alpha=0.3)
@@ -193,7 +243,7 @@ def plot_training_convergence(
     training_stats: Optional[Dict[str, Any]] = None,
     *,
     plot_mean_by_class: bool = True,
-    plot_mean_by_feature_class: bool = True,
+    plot_mean_by_feature_class: Optional[bool] = None,
     plot_correlation: bool = True,
     best_step: bool = True,
     label_name_mapping: Optional[Dict[str, str]] = None,
@@ -203,6 +253,8 @@ def plot_training_convergence(
     title: Union[str, bool] = True,
     figsize: Optional[Tuple[float, float]] = None,
     img_format: str = "pdf",
+    dpi: Optional[int] = None,
+    **kwargs: Any,
 ) -> str:
     """
     Plot training convergence: up to three subplots (mean_by_class, mean_by_feature_class, correlation).
@@ -223,6 +275,7 @@ def plot_training_convergence(
         training_stats: Pre-loaded run info or raw training_stats dict.
         plot_mean_by_class: Add a subplot for mean_by_class.
         plot_mean_by_feature_class: Add a subplot for mean_by_feature_class.
+            None = auto (False when redundant with mean_by_class, True otherwise).
         plot_correlation: Add a subplot for correlation.
         best_step: Mark the best checkpoint step (vertical line + point on correlation).
         label_name_mapping: Optional display names for label values.
@@ -275,8 +328,10 @@ def plot_training_convergence(
             best_step_val = None
 
     steps, series_by_class, series_by_fc = _steps_and_values(
-        ts, mean_by_class=plot_mean_by_class, mean_by_feature_class=plot_mean_by_feature_class
+        ts, mean_by_class=plot_mean_by_class, mean_by_feature_class=plot_mean_by_feature_class is not False
     )
+    if plot_mean_by_feature_class is None:
+        plot_mean_by_feature_class = not _is_mean_by_feature_class_redundant(ts, series_by_class, series_by_fc)
     corr_series = _correlation_series(ts) if plot_correlation else []
 
     has_mbc = plot_mean_by_class and bool(series_by_class)
@@ -287,7 +342,7 @@ def plot_training_convergence(
         return ""
 
     n_sub = (1 if has_mbc else 0) + (1 if has_mbfc else 0) + (1 if has_corr else 0)
-    fig, axes = plt.subplots(n_sub, 1, sharex=True, figsize=figsize or (8, 3 * n_sub))
+    fig, axes = plt.subplots(n_sub, 1, sharex=True, figsize=figsize or (6, 1.5 * n_sub))
     if n_sub == 1:
         axes = [axes]
     ax_idx = 0
@@ -388,7 +443,10 @@ def plot_training_convergence(
 
     if out_path:
         os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
-        plt.savefig(out_path, bbox_inches="tight")
+        save_kwargs: Dict[str, Any] = {"bbox_inches": "tight"}
+        if dpi is not None:
+            save_kwargs["dpi"] = dpi
+        plt.savefig(out_path, **save_kwargs)
         logger.info("Saved convergence plot: %s", out_path)
     if show:
         plt.show()

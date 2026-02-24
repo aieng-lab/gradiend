@@ -29,7 +29,7 @@ Example use cases:
 ## Get started
 
 - **[Installation](installation.md)** — Install the package and optional dependencies.
-- **[Start here](start.md)** — A minimal runnable example to train and evaluate in a few steps.
+- **[Train your first GRADIEND model](start.md)** — A minimal runnable example to train and evaluate in a few steps.
 - **[Testing and coverage](guides/testing.md)** — Run unit tests, measure coverage, and run the test bench (Docker).
 
 ---
@@ -65,5 +65,3 @@ When you need to understand a topic or look up options:
 - [Examples](examples.md) — All example scripts with short descriptions.
 - [API reference](api/index.md) — **Auto-generated** from docstrings; main classes and entry points.
 - [FAQ](faq.md) — Troubleshooting and common pitfalls.
-
-To **publish** the docs (e.g. GitHub Pages or Read the Docs) so they are publicly accessible with the package, see [Publishing the documentation](publishing-docs.md).

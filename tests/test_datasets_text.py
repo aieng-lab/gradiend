@@ -242,7 +242,7 @@ class TestTextTrainingDataset:
         assert "batch_size" in msg
         assert "4" in msg
         assert "1" in msg  # smallest subgroup has 1 sample
-        assert "Use more training data" in msg or "reduce" in msg.lower()
+        assert "Use more training_data data" in msg or "reduce" in msg.lower()
 
     def test_text_training_dataset_max_size(self):
         """Test that max_size limits the number of samples."""
@@ -577,13 +577,13 @@ class TestTextDatasetDataLoadingVariations:
         # We can test that the dataset works with identity samples if they're provided
         data = pd.DataFrame({
             "masked": ["Hello [MASK] world"],
-            "factual": ["neutral"],
-            "alternative": ["neutral"],
-            "factual_class": ["neutral"],
-            "alternative_class": ["neutral"],
+            "factual": ["neutral_data"],
+            "alternative": ["neutral_data"],
+            "factual_class": ["neutral_data"],
+            "alternative_class": ["neutral_data"],
             "factual_id": [0],
             "alternative_id": [0],
-            "label": ["neutral"],  # Identity/neutral class
+            "label": ["neutral_data"],  # Identity/neutral_data class
             "feature_class_id": [0]  # Identity class ID
         })
         

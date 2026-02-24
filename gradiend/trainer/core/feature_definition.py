@@ -99,7 +99,6 @@ class FeatureLearningDefinition(DataProvider, ABC):
         self._target_classes = target_classes
         self.run_id = run_id
         self.n_features = n_features
-        self.metric_keys = []
         self.version_map = {}
         self._model_with_gradiend_cls: Optional[Type[ModelWithGradiend]] = None
 

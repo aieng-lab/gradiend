@@ -1,0 +1,172 @@
+[
+  {
+    "topk": 1e-06,
+    "mode": "post",
+    "encoder_correlation": 0.9643361448021761,
+    "decoder_prob": 0.012413034704260854,
+    "heuristic_recall": null,
+    "heuristic_precision": null,
+    "heuristic_f1": null,
+    "error": null
+  },
+  {
+    "topk": 2e-06,
+    "mode": "post",
+    "encoder_correlation": 0.9625953281596142,
+    "decoder_prob": 0.012401678579958718,
+    "heuristic_recall": null,
+    "heuristic_precision": null,
+    "heuristic_f1": null,
+    "error": null
+  },
+  {
+    "topk": 5e-06,
+    "mode": "post",
+    "encoder_correlation": 0.9552589349070311,
+    "decoder_prob": 0.0123770943654735,
+    "heuristic_recall": null,
+    "heuristic_precision": null,
+    "heuristic_f1": null,
+    "error": null
+  },
+  {
+    "topk": 1e-05,
+    "mode": "post",
+    "encoder_correlation": 0.9490167477957617,
+    "decoder_prob": 0.012356385278825434,
+    "heuristic_recall": null,
+    "heuristic_precision": null,
+    "heuristic_f1": null,
+    "error": null
+  },
+  {
+    "topk": 2e-05,
+    "mode": "post",
+    "encoder_correlation": 0.9408417017460398,
+    "decoder_prob": 0.012338176522670748,
+    "heuristic_recall": null,
+    "heuristic_precision": null,
+    "heuristic_f1": null,
+    "error": null
+  },
+  {
+    "topk": 5e-05,
+    "mode": "post",
+    "encoder_correlation": 0.9327601297624649,
+    "decoder_prob": 0.012317143171729699,
+    "heuristic_recall": null,
+    "heuristic_precision": null,
+    "heuristic_f1": null,
+    "error": null
+  },
+  {
+    "topk": 0.0001,
+    "mode": "post",
+    "encoder_correlation": 0.9290772409375865,
+    "decoder_prob": 0.012305197587529073,
+    "heuristic_recall": null,
+    "heuristic_precision": null,
+    "heuristic_f1": null,
+    "error": null
+  },
+  {
+    "topk": 0.0002,
+    "mode": "post",
+    "encoder_correlation": 0.9261907804080529,
+    "decoder_prob": 0.012296564631168244,
+    "heuristic_recall": null,
+    "heuristic_precision": null,
+    "heuristic_f1": null,
+    "error": null
+  },
+  {
+    "topk": 0.0005,
+    "mode": "post",
+    "encoder_correlation": 0.9235463504864475,
+    "decoder_prob": 0.012288136035687519,
+    "heuristic_recall": null,
+    "heuristic_precision": null,
+    "heuristic_f1": null,
+    "error": null
+  },
+  {
+    "topk": 0.001,
+    "mode": "post",
+    "encoder_correlation": 0.9220982076755524,
+    "decoder_prob": 0.012283727902274494,
+    "heuristic_recall": null,
+    "heuristic_precision": null,
+    "heuristic_f1": null,
+    "error": null
+  },
+  {
+    "topk": 0.002,
+    "mode": "post",
+    "encoder_correlation": 0.9209128928047884,
+    "decoder_prob": 0.012280002411992124,
+    "heuristic_recall": null,
+    "heuristic_precision": null,
+    "heuristic_f1": null,
+    "error": null
+  },
+  {
+    "topk": 0.005,
+    "mode": "post",
+    "encoder_correlation": 0.9192185539430642,
+    "decoder_prob": 0.012274867510410258,
+    "heuristic_recall": null,
+    "heuristic_precision": null,
+    "heuristic_f1": null,
+    "error": null
+  },
+  {
+    "topk": 0.01,
+    "mode": "post",
+    "encoder_correlation": 0.9177842594889278,
+    "decoder_prob": 0.012270520433663912,
+    "heuristic_recall": null,
+    "heuristic_precision": null,
+    "heuristic_f1": null,
+    "error": null
+  },
+  {
+    "topk": 0.02,
+    "mode": "post",
+    "encoder_correlation": 0.9165274490078676,
+    "decoder_prob": 0.012266009173940565,
+    "heuristic_recall": null,
+    "heuristic_precision": null,
+    "heuristic_f1": null,
+    "error": null
+  },
+  {
+    "topk": 0.05,
+    "mode": "post",
+    "encoder_correlation": 0.9156188623964324,
+    "decoder_prob": 0.012261041431816676,
+    "heuristic_recall": null,
+    "heuristic_precision": null,
+    "heuristic_f1": null,
+    "error": null
+  },
+  {
+    "topk": 0.1,
+    "mode": "post",
+    "encoder_correlation": 0.9160345743298641,
+    "decoder_prob": 0.012259487153313669,
+    "heuristic_recall": null,
+    "heuristic_precision": null,
+    "heuristic_f1": null,
+    "error": null
+  },
+  {
+    "topk": 0.2,
+    "mode": "post",
+    "encoder_correlation": 0.9169272562461646,
+    "decoder_prob": 0.012257852308528796,
+    "heuristic_recall": null,
+    "heuristic_precision": null,
+    "heuristic_f1": null,
+    "error": null
+  }
+]

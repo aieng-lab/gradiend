@@ -36,7 +36,7 @@ class PostPruneConfig:
     """
 
     topk: Optional[Union[int, float]] = None
-    """Same as prune(): int (absolute) or float in (0,1] (relative). One of topk, threshold, or mask required."""
+    """Same as prune(): int (absolute, top-k dims) or float in (0,1] (relative). topk=1.0 (float) means no pruning. One of topk, threshold, or mask required."""
 
     threshold: Optional[float] = None
     """Same as prune(): keep dims with importance >= threshold."""
@@ -107,7 +107,7 @@ class PrePruneConfig:
     """Total number of samples to use for the gradient mean."""
 
     topk: Optional[Union[int, float]] = None
-    """Same as prune(): int (absolute) or float in (0,1] (relative). One of topk or threshold required."""
+    """Same as prune(): int (absolute, top-k dims) or float in (0,1] (relative). topk=1.0 (float) means no pruning. One of topk or threshold required."""
 
     threshold: Optional[float] = None
     """Same as prune(): keep dims with importance >= threshold."""
@@ -286,10 +286,10 @@ def pre_prune(
 
         fact_g = None
         if requires_factual:
-            fact_g = gradient_creator(factual_in)
+            fact_g = gradient_creator(factual_in, target_device=torch.device("cpu"))
         alt_g = None
         if requires_alternative:
-            alt_g = gradient_creator(alternative_in)
+            alt_g = gradient_creator(alternative_in, target_device=torch.device("cpu"))
 
         if source == "factual":
             g = fact_g

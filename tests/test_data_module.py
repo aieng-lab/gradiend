@@ -147,7 +147,7 @@ class TestTextPredictionDataCreator:
         neutral = creator.generate_neutral_data(max_size=10)
         assert "text" in neutral.columns
         assert len(neutral) <= 3
-        # "Das Haus ist gross." should be in neutral (no der/die)
+        # "Das Haus ist gross." should be in neutral_data (no der/die)
         texts = neutral["text"].tolist()
         assert any("Das Haus" in t for t in texts)
 

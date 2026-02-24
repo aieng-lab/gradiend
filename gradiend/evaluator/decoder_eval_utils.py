@@ -37,7 +37,8 @@ def read_decoder_stats_file(stats_file: str) -> Dict[str, Any]:
     Read a decoder stats JSON file and normalize the grid to a dict.
 
     Returns:
-        Dict with keys "summary" and "grid" (grid may be empty).
+        Flat dict: summary entries at top level (e.g. "3SG", "3PL") plus "grid".
+        Legacy files with "summary" key are flattened so result[key] = summary[key].
     """
     with open(stats_file, "r") as f:
         data = json.load(f)
@@ -46,4 +47,5 @@ def read_decoder_stats_file(stats_file: str) -> Dict[str, Any]:
         grid = convert_results_to_dict(grid_list)
     else:
         grid = {}
-    return {"summary": data.get("summary", {}), "grid": grid}
+    summary = data.get("summary", {})
+    return {**summary, "grid": grid}

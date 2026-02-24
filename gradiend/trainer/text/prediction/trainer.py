@@ -16,14 +16,17 @@ from dataclasses import fields as dc_fields
 from typing import Dict, List, Optional, Union, Any, Tuple, Type
 
 from gradiend.trainer import Trainer
+from gradiend.trainer.config import TrainerConfig
 from gradiend.trainer.core.arguments import TrainingArguments
 from gradiend.model import ModelWithGradiend
 from gradiend.trainer.text.prediction.dataset import TextTrainingDataset, create_masked_pair_from_text
 from pathlib import Path
 from gradiend.trainer.text.prediction.unified_data import (
     all_subsets_to_mlm_df,
-    per_class_dict_to_unified,
+    apply_class_merge_to_merged_df,
     merged_to_unified,
+    merge_per_class_dfs,
+    per_class_dict_to_unified,
     resolve_dataframe,
     _load_dataframe_from_path,
     load_hf_per_class,
@@ -55,7 +58,7 @@ logger = get_logger(__name__)
 
 
 @dataclass
-class TextPredictionConfig:
+class TextPredictionConfig(TrainerConfig):
     """
     Configuration for TextPredictionTrainer.
 
@@ -100,7 +103,7 @@ class TextPredictionConfig:
     When loading from HuggingFace datasets, None means load all configs/subsets."""
 
 
-    # Column names (merged format and legacy)
+    # Column names (merged format)
     masked_col: str = "masked"
     label_col: str = "label"
     label_class_col: str = "label_class"
@@ -146,6 +149,10 @@ class TextPredictionConfig:
     class_merge_map: Optional[Dict[str, List[str]]] = None
     # When set, target_classes and pair use merged names (keys). Values list base classes to merge.
     # Base classes not in any value remain as neutral. When exactly 2 keys, target_classes can be omitted.
+    # Optional: limit which base-class transitions are created before merging, by specifying
+    # clusters of base classes. Only transitions where BOTH raw classes lie in the same cluster
+    # (and are different) are kept (e.g. [["1SG","1PL"], ["3SG","3PL"]] keeps 1SG↔1PL and 3SG↔3PL).
+    class_merge_transition_groups: Optional[List[List[str]]] = None
 
     # Neutral evaluation data
     eval_neutral_data: Optional[Union[pd.DataFrame, str, Path]] = None
@@ -153,9 +160,6 @@ class TextPredictionConfig:
 
     eval_neutral_max_rows: Optional[int] = None
     # Optional cap on number of rows loaded from neutral HF datasets.
-
-    img_format: str = "pdf"
-    # Image format for plots (e.g. encoder distributions, training convergence). Forwarded to visualizer.
 
 
 class TextPredictionTrainer(Trainer):
@@ -258,7 +262,9 @@ class TextPredictionTrainer(Trainer):
             eval_neutral_data: Optional[Union[pd.DataFrame, str, Path]] = None,
             eval_neutral_max_rows: Optional[int] = None,
             img_format: Optional[str] = None,
+            img_dpi: Optional[int] = None,
             class_merge_map: Optional[Dict[str, List[str]]] = None,
+            class_merge_transition_groups: Optional[List[List[str]]] = None,
     ):
         """
         Initialize TextPredictionTrainer (Trainer with model at creation time).
@@ -311,6 +317,7 @@ class TextPredictionTrainer(Trainer):
             eval_neutral_data: DataFrame or path for neutral evaluation data.
             eval_neutral_max_rows: Max rows to load from neutral HF datasets.
             img_format: Image format for plots (e.g. 'pdf', 'png'). Default 'pdf'.
+            img_dpi: DPI for saved plots (e.g. 600 for publication). None = use visualizer default.
         """
         args_for_super = training_args or args
         if config is None:
@@ -340,7 +347,9 @@ class TextPredictionTrainer(Trainer):
                 "eval_neutral_data": eval_neutral_data,
                 "eval_neutral_max_rows": eval_neutral_max_rows,
                 "img_format": img_format,
+                "img_dpi": img_dpi,
                 "class_merge_map": class_merge_map,
+                "class_merge_transition_groups": class_merge_transition_groups,
             }
             cfg_kwargs = {k: v for k, v in cfg_kwargs.items() if v is not None}
             if target_classes is not None:
@@ -378,7 +387,6 @@ class TextPredictionTrainer(Trainer):
         self.data = None
         self.class_datasets = None
         self._combined_data: Optional[pd.DataFrame] = None
-        self._effective_combined_data: Optional[pd.DataFrame] = None
         self._data_loaded = False
 
     def _set_all_classes(self, classes: Optional[List[str]]) -> None:
@@ -406,15 +414,33 @@ class TextPredictionTrainer(Trainer):
         # Single HuggingFace gate: hf_dataset => merged-style load; data=str (not a path) => per-class load
         is_hf_id = isinstance(config.data, str) and not Path(config.data).is_file()
         if config.hf_dataset is not None:
-            # HF merged-style: one dataset, optional subsets/splits, then merged_to_unified
+            # HF merged-style: one dataset, optional subsets/splits, then optional merge/transition filtering, then merged_to_unified
             raw = self._load_hf_dataset(
                 config.hf_dataset,
                 config.hf_subset,
                 config.hf_splits,
             )
             self.data = raw
+            merge_map = config.class_merge_map
+            data_df = raw
+            if (
+                merge_map
+                and config.alternative_col
+                and config.alternative_class_col
+                and config.alternative_col in data_df.columns
+                and config.alternative_class_col in data_df.columns
+            ):
+                data_df = apply_class_merge_to_merged_df(
+                    data_df,
+                    merge_map,
+                    label_class_col=config.label_class_col,
+                    target_class_col=config.alternative_class_col,
+                    target_classes=config.target_classes,
+                    keep_raw=True,
+                    transition_groups=getattr(config, "class_merge_transition_groups", None),
+                )
             self._combined_data = merged_to_unified(
-                raw,
+                data_df,
                 masked_col=config.masked_col,
                 split_col=config.split_col,
                 label_class_col=config.label_class_col,
@@ -424,7 +450,7 @@ class TextPredictionTrainer(Trainer):
                 pair=self.pair,
             )
         elif is_hf_id:
-            # HF per-class: load configs/subsets as class_dfs, then per_class_dict_to_unified
+            # HF per-class: load configs/subsets as class_dfs, merge by class_merge_map if set, then per_class_dict_to_unified
             classes_to_load = config.all_classes if config.all_classes is not None else "all"
             class_dfs = load_hf_per_class(
                 config.data,
@@ -434,14 +460,19 @@ class TextPredictionTrainer(Trainer):
                 split_col=config.split_col,
             )
             self.data = class_dfs
+            merge_map = config.class_merge_map
+            if merge_map:
+                class_dfs = merge_per_class_dfs(class_dfs, merge_map, config.target_classes)
+                inferred_classes = list(class_dfs.keys())
+                pair = tuple(config.target_classes) if config.target_classes and len(config.target_classes) == 2 else tuple(inferred_classes) if len(inferred_classes) == 2 else None
+            else:
+                inferred_classes = list(class_dfs.keys())
+                pair = tuple(config.target_classes) if config.target_classes and len(config.target_classes) == 2 else None
             self.class_datasets = class_dfs
-            inferred_classes = list(class_dfs.keys())
             if config.all_classes is not None:
                 self._set_all_classes(config.all_classes)
             else:
                 self._set_all_classes(sorted(inferred_classes))
-            merge_map = getattr(config, "class_merge_map", None)
-            pair = None if merge_map else (tuple(config.target_classes) if config.target_classes and len(config.target_classes) == 2 else None)
             unified = per_class_dict_to_unified(
                 class_dfs,
                 classes=inferred_classes,
@@ -456,18 +487,24 @@ class TextPredictionTrainer(Trainer):
             self._combined_data = unified
         elif config.data is not None:
             if isinstance(config.data, dict):
-                # Infer all_classes from data keys
+                # Infer all_classes from data keys; merge by class_merge_map if set
                 all_classes_from_data = sorted(list(config.data.keys()))
                 self._set_all_classes(all_classes_from_data)
                 classes_for_transitions = self.target_classes or all_classes_from_data
                 if self._target_classes is None:
                     self._target_classes = classes_for_transitions
                 self.data = config.data
-                self.class_datasets = config.data
+                class_dfs = config.data
                 merge_map = getattr(config, "class_merge_map", None)
-                pair = None if merge_map else (tuple(config.target_classes) if config.target_classes and len(config.target_classes) == 2 else tuple(self._target_classes) if self._target_classes and len(self._target_classes) == 2 else None)
+                if merge_map:
+                    class_dfs = merge_per_class_dfs(class_dfs, merge_map, self._target_classes)
+                    classes_for_transitions = list(class_dfs.keys())
+                    pair = tuple(self._target_classes) if self._target_classes and len(self._target_classes) == 2 else (tuple(classes_for_transitions) if len(classes_for_transitions) == 2 else None)
+                else:
+                    pair = tuple(config.target_classes) if config.target_classes and len(config.target_classes) == 2 else tuple(self._target_classes) if self._target_classes and len(self._target_classes) == 2 else None
+                self.class_datasets = class_dfs
                 unified = per_class_dict_to_unified(
-                    config.data,
+                    class_dfs,
                     classes=classes_for_transitions,
                     masked_col=config.masked_col,
                     split_col=config.split_col,
@@ -479,9 +516,26 @@ class TextPredictionTrainer(Trainer):
                 )
                 self._combined_data = unified
             elif isinstance(config.data, (Path, str)) and Path(config.data).is_file():
-                # Local file path: load CSV/Parquet and use as merged data
+                # Local file path: load CSV/Parquet; merge by class_merge_map if set; then merged_to_unified
                 data_df = _load_dataframe_from_path(config.data)
                 self.data = data_df
+                merge_map = getattr(config, "class_merge_map", None)
+                if (
+                    merge_map
+                    and config.alternative_col
+                    and config.alternative_class_col
+                    and config.alternative_col in data_df.columns
+                    and config.alternative_class_col in data_df.columns
+                ):
+                    data_df = apply_class_merge_to_merged_df(
+                        data_df,
+                        merge_map,
+                        label_class_col=config.label_class_col,
+                        target_class_col=config.alternative_class_col,
+                        target_classes=config.target_classes,
+                        keep_raw=True,
+                        transition_groups=getattr(config, "class_merge_transition_groups", None),
+                    )
                 self._combined_data = merged_to_unified(
                     data_df,
                     masked_col=config.masked_col,
@@ -497,10 +551,28 @@ class TextPredictionTrainer(Trainer):
                     tgt = self._combined_data[UNIFIED_ALTERNATIVE_CLASS].unique().tolist()
                     self._set_all_classes(sorted(set(src) | set(tgt)))
             else:
-                # DataFrame in memory
+                # DataFrame in memory; merge by class_merge_map if set
+                data_df = config.data
+                merge_map = getattr(config, "class_merge_map", None)
+                if (
+                    merge_map
+                    and config.alternative_col
+                    and config.alternative_class_col
+                    and config.alternative_col in data_df.columns
+                    and config.alternative_class_col in data_df.columns
+                ):
+                    data_df = apply_class_merge_to_merged_df(
+                        data_df,
+                        merge_map,
+                        label_class_col=config.label_class_col,
+                        target_class_col=config.alternative_class_col,
+                        target_classes=config.target_classes,
+                        keep_raw=True,
+                        transition_groups=getattr(config, "class_merge_transition_groups", None),
+                    )
                 self.data = config.data
                 self._combined_data = merged_to_unified(
-                    config.data,
+                    data_df,
                     masked_col=config.masked_col,
                     split_col=config.split_col,
                     label_class_col=config.label_class_col,
@@ -516,22 +588,12 @@ class TextPredictionTrainer(Trainer):
         self._check_data_non_empty()
         self._data_loaded = True
 
-        merge_map = getattr(config, "class_merge_map", None)
-        if merge_map and self._combined_data is not None:
-            self._effective_combined_data = self._apply_class_merge(self._combined_data, merge_map)
-            effective_src = self._effective_combined_data[UNIFIED_FACTUAL_CLASS].unique().tolist()
-            effective_tgt = self._effective_combined_data[UNIFIED_ALTERNATIVE_CLASS].unique().tolist()
-            self._set_all_classes(sorted(set(effective_src) | set(effective_tgt)))
-        else:
-            self._effective_combined_data = None
-
         if self._all_classes is None and self._combined_data is not None:
             src = self._combined_data[UNIFIED_FACTUAL_CLASS].unique().tolist()
             tgt = self._combined_data[UNIFIED_ALTERNATIVE_CLASS].unique().tolist()
             self._set_all_classes(sorted(set(src) | set(tgt)))
         
-        # Infer pair from target_classes for internal use (when exactly 2 target classes)
-        # This is stored in config.pair for backward compatibility with internal functions that expect it
+        # Infer pair from target_classes when exactly 2 target classes (stored in config.pair)
         if self._target_classes is not None and len(self._target_classes) == 2:
             config.pair = tuple(self._target_classes)
         if self.config.decoder_eval_targets is None and self._combined_data is not None:
@@ -540,58 +602,46 @@ class TextPredictionTrainer(Trainer):
             except Exception as e:
                 logger.warning(f"Could not auto-infer decoder_eval_targets: {e}")
 
-    def _apply_class_merge(self, df: pd.DataFrame, merge_map: Dict[str, List[str]]) -> pd.DataFrame:
-        """Apply class_merge_map: map base factual_class/alternative_class to merged names."""
-        base_to_merged: Dict[str, str] = {}
-        for merged, bases in merge_map.items():
-            for b in bases:
-                if b in base_to_merged:
-                    raise ValueError(
-                        f"class_merge_map: base class {b!r} appears in multiple merged classes."
-                    )
-                base_to_merged[b] = merged
-        out = df.copy()
-        out[UNIFIED_FACTUAL_CLASS] = out[UNIFIED_FACTUAL_CLASS].astype(str).map(
-            lambda x: base_to_merged.get(x, x)
-        )
-        out[UNIFIED_ALTERNATIVE_CLASS] = out[UNIFIED_ALTERNATIVE_CLASS].astype(str).map(
-            lambda x: base_to_merged.get(x, x)
-        )
-        out[UNIFIED_TRANSITION] = out.apply(
-            lambda r: transition_id(str(r[UNIFIED_FACTUAL_CLASS]), str(r[UNIFIED_ALTERNATIVE_CLASS])),
-            axis=1,
-        )
-        return out
-
     @property
     def combined_data(self) -> Optional[pd.DataFrame]:
-        """Unified training data (lazy-loaded on first access). When class_merge_map is set, returns merged view."""
+        """Unified training data (lazy-loaded on first access). When class_merge_map is set, already merged at load."""
         self._ensure_data()
-        return self._effective_combined_data if self._effective_combined_data is not None else self._combined_data
+        return self._combined_data
 
     def plot_training_convergence(self, **kwargs: Any) -> Any:
         if "img_format" not in kwargs:
             kwargs["img_format"] = getattr(self.config, "img_format", "pdf")
+        if "dpi" not in kwargs and getattr(self.config, "img_dpi", None) is not None:
+            kwargs["dpi"] = self.config.img_dpi
         return super().plot_training_convergence(**kwargs)
 
     def plot_encoder_distributions(self, **kwargs: Any) -> Any:
         if "img_format" not in kwargs:
             kwargs["img_format"] = getattr(self.config, "img_format", "pdf")
+        if "dpi" not in kwargs and getattr(self.config, "img_dpi", None) is not None:
+            kwargs["dpi"] = self.config.img_dpi
         return super().plot_encoder_distributions(**kwargs)
 
     def plot_probability_shifts(
         self,
         decoder_results: Optional[Dict[str, Any]] = None,
         class_ids: Optional[List[str]] = None,
+        target_class: Optional[str] = None,
+        increase_target_probabilities: bool = True,
         use_cache: Optional[bool] = None,
         **kwargs: Any
     ) -> str:
-        """Plot decoder evaluation probability shifts vs learning rate."""
+        """Plot decoder evaluation probability shifts vs learning rate for a target class.
+        Uses target_class and increase_target_probabilities (default True = strengthen) to choose which summary config to plot."""
         if "img_format" not in kwargs:
             kwargs["img_format"] = getattr(self.config, "img_format", "pdf")
-        return self.visualizer.plot_probability_shifts(
+        if "dpi" not in kwargs and getattr(self.config, "img_dpi", None) is not None:
+            kwargs["dpi"] = self.config.img_dpi
+        return self.evaluator.plot_probability_shifts(
             decoder_results=decoder_results,
             class_ids=class_ids,
+            target_class=target_class,
+            increase_target_probabilities=increase_target_probabilities,
             use_cache=use_cache,
             **kwargs
         )
@@ -1074,65 +1124,49 @@ class TextPredictionTrainer(Trainer):
         elif "factual_id" in training_like_df.columns:
             dataset_class_col = "factual_id"
         
-        # Determine if we need counterfactual filtering (for backward compatibility with selection logic)
         data_class_col = None
         if getattr(self.config, "decoder_eval_prob_on_other_class", True):
             if "alternative_id" in training_like_df.columns:
                 data_class_col = "alternative_id"
         
         # Compute probabilities for all classes on all datasets
-        probability_results = evaluate_probability_shift_score(
+        probs_by_dataset = evaluate_probability_shift_score(
             model,
             tokenizer,
             targets=targets,
             eval_data_df=training_like_df,
             key_text=self.config.masked_col,
-            data_class_col=data_class_col,  # For backward compatibility: filters to counterfactual if provided
-            dataset_class_col=dataset_class_col,  # For new structure: groups by dataset class
+            dataset_class_col=dataset_class_col,
         )
 
-        # Extract probs_by_dataset and probs (for backward compatibility)
-        # Check if probability_results is new structure (nested dict) or old structure (flat dict)
-        is_new_structure = (
-            isinstance(probability_results, dict) 
-            and probability_results 
-            and isinstance(next(iter(probability_results.values())), dict)
-        )
-        
-        if is_new_structure:
-            # New structure: {dataset_class: {class_name: prob, ...}, ...}
-            probs_by_dataset = probability_results
-            
-            # For backward compatibility with selection logic, extract counterfactual probs if data_class_col was used
-            if data_class_col and dataset_class_col:
-                # Extract counterfactual probabilities: P(class_name) evaluated on OTHER class's dataset
-                counterfactual_probs = {}
-                for row in training_like_df.to_dict("records"):
-                    alternative_class = row.get(data_class_col)  # e.g., "3PL"
-                    dataset_class = row.get(dataset_class_col)   # e.g., "3SG"
-                    if alternative_class is not None and dataset_class is not None:
-                        for class_name in targets.keys():
-                            if alternative_class != class_name:
-                                # Get probability of class_name evaluated on dataset_class
-                                if dataset_class in probs_by_dataset:
-                                    if class_name in probs_by_dataset[dataset_class]:
-                                        if class_name not in counterfactual_probs:
-                                            counterfactual_probs[class_name] = []
-                                        counterfactual_probs[class_name].append(probs_by_dataset[dataset_class][class_name])
-                
-                # Average counterfactual probabilities
-                if counterfactual_probs:
-                    probs = {g: float(np.mean(v)) for g, v in counterfactual_probs.items() if v}
-                else:
-                    # Fallback: use first dataset
-                    probs = next(iter(probs_by_dataset.values())) if probs_by_dataset else {}
-            else:
-                # No counterfactual filtering: use first dataset as fallback
-                probs = next(iter(probs_by_dataset.values())) if probs_by_dataset else {}
+        # Extract selection metrics:
+        # - strengthen: P(target_class) on *other* class datasets (counterfactual)
+        # - weaken:     P(class) on its own dataset (factual)
+        probs_factual: Dict[str, float] = {}
+        if data_class_col and dataset_class_col:
+            counterfactual_probs = {}
+            for class_name in targets.keys():
+                other_classes = [c for c in targets.keys() if c != class_name]
+                # Strengthen metric: P(class_name) on datasets of other classes
+                if other_classes:
+                    vals: List[float] = []
+                    for other in other_classes:
+                        if other in probs_by_dataset:
+                            probs_for_other = probs_by_dataset[other]
+                            if class_name in probs_for_other:
+                                vals.append(float(probs_for_other[class_name]))
+                    if vals:
+                        counterfactual_probs[class_name] = float(np.mean(vals))
+                # Factual metric: P(class_name) on its own dataset (for weaken)
+                if class_name in probs_by_dataset and class_name in probs_by_dataset[class_name]:
+                    probs_factual[class_name] = float(probs_by_dataset[class_name][class_name])
+            probs = counterfactual_probs if counterfactual_probs else next(iter(probs_by_dataset.values())) if probs_by_dataset else {}
         else:
-            # Old structure: {class_name: prob, ...} (backward compatibility with mocks/tests)
-            probs = probability_results
-            probs_by_dataset = None
+            probs = next(iter(probs_by_dataset.values())) if probs_by_dataset else {}
+            if probs_by_dataset:
+                for class_name in targets.keys():
+                    if class_name in probs_by_dataset and class_name in probs_by_dataset[class_name]:
+                        probs_factual[class_name] = float(probs_by_dataset[class_name][class_name])
 
         # Compute LMS
         ignore_tokens = self.config.decoder_eval_ignore_tokens
@@ -1161,12 +1195,15 @@ class TextPredictionTrainer(Trainer):
 
         # Return in standard format with new structure
         result = {
-            'probs': probs,  # Backward compatibility: counterfactual probs for selection
+            'probs': probs,  # Counterfactual probs for selection (P(other) on metric dataset) for strengthen
             'lms': lms,
         }
         # Add probs_by_dataset if available
         if probs_by_dataset is not None:
             result['probs_by_dataset'] = probs_by_dataset
+        # Factual probs P(class) on class dataset for weaken selection
+        if probs_factual:
+            result['probs_factual'] = probs_factual
 
         # Save cache
         if cache_file:
@@ -1189,7 +1226,7 @@ class TextPredictionTrainer(Trainer):
         evaluated on all datasets.
 
         Args:
-            decoder_results: Standard decoder evaluation results (with 'summary' and 'grid').
+            decoder_results: Decoder evaluation result (summary at top level, e.g. result['3SG'], plus 'grid').
                 If None, calls evaluate_decoder() to get base results.
             model_with_gradiend: ModelWithGradiend instance. If None, uses self.get_model().
             class_ids: Classes to evaluate probabilities for. If None, uses all_classes if available,
@@ -1197,13 +1234,14 @@ class TextPredictionTrainer(Trainer):
             use_cache: Whether to use cached results when re-evaluating.
 
         Returns:
-            Dict with 'plotting_data' (extended grid with probs_by_dataset) and 'summary' (from decoder_results).
+            Dict with 'plotting_data' (extended grid with probs_by_dataset) and 'summary' (summary entries from decoder_results).
         """
         if decoder_results is None:
             decoder_results = self.evaluate_decoder(use_cache=use_cache, **kwargs)
         
         grid = decoder_results.get("grid", {})
-        summary = decoder_results.get("summary", {})
+        _reserved = {"grid", "plot_path", "plot_paths"}
+        summary = {k: v for k, v in decoder_results.items() if k not in _reserved}
         
         # Determine classes to evaluate
         if class_ids is None:
@@ -1264,10 +1302,6 @@ class TextPredictionTrainer(Trainer):
                     )
                     if "probs_by_dataset" in base_result:
                         extended_entry["probs_by_dataset"] = base_result["probs_by_dataset"]
-                    else:
-                        # Fallback: create probs_by_dataset from probs if available
-                        if "probs" in base_result:
-                            extended_entry["probs_by_dataset"] = {"default": base_result["probs"]}
                 else:
                     # Extract feature_factor and lr from candidate_id
                     if isinstance(candidate_id, tuple) and len(candidate_id) == 2:
@@ -1298,11 +1332,6 @@ class TextPredictionTrainer(Trainer):
                     
                     if "probs_by_dataset" in modified_result:
                         extended_entry["probs_by_dataset"] = modified_result["probs_by_dataset"]
-                    else:
-                        # Fallback: create probs_by_dataset from probs if available
-                        if "probs" in modified_result:
-                            # Use probs as fallback (single dataset)
-                            extended_entry["probs_by_dataset"] = {"default": modified_result["probs"]}
                     
                     del modified_model
                     torch.cuda.empty_cache()
@@ -1323,7 +1352,7 @@ class TextPredictionTrainer(Trainer):
             encoder_kwargs: Dict[str, Any],
     ) -> List[Dict[str, Any]]:
         """Encode training data via gradients and return rows with text, encoded, label, type='training'."""
-        logger.info(f"Encoding training data (max_size={max_size} per feature class, source_type={source_type})...")
+        logger.info("Encoding training data (max_size=%s, source=%s)", max_size, source_type)
         eval_result = self.evaluator.evaluate_encoder(
             eval_data=train_eval_data,
             use_cache=False,
@@ -1382,7 +1411,7 @@ class TextPredictionTrainer(Trainer):
         base_excluded = list(excluded_tokens) if excluded_tokens else []
         excluded_for_masked = list(set(base_excluded) | target_tokens_from_data)
 
-        logger.info(f"Encoding neutral training masked data (max_size={max_size})...")
+        logger.info("Encoding neutral training masked data (max_size=%s)", max_size)
         if excluded_for_masked:
             logger.debug(f"Excluded tokens: {excluded_for_masked[:10]}..." if len(
                 excluded_for_masked) > 10 else f"Excluded tokens: {excluded_for_masked}")
@@ -1523,7 +1552,7 @@ class TextPredictionTrainer(Trainer):
         if neutral_data_df is None or len(neutral_data_df) == 0:
             return []
 
-        logger.info(f"Encoding neutral dataset data ({len(neutral_data_df)} samples)...")
+        logger.info("Encoding neutral dataset data (%s samples)", len(neutral_data_df))
         logger.debug(f"neutral_data_df columns: {list(neutral_data_df.columns)}")
 
         tokenizer = model_with_gradiend.tokenizer
@@ -1967,7 +1996,7 @@ class TextPredictionTrainer(Trainer):
 
         # Try to load cached data
         if use_cache and output_path is not None and os.path.exists(output_path):
-            logger.info(f"Loading cached encoder analysis from {output_path}")
+            logger.info("Using cached encoder analysis")
             df_cached = pd.read_csv(output_path)
             # Check if cached data has the required 'type' column with correct values
             if 'type' not in df_cached.columns:
@@ -2005,10 +2034,7 @@ class TextPredictionTrainer(Trainer):
         max_size = encoder_kwargs.get("max_size")
 
         # Perform analysis (will cache automatically if output_path is set)
-        if output_path is not None:
-            logger.info(f"Computing encoder analysis for all variants (will cache to {output_path})")
-        else:
-            logger.info("Computing encoder analysis for all variants (no cache path set)")
+        logger.info("Computing encoder analysis for all variants")
 
         # Determine column names from encoder_kwargs or training_args defaults
         masked_col_name = encoder_kwargs.get("masked_col") or self.config.masked_col

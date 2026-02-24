@@ -12,7 +12,6 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import pandas as pd
 import torch
-from tqdm import tqdm
 import torch.nn.functional as F
 from sklearn.metrics import f1_score, precision_score, recall_score
 
@@ -276,7 +275,7 @@ def _evaluate_with_common_workflow(
     start = time.time()
     n = len(text_data)
 
-    for start_idx in tqdm(range(0, n, batch_size), desc="LMS", total=max(1, (n + batch_size - 1) // batch_size), leave=True):
+    for start_idx in range(0, n, batch_size):
         end_idx = min(start_idx + batch_size, n)
         batch_sentences = text_data[start_idx:end_idx]
         if hasattr(batch_sentences, "tolist"):
@@ -333,7 +332,7 @@ def evaluate_clm_perplexity(
     start = time.time()
     n = len(text_data)
 
-    for start_idx in tqdm(range(0, n, batch_size), desc="LMS (CLM)", total=(n + batch_size - 1) // batch_size, leave=True):
+    for start_idx in range(0, n, batch_size):
         end_idx = min(start_idx + batch_size, n)
         batch_sentences = text_data[start_idx:end_idx]
         if hasattr(batch_sentences, "tolist"):

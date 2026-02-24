@@ -59,6 +59,7 @@ class GradiendModel(nn.Module):
         device: Optional[torch.device] = None,
         device_encoder: Optional[torch.device] = None,
         device_decoder: Optional[torch.device] = None,
+        lazy_init: bool = False,
         **kwargs: Any,
     ) -> None:
         """
@@ -81,6 +82,8 @@ class GradiendModel(nn.Module):
                 devices are not provided.
             device_encoder: Device for encoder parameters.
             device_decoder: Device for decoder parameters.
+            lazy_init: If True, do not create encoder/decoder weights here. Build them later
+                via prune (with pruned size) or _build_encoder_decoder (full size).
             **kwargs: Additional metadata stored in `self.kwargs` and serialized into config.json metadata
                 on save. Non-JSONable values are stringified in a safe way.
         """
@@ -98,26 +101,67 @@ class GradiendModel(nn.Module):
         self.activation_decoder = activation_decoder
         self.bias_decoder = bool(bias_decoder)
         self.torch_dtype = torch_dtype
+        self._lazy_init = bool(lazy_init)
 
         self.kwargs = kwargs
         if "base_model" in self.kwargs and hasattr(self.kwargs["base_model"], "name_or_path"):
             self.kwargs["base_model"] = self.kwargs["base_model"].name_or_path
 
-        activation_fnc = get_activation(self.activation, encoder=True)
-
         if activation_decoder:
-            activation_fnc_decoder = get_activation(activation_decoder)
             self.activation_decoder = activation_decoder
         else:
-            activation_fnc_decoder = get_activation(self.activation, encoder=False)
             self.activation_decoder = self.activation
 
+        if self._lazy_init:
+            self.encoder = None
+            self.decoder = None
+        else:
+            activation_fnc = get_activation(self.activation, encoder=True)
+            if activation_decoder:
+                activation_fnc_decoder = get_activation(activation_decoder)
+            else:
+                activation_fnc_decoder = get_activation(self.activation, encoder=False)
+
+            self.encoder = nn.Sequential(
+                LargeLinear(self.input_dim, self.latent_dim, dtype=torch_dtype, device=self.device_encoder),
+                activation_fnc,
+            )
+            self.decoder = nn.Sequential(
+                LargeLinear(self.latent_dim, self.input_dim, bias=self.bias_decoder, dtype=torch_dtype, device=self.device_decoder),
+                activation_fnc_decoder,
+            )
+
+            # initialize decoder similar scale as encoder
+            x = self.encoder[0].weight.max().item()
+            nn.init.uniform_(self.decoder[0].weight, -x, x)
+            if self.bias_decoder:
+                nn.init.uniform_(self.decoder[0].bias, -x, x)
+
+        self.ctr = 0
+
+    def _build_encoder_decoder(self, input_dim: int) -> None:
+        """
+        Instantiate encoder and decoder with given input_dim. Used for lazy init:
+        either after prune (with pruned size) or before first use (with full size).
+        """
+        if self.encoder is not None and self.decoder is not None:
+            return
+        self.input_dim = int(input_dim)
+        if self.input_dim <= 0:
+            raise ValueError("input_dim must be positive.")
+
+        activation_fnc = get_activation(self.activation, encoder=True)
+        if self.activation_decoder and self.activation_decoder != self.activation:
+            activation_fnc_decoder = get_activation(self.activation_decoder)
+        else:
+            activation_fnc_decoder = get_activation(self.activation, encoder=False)
+
         self.encoder = nn.Sequential(
-            LargeLinear(self.input_dim, self.latent_dim, dtype=torch_dtype, device=self.device_encoder),
+            LargeLinear(self.input_dim, self.latent_dim, dtype=self.torch_dtype, device=self.device_encoder),
             activation_fnc,
         )
         self.decoder = nn.Sequential(
-            LargeLinear(self.latent_dim, self.input_dim, bias=self.bias_decoder, dtype=torch_dtype, device=self.device_decoder),
+            LargeLinear(self.latent_dim, self.input_dim, bias=self.bias_decoder, dtype=self.torch_dtype, device=self.device_decoder),
             activation_fnc_decoder,
         )
 
@@ -126,8 +170,6 @@ class GradiendModel(nn.Module):
         nn.init.uniform_(self.decoder[0].weight, -x, x)
         if self.bias_decoder:
             nn.init.uniform_(self.decoder[0].bias, -x, x)
-
-        self.ctr = 0
 
     def to(
         self,
@@ -142,21 +184,26 @@ class GradiendModel(nn.Module):
         - If device_encoder or device_decoder is provided, moves only those submodules.
         - If device is provided (and no split devices), moves both to that device.
         - If device_encoder/device_decoder is None, leaves that submodule's placement unchanged.
+        - When encoder/decoder are not yet built (lazy init), only updates target device attributes.
         """
         if device_encoder is not None or device_decoder is not None:
-            if device_encoder is not None and hasattr(self, "encoder"):
-                self.encoder.to(device_encoder)
+            if device_encoder is not None:
                 self.device_encoder = torch.device(device_encoder) if isinstance(device_encoder, str) else device_encoder
-            if device_decoder is not None and hasattr(self, "decoder"):
-                self.decoder.to(device_decoder)
+                if self.encoder is not None:
+                    self.encoder.to(self.device_encoder)
+            if device_decoder is not None:
                 self.device_decoder = torch.device(device_decoder) if isinstance(device_decoder, str) else device_decoder
+                if self.decoder is not None:
+                    self.decoder.to(self.device_decoder)
             return self
         if device is not None:
             dev = torch.device(device) if isinstance(device, str) else device
-            self.encoder.to(dev)
-            self.decoder.to(dev)
             self.device_encoder = dev
             self.device_decoder = dev
+            if self.encoder is not None:
+                self.encoder.to(dev)
+            if self.decoder is not None:
+                self.decoder.to(dev)
         return self
 
     def cpu(self) -> "GradiendModel":
@@ -172,6 +219,19 @@ class GradiendModel(nn.Module):
         return self.to(device)
 
     # ----------------- norms -----------------
+    def _require_built(self) -> None:
+        """Raise if encoder/decoder are not yet built (lazy init)."""
+        if self.encoder is None or self.decoder is None:
+            raise RuntimeError(
+                "Encoder/decoder weights not yet built. For lazy-init gradiend with pre_prune, "
+                "call prune() first. Otherwise call _build_encoder_decoder(input_dim)."
+            )
+
+    def _ensure_built(self) -> None:
+        """Build encoder/decoder with current input_dim if not yet built (lazy init)."""
+        if self.encoder is None or self.decoder is None:
+            self._build_encoder_decoder(self.input_dim)
+
     @property
     def base_model_id(self) -> str:
         """
@@ -193,6 +253,7 @@ class GradiendModel(nn.Module):
         Returns:
             Scalar float of the decoder's weight L2 norm.
         """
+        self._require_built()
         return torch.norm(self.decoder[0].weight, p=2).item()
 
     @property
@@ -203,6 +264,7 @@ class GradiendModel(nn.Module):
         Returns:
             Scalar float of the encoder's weight L2 norm.
         """
+        self._require_built()
         return torch.norm(self.encoder[0].weight, p=2).item()
 
     # ----------------- importance -----------------
@@ -220,6 +282,7 @@ class GradiendModel(nn.Module):
             1D CPU float tensor of length input_dim, where higher means more
             influential according to the chosen aggregation.
         """
+        self._require_built()
         part = (part or "decoder-weight").lower()
         vec = self.get_update_vector(part=part).detach().cpu()
 
@@ -252,6 +315,7 @@ class GradiendModel(nn.Module):
         Returns:
             1D tensor in GRADIEND input space derived from the requested component.
         """
+        self._require_built()
         part = (part or "decoder-weight").lower()
 
         if part == "decoder-weight":
@@ -329,6 +393,7 @@ class GradiendModel(nn.Module):
                 - decoded: tensor of shape (input_dim,)
                 - encoded: tensor of shape (latent_dim,)
         """
+        self._require_built()
         self._ensure_input(x)
 
         encoded = self.encoder(x)
@@ -349,6 +414,7 @@ class GradiendModel(nn.Module):
         Returns:
             Encoded tensor of shape (latent_dim,).
         """
+        self._require_built()
         x = self._ensure_input(x)
         return self.encoder(x)
 
@@ -443,7 +509,16 @@ class GradiendModel(nn.Module):
         """
         if topk is None and threshold is None and mask is None:
             raise ValueError("At least one of topk, threshold, mask must be provided.")
-        
+
+        # topk=1.0 (float) means no pruning (return self); topk int 1 means keep top-1 dimension
+        if topk is not None and isinstance(topk, float) and topk == 1.0:
+            m = self if inplace else copy.deepcopy(self)
+            if return_mask:
+                old_input_dim = int(self.input_dim)
+                full_mask = torch.ones(old_input_dim, dtype=torch.bool, device="cpu")
+                return m, full_mask
+            return m
+
         old_input_dim = int(self.input_dim)
         combined = torch.ones(old_input_dim, dtype=torch.bool, device="cpu")
         
@@ -509,6 +584,7 @@ class GradiendModel(nn.Module):
         Returns:
             None.
         """
+        self._require_built()
         os.makedirs(save_directory, exist_ok=True)
 
         prefer_safetensors = (use_safetensors is not False)

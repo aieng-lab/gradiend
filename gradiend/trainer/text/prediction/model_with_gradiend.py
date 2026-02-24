@@ -35,7 +35,11 @@ class TextPredictionModelWithGradiend(TextModelWithGradiend):
         loss_base_model = outputs.loss
         self.base_model.zero_grad()
         loss_base_model.backward()
-        gradients = self.gradiend.extract_gradients(self.base_model, return_dict=return_dict)
+        gradients = self.gradiend.extract_gradients(
+            self.base_model,
+            return_dict=return_dict,
+            target_device=self.gradiend.device_encoder,
+        )
         self.base_model.zero_grad(set_to_none=True)
         return gradients
 
@@ -91,7 +95,12 @@ class TextPredictionModelWithGradiend(TextModelWithGradiend):
         loss_bert = outputs.loss
         self.base_model.zero_grad()
         loss_bert.backward()
-        return self.gradiend.extract_gradients(self.base_model, return_dict=return_dict)
+        target_device = kwargs.pop("target_device", self.gradiend.device_encoder)
+        return self.gradiend.extract_gradients(
+            self.base_model,
+            return_dict=return_dict,
+            target_device=target_device,
+        )
 
     def mask_and_encode(self, text, ignore_tokens=False, return_masked_text=False, single_mask=True, topk=None, topk_part=None):
         item = self.tokenizer(text, return_tensors="pt", max_length=512, truncation=True)
@@ -132,7 +141,9 @@ class TextPredictionModelWithGradiend(TextModelWithGradiend):
             return None
         self.base_model.zero_grad()
         loss_base_model.backward()
-        gradients = self.gradiend.extract_gradients(self.base_model)
+        gradients = self.gradiend.extract_gradients(
+            self.base_model, target_device=self.gradiend.device_encoder
+        )
         self.base_model.zero_grad(set_to_none=True)
         if topk is not None:
             topk_part = topk_part or "encoder-weight"

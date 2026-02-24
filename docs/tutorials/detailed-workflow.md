@@ -102,7 +102,7 @@ trainer.train()
 trainer.plot_training_convergence()
 enc_eval = trainer.evaluate_encoder(max_size=100, return_df=True, plot=True)
 dec_results = trainer.evaluate_decoder()
-changed_model = trainer.rewrite_base_model(decoder_results=dec_results, metric_key="masc_nom")
+changed_model = trainer.rewrite_base_model(decoder_results=dec_results, target_class="masc_nom")
 ```
 
 For **why** each option matters and what to change when, follow the part tutorials: [Data generation](data-generation.md) → [Training](training.md) → [Evaluation (intra-model)](evaluation-intra-model.md) and [Evaluation (inter-model)](evaluation-inter-model.md).
@@ -113,7 +113,7 @@ For **why** each option matters and what to change when, follow the part tutoria
 
 - **[Data generation](data-generation.md)** — Syncretism, spaCy tags, one filter per gender–case cell.
 - **[Training](training.md)** — `experiment_dir` and `run_id`, source/target, pre- and post-pruning, multi-seed, convergence plot.
-- **[Evaluation (intra-model)](evaluation-intra-model.md)** — Encoder vs decoder, caching, `metric_key`, saving changed models.
+- **[Evaluation (intra-model)](evaluation-intra-model.md)** — Encoder vs decoder, caching, `target_class`, saving changed models.
 - **[Evaluation (inter-model)](evaluation-inter-model.md)** — Top-k overlap and heatmap for comparing runs.
 - **[Data handling](../guides/data-handling.md)** — All supported data formats and column names.
 - **[Decoder-only models](../guides/decoder-only.md)** — Causal LMs and optional MLM head.

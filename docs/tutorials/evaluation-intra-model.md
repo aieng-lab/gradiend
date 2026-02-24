@@ -105,17 +105,30 @@ It tries different positive **learning rates** and **feature factors** (usually 
 Each run measures how much the model’s predictions shift (i.e. probability of target tokens and impact on language modeling performance). 
 The result is a grid of scores; the “best” configuration is the one that maximizes a chosen metric (e.g. probability shift toward the target class while satisfying a language-model constraint), see *policies* below.
 
-**evaluate_decoder()** runs this grid (or loads it from cache when **use_cache=True**). It returns a dict with **summary** (per-class or combined best configs), raw results, and metadata.
+**evaluate_decoder()** runs this grid (or loads it from cache when **use_cache=True**). It returns a dict with summary entries at top level (e.g. `dec['3SG']` for strengthen, `dec['3SG_weaken']` for weaken), plus `grid` and optional `plot_paths`/`plot_path`. By default only the **strengthen** direction is computed; pass **increase_target_probabilities=False** to compute only **weaken** (summary keys then use the `_weaken` suffix). Only the dataset–feature-factor combinations required for the chosen direction are evaluated.
 
 ---
 
-### Selecting the “changed” model (metric_key)
+### Neutral data for decoder evaluation (LMS)
 
-The decoder results dict has one or more **metric keys**:  per-class keys (e.g. your `target_classes` ids like `"masc_nom"`, `"fem_nom"`). Each key has a recommended **feature_factor** and **learning_rate**.
+Decoder evaluation needs two kinds of data: **training-like** (for probability scoring) and **neutral** (for LMS, i.e. language modeling score). The neutral data should ideally be feature-independent (no target tokens), so LMS reflects general language quality.
 
-- **rewrite_base_model(decoder_results=..., metric_key="masc_nom")** rewrites the base model **in memory** only: it takes the trainer’s trained model and applies the decoder with the best config for that key. It returns the rewritten model (e.g. a `BertForMaskedLM`) that you can use for inference or further evaluation. By default, it does **not** save to disk.
-- **metric_key** can be a single string (one model) or a list of strings (one model per key). Use the class id when you want the model biased toward that class (e.g. `metric_key="masc_nom"` for “stronger masculine nominative”).
-- If you set **experiment_dir** and have already run **evaluate_decoder(use_cache=True)**, you can omit **decoder_results**: the trainer will load the cached decoder stats from disk when available (so you can call **rewrite_base_model(metric_key="masc_nom")** without keeping the large dict in memory). This requires **use_cache=True** when running **evaluate_decoder** so that the decoder results cache is populated.
+**`eval_neutral_data` is optional.** When you omit it (or pass `None`):
+
+- **Fallback:** The trainer uses the **training-like data** (test split) as neutral data. Each row's `text` column is built by filling the mask with the **factual token**.
+- **LMS behavior:** Because these texts contain target tokens, the trainer automatically adds all target tokens to `decoder_eval_ignore_tokens`, so they are ignored when computing perplexity. This avoids distorting LMS by feature-related predictions.
+
+For best practice, provide true neutral data (e.g. via `TextPredictionDataCreator.generate_neutral_data()` or a HuggingFace dataset like `aieng-lab/wortschatz-leipzig-de-grammar-neutral`) when available. The fallback is suitable for quick runs or when neutral data is not available.
+
+---
+
+### Selecting the “changed” model (target_class)
+
+The decoder results dict has one or more **target class** keys (e.g. your `target_classes` ids like `"masc_nom"`, `"fem_nom"`). Each key has a recommended **feature_factor** and **learning_rate**.
+
+- **rewrite_base_model(decoder_results=..., target_class="masc_nom")** rewrites the base model **in memory** only: it takes the trainer’s trained model and applies the decoder with the best config for that class. It returns the rewritten model (e.g. a `BertForMaskedLM`) that you can use for inference or further evaluation. By default, it **strengthens** the target class (increases its token probabilities). Decoder evaluation produces strengthen summaries only. To weaken, run evaluate_decoder(increase_target_probabilities=False) (keys e.g. "masc_nom_weaken") and rewrite_base_model(..., increase_target_probabilities=False).
+- **target_class** can be a single string (one model) or a list of strings (one model per class). Use the class id when you want the model biased toward that class (e.g. `target_class="masc_nom"` for “stronger masculine nominative”).
+- If you set **experiment_dir** and have already run **evaluate_decoder(use_cache=True)**, you can omit **decoder_results**: the trainer will load the cached decoder stats from disk when available (so you can call **rewrite_base_model(target_class="masc_nom")** without keeping the large dict in memory). This requires **use_cache=True** when running **evaluate_decoder** so that the decoder results cache is populated.
 
 
 
@@ -123,7 +136,7 @@ The decoder results dict has one or more **metric keys**:  per-class keys (e.g. 
 
 ### Saving the changed model to disk
 
-Pass **output_dir** to **rewrite_base_model(...)** to save the rewritten model(s) to disk. You need a place to save: either **experiment_dir** in `TrainingArguments` (then the path is derived from the run and metric key) or **output_dir** for a single metric key.
+Pass **output_dir** to **rewrite_base_model(...)** to save the rewritten model(s) to disk. You need a place to save: either **experiment_dir** in `TrainingArguments` (then the path is derived from the run and target class) or **output_dir** for a single target class.
 
 ---
 
@@ -147,8 +160,10 @@ enc_eval = trainer.evaluate_encoder(max_size=100, return_df=True, plot=True)
 dec_results = trainer.evaluate_decoder()
 # Optional: dec_results = trainer.evaluate_decoder(use_cache=True) when re-running
 
-changed_model = trainer.rewrite_base_model(decoder_results=dec_results, metric_key="masc_nom")
-# Or save: trainer.rewrite_base_model(decoder_results=dec_results, metric_key="masc_nom", output_dir="./output")
+changed_model = trainer.rewrite_base_model(decoder_results=dec_results, target_class="masc_nom")
+# Strengthen (default): higher probability for target class
+# Weaken: trainer.rewrite_base_model(..., target_class="masc_nom", increase_target_probabilities=False)
+# Or save: trainer.rewrite_base_model(decoder_results=dec_results, target_class="masc_nom", output_dir="./output")
 ```
 
 ---

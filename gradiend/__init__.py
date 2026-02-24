@@ -49,6 +49,7 @@ from gradiend.util.logging import setup_logging, get_logger
 from gradiend.trainer import (
     load_training_stats,
     TrainingArguments,
+    TrainerConfig,
     GradientTrainingDataset,
     TextGradientTrainingDataset,
     create_model_with_gradiend,
@@ -71,6 +72,7 @@ __all__ = [
     # Trainers and configs
     "TextPredictionTrainer",
     "TextPredictionConfig",
+    "TrainerConfig",
     "PrePruneConfig",
     "PostPruneConfig",
     # Logging

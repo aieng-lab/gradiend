@@ -59,11 +59,11 @@ class TestEvaluateBaseModelProbabilityComputation:
         
         neutral_df = pd.DataFrame([{"text": "neutral text"}])
         
-        # Mock evaluate_probability_shift_score to return predictable results
+        # Mock evaluate_probability_shift_score to return nested structure
         with patch('gradiend.trainer.text.prediction.trainer.evaluate_probability_shift_score') as mock_eval:
             mock_eval.return_value = {
-                "3SG": 0.7,  # Probability of 3SG tokens on counterfactual (3PL) data
-                "3PL": 0.3,  # Probability of 3PL tokens on counterfactual (3SG) data
+                "3SG": {"3SG": 0.8, "3PL": 0.2},
+                "3PL": {"3SG": 0.7, "3PL": 0.3},
             }
             
             with patch('gradiend.trainer.text.prediction.trainer.compute_lms') as mock_lms:
@@ -86,9 +86,9 @@ class TestEvaluateBaseModelProbabilityComputation:
         assert "3SG" in result["probs"]
         assert "3PL" in result["probs"]
         
-        # Verify probabilities are floats
-        assert isinstance(result["probs"]["3SG"], float)
-        assert isinstance(result["probs"]["3PL"], float)
+        # Counterfactual: probs["3SG"] = P(3PL) on 3SG, probs["3PL"] = P(3SG) on 3PL
+        assert result["probs"]["3SG"] == 0.2
+        assert result["probs"]["3PL"] == 0.7
         
         # Verify LMS structure
         assert isinstance(result["lms"], dict)
@@ -128,11 +128,11 @@ class TestEvaluateBaseModelProbabilityComputation:
             },
         ])
         
-        neutral_df = pd.DataFrame([{"text": "neutral"}])
+        neutral_df = pd.DataFrame([{"text": "neutral_data"}])
         
         # Track calls to evaluate_probability_shift_score
         with patch('gradiend.trainer.text.prediction.trainer.evaluate_probability_shift_score') as mock_eval:
-            mock_eval.return_value = {"3SG": 0.6, "3PL": 0.4}
+            mock_eval.return_value = {"3SG": {"3SG": 0.8, "3PL": 0.2}, "3PL": {"3SG": 0.6, "3PL": 0.4}}
             
             with patch('gradiend.trainer.text.prediction.trainer.compute_lms') as mock_lms:
                 mock_lms.return_value = {"lms": 0.5}
@@ -145,10 +145,10 @@ class TestEvaluateBaseModelProbabilityComputation:
                     use_cache=False,
                 )
             
-            # Verify evaluate_probability_shift_score was called with data_class_col
+            # Verify evaluate_probability_shift_score was called with dataset_class_col
             mock_eval.assert_called_once()
             call_kwargs = mock_eval.call_args[1]
-            assert call_kwargs["data_class_col"] == "alternative_id"  # Should use alternative_id for counterfactual
+            assert call_kwargs["dataset_class_col"] == "label_class"  # From training_like_df columns
     
     def test_evaluate_base_model_multiple_tokens_per_class(self):
         """Test that multiple tokens per class are correctly summed."""
@@ -175,14 +175,13 @@ class TestEvaluateBaseModelProbabilityComputation:
             {"masked": "[MASK] there", "label_class": "fem_nom", "alternative_id": "masc_nom"},
         ])
         
-        neutral_df = pd.DataFrame([{"text": "neutral"}])
+        neutral_df = pd.DataFrame([{"text": "neutral_data"}])
         
-        # Mock evaluate_probability_shift_score - it should sum probabilities for multiple tokens
+        # Mock evaluate_probability_shift_score - returns nested structure
         with patch('gradiend.trainer.text.prediction.trainer.evaluate_probability_shift_score') as mock_eval:
-            # The function should return summed probabilities (P("der") + P("Der") for masc_nom)
             mock_eval.return_value = {
-                "masc_nom": 0.8,  # Sum of P("der") + P("Der")
-                "fem_nom": 0.2,   # Sum of P("die") + P("Die")
+                "masc_nom": {"masc_nom": 0.8, "fem_nom": 0.2},
+                "fem_nom": {"masc_nom": 0.2, "fem_nom": 0.8},
             }
             
             with patch('gradiend.trainer.text.prediction.trainer.compute_lms') as mock_lms:
@@ -205,6 +204,6 @@ class TestEvaluateBaseModelProbabilityComputation:
             assert len(targets["masc_nom"]) == 2  # Should have 2 tokens
             assert len(targets["fem_nom"]) == 2   # Should have 2 tokens
             
-            # Verify result contains summed probabilities
-            assert result["probs"]["masc_nom"] == 0.8
+            # Counterfactual: probs["masc_nom"] = P(fem_nom) on masc_nom = 0.2; probs["fem_nom"] = P(masc_nom) on fem_nom = 0.2
+            assert result["probs"]["masc_nom"] == 0.2
             assert result["probs"]["fem_nom"] == 0.2

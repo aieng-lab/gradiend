@@ -126,6 +126,10 @@ def train(
     for cb in all_callbacks:
         cb.on_train_begin(config=config_dict, training_stats=training_stats)
     
+    # Ensure encoder/decoder built (lazy init: build with full input_dim if not yet built)
+    if hasattr(model_with_gradiend.gradiend, "_ensure_built"):
+        model_with_gradiend.gradiend._ensure_built()
+
     # Setup optimizer (encoder-only, decoder-only, or full GRADIEND)
     if training_args.supervised_encoder:
         train_params = list(model_with_gradiend.gradiend.encoder.parameters())
@@ -192,7 +196,18 @@ def train(
         for cb in all_callbacks:
             cb.on_epoch_begin(epoch=epoch, config=config_dict, training_stats=training_stats)
 
-        dataloader_iterator = tqdm(data, desc=f'Epoch {epoch + 1}/{training_args.num_train_epochs}', leave=True)
+        # Set tqdm total to remaining steps when max_steps will cause early stop this epoch
+        if max_iter is not None:
+            steps_remaining = max(0, max_iter - global_step)
+            epoch_total = min(len(data), steps_remaining) if steps_remaining > 0 else 0
+        else:
+            epoch_total = len(data)
+        dataloader_iterator = tqdm(
+            data,
+            desc=f'Epoch {epoch + 1}/{training_args.num_train_epochs}',
+            total=epoch_total,
+            leave=True,
+        )
 
         data_prep_start = time.time()
         for i, batch in enumerate(dataloader_iterator):
@@ -267,8 +282,6 @@ def train(
                 del source_tensor
                 if target_tensor.device != outputs_gradiend.device:
                     outputs_gradiend = outputs_gradiend.to(target_tensor.device)
-                torch.cuda.empty_cache()
-                gc.collect()
                 loss = training_args.criterion(outputs_gradiend, target_tensor)
                 del target_tensor
             
@@ -412,7 +425,7 @@ def train(
             metric_val = best_score_checkpoint.get("correlation")
             if metric_val is None:
                 metric_val = training_stats.get("correlation")
-            converged = metric_val is not None and metric_val >= threshold
+            converged = metric_val is not None and abs(metric_val) >= threshold
         
         if not converged:
             logger.warning(

@@ -97,8 +97,8 @@ config = TextFilterConfig(
 **Key methods:**
 - `train()` — Start training
 - `evaluate_encoder()` — Evaluate encoder correlation and separation
-- `evaluate_decoder()` — Evaluate decoder's ability to modify the base model
-- `rewrite_base_model()` — Rewrite base model(s) using decoder evaluation results, optionally save to disk
+- `evaluate_decoder()` — Evaluate decoder's ability to modify the base model. By default computes **strengthen** summaries only (keys e.g. `"3SG"`). Use **increase_target_probabilities=False** to compute **weaken** summaries only (keys e.g. `"3SG_weaken"`); only the dataset–feature-factor combinations required for the chosen direction are evaluated.
+- `rewrite_base_model()` — Rewrite base model(s) using decoder evaluation results for given **target_class**(s), optionally save to disk. By default **strengthens** the target class; set **increase_target_probabilities=False** to apply weakening config (requires having run **evaluate_decoder(increase_target_probabilities=False)** so that `dec["<class>_weaken"]` exists).
 - `plot_training_convergence()` — Visualize training progress
 
 **Example:**
@@ -122,7 +122,7 @@ trainer.train()
 # Evaluate
 enc_result = trainer.evaluate_encoder(plot=True)
 dec_result = trainer.evaluate_decoder()
-changed_model = trainer.rewrite_base_model(decoder_results=dec_result)
+changed_model = trainer.rewrite_base_model(decoder_results=dec_result, target_class="masc_nom")  # strengthen (default)
 ```
 
 **See also:** [Start here](../start.md), [Training tutorial](../tutorials/training.md)
@@ -180,7 +180,7 @@ args = TrainingArguments(
 - `target_classes` — Classes to train on (pair is auto-inferred if len=2)
 - `class_merge_map` — Map base classes to merged classes (e.g. `{"singular": ["1SG", "3SG"], "plural": ["1PL", "3PL"]}`); when set, `target_classes` uses merged names; when exactly two keys, `target_classes` can be omitted
 - `masked_col`, `split_col` — Column names
-- `eval_neutral_data` — Neutral evaluation data
+- `eval_neutral_data` — **Optional.** Neutral evaluation data (DataFrame, path, or HuggingFace dataset ID). Used for encoder (`neutral_dataset` variant) and decoder evaluation (LMS). When omitted, decoder evaluation falls back to training-like data (test split with factual masks filled in); target tokens are then ignored in LMS. See [Evaluation (intra-model)](../tutorials/evaluation-intra-model.md#neutral-data-for-decoder-evaluation-lms).
 
 **Example:**
 ```python
@@ -248,7 +248,7 @@ config = TextPredictionConfig(
 
 **Key methods:**
 - `encode()` — Encode gradients to latent feature value
-- `rewrite_base_model()` — Rewrite the base model by applying decoder updates
+- `rewrite_base_model()` — Rewrite the base model by applying decoder updates (takes learning_rate, feature_factor). The **trainer’s** rewrite_base_model(target_class=..., increase_target_probabilities=...) selects these from decoder evaluation and calls this method.
 - `from_pretrained()` — Load base model + GRADIEND model
 
 **Example:**

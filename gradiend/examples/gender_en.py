@@ -10,7 +10,7 @@ to use GENTypes-based name-prediction metrics (paper-style BPI, FPI, MPI; see
 https://arxiv.org/abs/2502.01406). Custom metrics are exposed via a summary_extractor
 (that adds bpi/fpi/mpi to candidates from raw results) and summary_metrics; the
 default SelectionPolicy in compute_metric_summaries then selects the best candidate
-per metric. Use metric_key='bpi' (etc.) with rewrite_base_model(output_dir=...).
+per metric. Use target_class='bpi' (etc.) with rewrite_base_model(output_dir=...).
 """
 
 import json
@@ -419,12 +419,10 @@ if __name__ == "__main__":
 
     enc_eval = trainer.evaluate_encoder(split="test", max_size=100, use_cache=False, return_df=True)
     enc_df = enc_eval.get("encoder_df")
-    if enc_df is not None:
-        trainer.plot_encoder_distributions(encoder_df=enc_df, show=True)
-    print(f"  encoder: {len(enc_df)} samples" if enc_df is not None else "  encoder: (no data)")
-    enc_metrics = trainer.get_encoder_metrics(split="test")
-    if enc_metrics:
-        print(f"  encoder metrics: {enc_metrics}")
+    trainer.plot_encoder_distributions(encoder_df=enc_df, show=True)
+    print(f"  encoder: {len(enc_df)} samples")
+    enc_metrics = trainer.get_encoder_metrics(encoder_df=enc_df)
+    print(f"  encoder metrics: {enc_metrics}")
 
     # Custom decoder: select by argmax(_bpi * lms), argmax(_fpi * lms), argmax(_mpi * lms) via LMSTimesMetricPolicy
     dec = trainer.evaluate_decoder(
@@ -441,7 +439,7 @@ if __name__ == "__main__":
     # Save model that maximizes _bpi * lms
     changed_path = trainer.rewrite_base_model(
         decoder_results=dec,
-        metric_key="_bpi",
+        target_class="_bpi",
         output_dir="./output",
     )
     print(f"Changed model: {changed_path}")

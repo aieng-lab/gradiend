@@ -1,5 +1,14 @@
 # FAQ / troubleshooting
 
+## Is neutral data (`eval_neutral_data`) required?
+
+No. **`eval_neutral_data` is optional.** When omitted:
+
+- **Encoder evaluation** still runs; it simply has no `neutral_dataset` variant (only training and optionally `neutral_training_masked`).
+- **Decoder evaluation** uses a fallback: training-like data (test split with masks filled by the factual token). Target tokens are automatically ignored in LMS (language modeling score) to avoid distorting perplexity.
+
+For best practice, provide true neutral data (e.g. `TextPredictionDataCreator.generate_neutral_data()` or datasets like `aieng-lab/wortschatz-leipzig-de-grammar-neutral`) when available. See [Data handling](guides/data-handling.md#optional-neutral-evaluation-data-eval_neutral_data) and [Evaluation (intra-model)](tutorials/evaluation-intra-model.md#neutral-data-for-decoder-evaluation-lms).
+
 ## Which modalities are supported?
 
 Currently **only gradients based on text prediction (MLM/CLM)** are supported. All documentation and examples use `TextPredictionTrainer`. Other modalities may be added in the future.
@@ -31,8 +40,23 @@ To reduce memory usage, you can:
 - Use a smaller base model (e.g. `bert-base-uncased` instead of `bert-large-uncased`).
 - Reduce the batch size (`train_batch_size`) and/or sequence length of your data.
 - Use mixed precision training (`TrainingArguments.torch_dtype = torch.bfloat16`), which typically reduces memory usage by about half with minimal impact on convergence. Note: this requires a compatible GPU (e.g. NVIDIA Ampere or later for bfloat16).
-- Use multiple GPUs: the library supports currently up to 3 GPUs for training (one for the base model, one for the encoder, and one for the decoder). (The training implementation is not super efficient, but this is a workaround if you have multiple GPUs available.)
+- Use multiple GPUs: device placement is automatic based on GPU count. See [Device placement](#device-placement) below.
 
-## You have a different issue
+## Device placement
+
+Device placement is automatic based on **GPU count** (no model-size heuristic):
+
+| GPUs | Placement |
+|------|-----------|
+| 1 | encoder, decoder, base model all on `cuda:0` |
+| 2 | encoder + base model on `cuda:0`, decoder on `cuda:1` |
+| ≥3 | encoder on `cuda:0`, decoder on `cuda:1`, base model on `cuda:2` |
+| 0 | all on CPU (automatic when no GPUs) |
+
+**CPU mode**: To force CPU when GPUs are available, pass `device="cpu"` when creating the model (e.g. via `ModelWithGradiend.from_pretrained(..., device="cpu")` or the trainer's model-loading kwargs).
+
+**Override individual devices**: Use `device_encoder`, `device_decoder`, `device_base_model` to override specific components.
+
+## I have a different issue
 
 Write a GitHub issue with a clear description of the problem, steps to reproduce, and any error messages or logs. We will try to help as soon as possible!

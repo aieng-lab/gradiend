@@ -7,7 +7,7 @@ Derived from gender_de_detailed.py. Trains GRADIENDs for:
 - Race (3 GRADIENDs: white-black, white-asian, black-asian)
 - Religion (3 GRADIENDs: christian-muslim, christian-jewish, muslim-jewish)
 - English pronouns (10 GRADIENDs: all pairs from 1SG, 1PL, 2, 3SG, 3PL)
-- English pronoun merged groups (4 GRADIENDs: Number SG vs PL; Person 1st↔2nd, 2nd↔3rd, 1st↔3rd)
+- English pronoun merged groups (4 GRADIENDs: Number SG vs PL; Person 1vs2, 1vs3, 2vs3)
 
 Uses a single multilingual model (EuroBERT-210m) and the same TrainingArguments
 as gender_de_detailed. At the end, plots one large top-k overlap heatmap over
@@ -119,12 +119,14 @@ pronoun_pairs = [
     for j in range(i + 1, len(PRONOUN_CLASSES))
 ]
 
-# Merged pronoun groups (class_merge_map): English Number (SG vs PL), English Person (1st vs 2nd, 2nd vs 3rd, 1st vs 3rd)
+# Merged pronoun groups (class_merge_map): Number (SG vs PL), Person (1vs2, 1vs3, 2vs3)
 pronoun_merged_configs = [
-    ("pronoun_number_singular_plural", {"singular": ["1SG", "3SG"], "plural": ["1PL", "3PL"]}, "English Number"),
-    ("pronoun_person_1st_2nd", {"1st": ["1SG", "1PL"], "2nd": ["2"]}, "English Person 1st↔2nd"),
-    ("pronoun_person_2nd_3rd", {"2nd": ["2"], "3rd": ["3SG", "3PL"]}, "English Person 2nd↔3rd"),
-    ("pronoun_person_1st_3rd", {"1st": ["1SG", "1PL"], "3rd": ["3SG", "3PL"]}, "English Person 1st↔3rd"),
+    # Number: singular vs plural
+    ("pronoun_number_singular_plural", {"singular": ["1SG", "3SG"], "plural": ["1PL", "3PL"]}, "English Number SG↔PL", None),
+    # Person: 1vs2, 1vs3, 2vs3
+    ("pronoun_person_1vs2", {"1st": ["1SG", "1PL"], "2nd": ["2"]}, "English Person 1vs2", None),
+    ("pronoun_person_1vs3", {"1st": ["1SG", "1PL"], "3rd": ["3SG", "3PL"]}, "English Person 1vs3", [["1SG", "3SG"], ["1PL", "3PL"]]),
+    ("pronoun_person_2vs3", {"2nd": ["2"], "3rd": ["3SG", "3PL"]}, "English Person 2vs3", None),
 ]
 
 models_for_heatmap = {}
@@ -228,13 +230,15 @@ def train_pronoun_merged():
             f"Pronoun data not found at {PRONOUN_DATA_DIR}. "
             "Run gradiend.examples.data_creation_pronouns to generate training.csv and neutral.csv."
         )
-    for run_id_prefix, class_merge_map, label in pronoun_merged_configs:
+    for run_id_prefix, class_merge_map, label, transition_group in pronoun_merged_configs:
         merged_keys = list(class_merge_map.keys())
+        args.learning_rate = 1e-6
         trainer = TextPredictionTrainer(
             model=model_name,
             run_id=run_id_prefix,
             data=str(training_path),
             class_merge_map=class_merge_map,
+            class_merge_transition_groups=transition_group,
             masked_col="masked",
             split_col="split",
             eval_neutral_data=str(neutral_path),
@@ -252,8 +256,8 @@ def train_pronoun_merged():
 def main():
     os.makedirs(args.experiment_dir, exist_ok=True)
 
-    train_pronoun()
     train_pronoun_merged()
+    train_pronoun()
     train_race_religion()
     train_gender_en()
     train_gender_de()
@@ -298,7 +302,7 @@ def main():
         "neut_gen": "des",
     }
     gender_de_ids_to_articles = {
-        id: r"$\longleftrightarrow$".join(
+        id: r"DE $\longleftrightarrow$".join(
             sorted(
                 ARTICLE_MAPPING["_".join(pair)]
                 for pair in zip(*[iter(id.removeprefix("gender_de_").split("_"))] * 2)
@@ -313,7 +317,7 @@ def main():
 
     def _pretty_label(mid: str) -> str:
         if mid == "gender_en":
-            return "Gender (M$\longleftrightarrow$F)"
+            return "M$\longleftrightarrow$F"
         if mid.startswith("gender_de_"):
             rest = mid.replace("gender_de_", "")  # e.g. fem_acc_neut_acc
             parts = rest.split("_")
@@ -324,12 +328,12 @@ def main():
             return "SG$\longleftrightarrow$PL"
         if mid.startswith("pronoun_person_"):
             rest = mid.replace("pronoun_person_", "")
-            if "_" in rest:
-                c1, c2 = rest.split("_", 1)
-                return f"{c1}$\longleftrightarrow${c2}"
-            return rest
+            person_pretty = {"1vs2": r"1st$\longleftrightarrow$2nd", "1vs3": r"1st$\longleftrightarrow$3rd", "2vs3": r"2nd$\longleftrightarrow$3rd"}
+            return person_pretty.get(rest, rest.replace("vs", r"$\longleftrightarrow$"))
         if mid.startswith("pronoun_"):
             c1, c2 = mid.replace("pronoun_", "").split("_")
+            pretty = {'2': '2SGPL'}
+            c1, c2 = pretty.get(c1, c1), pretty.get(c2, c2)
             return f"{c1}$\longleftrightarrow${c2}"
         if mid.startswith("race_"):
             w1, w2 = mid.replace("race_", "").split("_")
@@ -343,12 +347,12 @@ def main():
     remaining = [m for m in all_ids if m not in ordered]
     pretty_groups = {
         **gender_de_transitions_to_ids,
-        "English Gender": gender_en_ids,
-        "English Pronouns": pronoun_ids,
-        "English Number": pronoun_number_ids,
-        "English Person": pronoun_person_ids,
-        "Race": race_ids,
-        "Religion": religion_ids,
+        "EN Race": race_ids,
+        "EN Religion": religion_ids,
+        "EN Gender": gender_en_ids,
+        "EN Pronouns": pronoun_ids,
+        "EN Number": pronoun_number_ids,
+        "EN Person": pronoun_person_ids,
     }
     if remaining:
         pretty_groups["Other"] = remaining
@@ -358,13 +362,14 @@ def main():
     pretty_labels = {mid: _pretty_label(mid) for mid in order}
 
     topk = 1000
+    output_path = os.path.join(args.experiment_dir, f"topk_overlap_heatmap_all_{topk}.pdf")
     plot_topk_overlap_heatmap(
         models_for_heatmap,
         topk=topk,
         part="decoder-weight",
         value="intersection_frac",
         annot="auto",
-        output_path=os.path.join(args.experiment_dir, f"topk_overlap_heatmap_all_{topk}.pdf"),
+        output_path=output_path,
         show=True,
         pretty_labels=pretty_labels,
         pretty_groups=pretty_groups,
@@ -372,11 +377,11 @@ def main():
         scale="linear",
         group_label_fontsize=16,
         scale_gamma=0.5,
-        tick_label_fontsize=8,
+        tick_label_fontsize=11,
         annot_fontsize=6,
         cbar_pad=0.1,
     )
-    print(f"Heatmap saved to {os.path.join(args.experiment_dir, 'topk_overlap_heatmap_all.pdf')}")
+    print(f"Heatmap saved to {output_path}")
 
 
 if __name__ == "__main__":

@@ -262,8 +262,8 @@ class DecoderModelWithMLMHead(PreTrainedModel):
             # Init wrapper — this will internally freeze decoder and init head
             model = cls(config, target_token_ids=target_token_ids, pooling_length=pooling_length)
 
-            # Load decoder from the base LM checkpoint (use dtype for HF; torch_dtype is deprecated)
-            hf_kwargs = {k if k != "torch_dtype" else "dtype": v for k, v in kwargs.items()}
+            # Load decoder from the base LM checkpoint (HF uses torch_dtype)
+            hf_kwargs = {k: v for k, v in kwargs.items()}
             model.decoder = AutoModelForCausalLM.from_pretrained(
                 pretrained_model_name_or_path, *model_args, **hf_kwargs
             )

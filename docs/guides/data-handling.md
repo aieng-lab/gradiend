@@ -281,6 +281,24 @@ Datasets should provide `train`, `validation` (or `val`), and `test` splits. The
 
 ---
 
+---
+
+## Optional: neutral evaluation data (`eval_neutral_data`)
+
+`TextPredictionTrainer` accepts **optional** neutral data via `eval_neutral_data` (DataFrame, path, or HuggingFace dataset ID). This is used for:
+
+- **Encoder evaluation** — a separate `neutral_dataset` variant for encoding gradients from feature-independent text.
+- **Decoder evaluation (LMS)** — text to compute language modeling score (perplexity) without feature-related targets.
+
+**When `eval_neutral_data` is omitted or empty:**
+
+- Encoder evaluation still runs (no `neutral_dataset` variant).
+- Decoder evaluation falls back to **training-like data** (test split): each row's `text` is built by filling the mask with the factual token. Target tokens are automatically added to `decoder_eval_ignore_tokens` so they are ignored in LMS. This works for quick runs; for best practice, provide true neutral data when available (e.g. `TextPredictionDataCreator.generate_neutral_data()` or HuggingFace datasets like `aieng-lab/wortschatz-leipzig-de-grammar-neutral`).
+
+See [Evaluation (intra-model)](../tutorials/evaluation-intra-model.md#neutral-data-for-decoder-evaluation-lms) for details.
+
+---
+
 ## Generating data from raw text
 
 To **create** training data from base corpora (Wikipedia, CSV, HuggingFace, or lists of strings), use `TextPredictionDataCreator` from `gradiend.data`. See the [Data generation](../tutorials/data-generation.md) tutorial for full usage.

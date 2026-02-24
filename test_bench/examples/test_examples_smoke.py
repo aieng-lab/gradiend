@@ -27,7 +27,7 @@ EXAMPLE_RUNS_DIR = PROJECT_ROOT / "runs" / "examples"
 
 # Example modules to run (under gradiend.examples)
 # start_workflow is the self-contained tutorial script used by docs/start.md
-# data_creation_pronouns must run before english_pronoun_singular_plural (creates data it needs)
+# data_creation_pronouns must run before english_pronouns (creates data it needs)
 EXAMPLE_MODULES = [
     "gradiend.examples.start_workflow",
     "gradiend.examples.race_religion",
@@ -36,7 +36,7 @@ EXAMPLE_MODULES = [
     "gradiend.examples.gender_de_decoder_only",
     "gradiend.examples.data_creator_demo",
     "gradiend.examples.data_creation_pronouns",
-    "gradiend.examples.english_pronoun_singular_plural",
+    "gradiend.examples.english_pronouns",
     "gradiend.examples.gender_de_detailed",
 ]
 
@@ -61,6 +61,20 @@ def _failure_log_path(module_name: str) -> Path:
     return log_dir / f"last_failure_{safe_name}.log"
 
 
+def _write_failure_log(module_name: str, returncode: int, stdout: str, stderr: str, suffix: str = "") -> Path:
+    """Write failure log and return the path. Handles both normal failures and timeouts."""
+    log_path = _failure_log_path(module_name)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(log_path, "w") as f:
+        f.write(f"=== {module_name} (returncode={returncode}){suffix} ===\n\n")
+        f.write("--- stdout ---\n")
+        f.write(stdout or "")
+        f.write("\n--- stderr ---\n")
+        f.write(stderr or "")
+    print(f"\nFull log written to: {log_path}")
+    return log_path
+
+
 @pytest.mark.slow
 @pytest.mark.integration
 @pytest.mark.parametrize("module_name", EXAMPLE_MODULES)
@@ -71,19 +85,26 @@ def test_example_runs_successfully(module_name: str):
     No verification of metrics or outputs — just that the example runs to completion.
     runs/examples/ is removed before each example so use_cache=True does not skip execution.
     On failure, full stdout/stderr are written to test_bench/results/last_failure_<module>.log.
+    Same for timeouts (subprocess.TimeoutExpired).
     """
     if EXAMPLE_RUNS_DIR.exists():
         shutil.rmtree(EXAMPLE_RUNS_DIR)
-    result = _run_example_module(module_name)
+    try:
+        result = _run_example_module(module_name)
+    except subprocess.TimeoutExpired as e:
+        def _to_str(b: object) -> str:
+            return b.decode(errors="replace") if isinstance(b, bytes) else (b or "")
+
+        _write_failure_log(
+            module_name,
+            returncode=-1,
+            stdout=_to_str(e.stdout),
+            stderr=_to_str(e.stderr),
+            suffix=" [TIMEOUT]",
+        )
+        pytest.fail(f"Example {module_name} timed out after 600s. See {_failure_log_path(module_name)}")
     if result.returncode != 0:
-        log_path = _failure_log_path(module_name)
-        with open(log_path, "w") as f:
-            f.write(f"=== {module_name} (returncode={result.returncode}) ===\n\n")
-            f.write("--- stdout ---\n")
-            f.write(result.stdout or "")
-            f.write("\n--- stderr ---\n")
-            f.write(result.stderr or "")
-        print(f"\nFull log written to: {log_path}")
+        _write_failure_log(module_name, result.returncode, result.stdout or "", result.stderr or "")
     assert result.returncode == 0, (
         f"Example {module_name} failed with return code {result.returncode}. "
         f"Full stdout/stderr in {_failure_log_path(module_name)}"

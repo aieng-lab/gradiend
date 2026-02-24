@@ -34,6 +34,9 @@ from .core.callbacks import (
 # Training Arguments (HF-like)
 from .core.arguments import TrainingArguments
 
+# Base config (modality-agnostic)
+from .config import TrainerConfig
+
 # Pre-prune and post-prune configs and helpers
 from .core.pruning import PostPruneConfig, PrePruneConfig, post_prune, pre_prune
 
@@ -46,6 +49,7 @@ from .factory import create_model_with_gradiend
 
 __all__ = [
     "Trainer",
+    "TrainerConfig",
     "load_training_stats",
     "train_core",
     "TrainingArguments",

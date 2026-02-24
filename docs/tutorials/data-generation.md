@@ -113,6 +113,20 @@ creator = TextPredictionDataCreator(
 training_data = creator.generate_training_data(max_size_per_class=5000, format="per_class")
 ```
 
+**Saving to disk with `output_dir`.** Set `output_dir` on the creator to have `generate_training_data` and `generate_neutral_data` write files when you omit the `output=` argument. The directory is created if needed, and default filenames are used (e.g. `training.csv` and `neutral.csv`, depending on `output_format`). Use `training_basename` and `neutral_basename` to customize the base names. If you pass an explicit `output=` to either method, it overrides the default path for that call.
+
+```python
+creator = TextPredictionDataCreator(
+    ...,
+    output_dir="data/german_articles",   # writes training.csv, neutral.csv here
+    training_basename="training",        # default
+    neutral_basename="neutral",          # default
+    output_format="csv",                 # or "parquet", "hf"
+)
+training_data = creator.generate_training_data(max_size_per_class=5000)  # saves to output_dir
+neutral = creator.generate_neutral_data(max_size=5000)                   # saves to output_dir
+```
+
 This creates per-class training data: each key in the dict corresponds to one gender–case cell. Pass it to the trainer as `data=training`; the trainer detects dict input and treats it as per-class automatically. See [Data handling](../guides/data-handling.md).
 
 ---

@@ -105,7 +105,6 @@ class EvaluationCallback(TrainingCallback):
             model.base_model.eval()
             model.gradiend.eval()
 
-            eval_start = time.time()
             eval_result = self.evaluate_fn(config=config, training_stats=training_stats)
             
             if eval_result:

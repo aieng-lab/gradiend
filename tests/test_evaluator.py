@@ -503,3 +503,15 @@ class TestDecoderEvaluator:
         
         # Should accept eval_batch_size parameter
         assert "summary" in result or "grid" in result
+
+    def test_default_decoder_feature_factors_fallback_to_config(self):
+        """default_decoder_feature_factors uses config.target_classes when trainer.target_classes is None."""
+        from gradiend.evaluator.decoder import default_decoder_feature_factors
+
+        trainer = MockTrainer()
+        trainer.target_classes = None  # Simulate use_cache skip before fix
+        trainer.config = type("Config", (), {"target_classes": ["positive", "negative"]})()
+        trainer._model = MockModelWithGradiend()
+
+        factors = default_decoder_feature_factors(trainer, model_with_gradiend=trainer._model)
+        assert factors == [-1.0, 1.0]  # -direction["positive"], -direction["negative"] from model

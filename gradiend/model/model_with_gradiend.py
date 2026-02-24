@@ -187,8 +187,15 @@ class ModelWithGradiend(nn.Module, ABC):
 
         self._gradient_creator = gradient_creator or self
 
-        self.base_model_device = base_model_device or gradiend.encoder[0].linear.weight.device
-        self.base_model.to(self.base_model_device)
+        has_device_map = getattr(self.base_model, "hf_device_map", None) is not None
+        if has_device_map:
+            self.base_model_device = next(self.base_model.parameters()).device
+        else:
+            if gradiend.encoder is not None:
+                self.base_model_device = base_model_device or gradiend.encoder[0].linear.weight.device
+            else:
+                self.base_model_device = base_model_device or gradiend.device_encoder
+            self.base_model.to(self.base_model_device)
         self.gradiend.to(device_encoder=device_encoder, device_decoder=device_decoder)
 
         # Stable parameter map for shapes + updates
@@ -203,7 +210,8 @@ class ModelWithGradiend(nn.Module, ABC):
     def to(self, device: object) -> "ModelWithGradiend":
         """Move base_model and gradiend to the given device. Accepts str or torch.device."""
         dev = torch.device(device) if isinstance(device, str) else device
-        self.base_model.to(dev)
+        if getattr(self.base_model, "hf_device_map", None) is None:
+            self.base_model.to(dev)
         self.gradiend.to(dev)
         return self
 
@@ -625,22 +633,12 @@ class ModelWithGradiend(nn.Module, ABC):
     @classmethod
     def _resolve_device_config(cls, load_directory: str, **kwargs) -> Tuple[Any, Any, Any, bool]:
         """Hook for resolving device placement for base/encoder/decoder."""
-        torch_dtype = kwargs.get("torch_dtype", torch.float32)
-        is_training = kwargs.get("is_training", False)
-        device_override = kwargs.get("device")
-        device_encoder_override = kwargs.get("device_encoder")
-        device_decoder_override = kwargs.get("device_decoder")
-        device_base_model_override = kwargs.get("device_base_model")
-        trust_remote_code = kwargs.get("trust_remote_code", False)
         return resolve_device_config_for_model(
-            load_directory,
-            torch_dtype=torch_dtype,
-            is_training=is_training,
-            device=device_override,
-            device_encoder=device_encoder_override,
-            device_decoder=device_decoder_override,
-            device_base_model=device_base_model_override,
-            trust_remote_code=trust_remote_code,
+            device=kwargs.get("device"),
+            device_encoder=kwargs.get("device_encoder"),
+            device_decoder=kwargs.get("device_decoder"),
+            device_base_model=kwargs.get("device_base_model"),
+            encoder_decoder_same_device=kwargs.get("encoder_decoder_same_device", False),
         )
 
     @classmethod
@@ -663,12 +661,15 @@ class ModelWithGradiend(nn.Module, ABC):
         Create a new ParamMappedGradiendModel when loading a path that is not a GRADIEND checkpoint.
 
         Uses modality-agnostic build_gradiend_from_base_model (backbone vs head split).
+        When pre_prune_config is set, uses lazy_init=True so encoder/decoder are built only after prune.
         Subclasses may override for custom behavior.
         """
+        lazy_init = bool(kwargs.get("pre_prune_config") is not None)
         return build_gradiend_from_base_model(
             base_model,
             load_directory,
             params=kwargs.get("params"),
+            lazy_init=lazy_init,
             **kwargs,
         )
 
@@ -707,7 +708,12 @@ class ModelWithGradiend(nn.Module, ABC):
         # Merge TrainingArguments into kwargs so params etc. are passed to _create_gradiend
         training_args = kwargs.pop("training_args", None)
         if training_args is not None:
-            for key in ("params", "param_map", "trust_remote_code", "torch_dtype"):
+            gradiend_keys = (
+                "params", "param_map", "trust_remote_code", "torch_dtype",
+                "activation_encoder", "activation_decoder", "bias_decoder", "latent_dim",
+                "device_map", "encoder_decoder_same_device", "pre_prune_config",
+            )
+            for key in gradiend_keys:
                 if hasattr(training_args, key) and key not in kwargs:
                     val = getattr(training_args, key, None)
                     if val is not None:

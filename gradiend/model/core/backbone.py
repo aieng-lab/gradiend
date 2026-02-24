@@ -124,6 +124,7 @@ def build_gradiend_from_base_model(
     torch_dtype: Optional[torch.dtype] = None,
     device_encoder: Optional[torch.device] = None,
     device_decoder: Optional[torch.device] = None,
+    lazy_init: bool = False,
     **kwargs: Any,
 ) -> ParamMappedGradiendModel:
     """
@@ -227,6 +228,7 @@ def build_gradiend_from_base_model(
         torch_dtype=torch_dtype,
         device_encoder=device_encoder,
         device_decoder=device_decoder,
+        lazy_init=lazy_init,
         **gradiend_kwargs,
     )
 

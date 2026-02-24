@@ -91,6 +91,7 @@ class ParamMappedGradiendModel(GradiendModel):
         device: Optional[torch.device] = None,
         device_encoder: Optional[torch.device] = None,
         device_decoder: Optional[torch.device] = None,
+        lazy_init: bool = False,
         **kwargs: Any,
     ) -> None:
         """
@@ -110,6 +111,7 @@ class ParamMappedGradiendModel(GradiendModel):
                 devices are not provided.
             device_encoder: Device for encoder parameters.
             device_decoder: Device for decoder parameters.
+            lazy_init: If True, do not create encoder/decoder weights; build on prune.
             **kwargs: Stored in `self.kwargs` and serialized into config.json metadata
                 on save.
         """
@@ -123,6 +125,7 @@ class ParamMappedGradiendModel(GradiendModel):
             device=device,
             device_encoder=device_encoder,
             device_decoder=device_decoder,
+            lazy_init=lazy_init,
             **kwargs,
         )
         self.param_map = param_map
@@ -221,7 +224,10 @@ class ParamMappedGradiendModel(GradiendModel):
     # gradient extraction / IO
     # -----------------------------
     def extract_gradients(
-        self, model: torch.nn.Module, return_dict: bool = False
+        self,
+        model: torch.nn.Module,
+        return_dict: bool = False,
+        target_device: Optional[torch.device] = None,
     ) -> Union[torch.Tensor, Dict[str, torch.Tensor]]:
         """
         Extract gradients from a base model (copies).
@@ -230,10 +236,17 @@ class ParamMappedGradiendModel(GradiendModel):
         - dict[param_name] -> gradient tensor shaped like the parameter, OR
         - a single concatenated 1D tensor in GRADIEND input space
 
+        When target_device is set, gradient chunks are moved there incrementally during
+        extraction, reducing peak memory on the base model GPU (avoids holding a full
+        gradient copy there in addition to the concatenated result).
+
         Args:
             model: Base model that has parameter gradients populated (after backward).
             return_dict: If True, return a dict of per-parameter gradients. If False,
                 return a flattened 1D tensor in GRADIEND input space.
+            target_device: If set, move each gradient chunk to this device before
+                concatenation. Use the encoder device to avoid 2x gradient peak on
+                the base model GPU.
 
         Returns:
             If return_dict is True:
@@ -258,27 +271,50 @@ class ParamMappedGradiendModel(GradiendModel):
                 "This indicates a bug in gradient computation (no backward, no_grad, requires_grad=False, ...)."
             )
 
+        # When streaming to CPU, avoid clone on GPU (saves memory for large models).
+        # Slice then move; .to(cpu) creates the copy. When staying on GPU, clone() is
+        # required so factual/counterfactual copies persist (e.g. for source="diff").
+        stream_to_cpu = (
+            target_device is not None
+            and str(target_device).split(":")[0] == "cpu"
+        )
+
         if return_dict:
             out = {}
             for param_name, _spec in self._param_map_items():
-                out[param_name] = param_lookup[param_name].grad.detach().clone()
+                g = param_lookup[param_name].grad.detach()
+                if stream_to_cpu and g.device.type != "cpu":
+                    g = g.to(target_device, non_blocking=False)
+                elif not stream_to_cpu:
+                    g = g.clone()
+                out[param_name] = g
             return out
 
         parts: List[torch.Tensor] = []
         for param_name, spec in self._param_map_items():
-            g = param_lookup[param_name].grad.detach().clone().flatten()
+            grad = param_lookup[param_name].grad
+            if stream_to_cpu and grad.device.type != "cpu":
+                g = grad.detach().flatten()
+            else:
+                g = grad.detach().clone().flatten()
 
             r = spec["repr"]
             if r == "all":
-                parts.append(g)
+                chunk = g
             elif r == "mask":
                 m = spec["mask"].flatten()
-                parts.append(g[m])
+                if m.device != g.device:
+                    m = m.to(g.device, non_blocking=False)
+                chunk = g[m]
             elif r == "indices":
                 idx = spec["indices"].to(dtype=torch.long, device=g.device)
-                parts.append(g[idx])
+                chunk = g[idx]
             else:
                 raise ValueError(f"Unknown param repr {r!r} for {param_name}")
+
+            if target_device is not None and chunk.device != target_device:
+                chunk = chunk.to(target_device, non_blocking=False)
+            parts.append(chunk)
 
         return torch.concat(parts)
 
@@ -472,6 +508,15 @@ class ParamMappedGradiendModel(GradiendModel):
         if topk is None and threshold is None and mask is None:
             raise ValueError("At least one of topk, threshold, mask must be provided.")
 
+        # topk=1.0 (float) means no pruning (return self); topk int 1 means keep top-1 dimension
+        if topk is not None and isinstance(topk, float) and topk == 1.0:
+            m = self if inplace else copy.deepcopy(self)
+            if return_mask:
+                old_input_dim = int(m.input_dim)
+                full_mask = torch.ones(old_input_dim, dtype=torch.bool)
+                return m, full_mask
+            return m
+
         m = self if inplace else copy.deepcopy(self)
         old_input_dim = int(m.input_dim)
 
@@ -572,8 +617,14 @@ class ParamMappedGradiendModel(GradiendModel):
         if offset != old_input_dim:
             raise ValueError(f"Inconsistent mapping: expected {old_input_dim} selected total, got {offset}")
 
-        # prune weights and set new mapping
-        m = m._prune_input_dims(keep_idx, inplace=True, return_index_map=False)
+        new_in = int(keep_idx.numel())
+
+        if m.encoder is None:
+            # Lazy init: build encoder/decoder at pruned size (no copy, fresh init)
+            m._build_encoder_decoder(new_in)
+        else:
+            m = m._prune_input_dims(keep_idx, inplace=True, return_index_map=False)
+
         m.param_map = new_param_map
         m._param_map_version = getattr(m, "_param_map_version", 0) + 1
         m._base_global_index_map = None

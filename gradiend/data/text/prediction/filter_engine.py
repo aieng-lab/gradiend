@@ -106,7 +106,7 @@ def _filter_string_only(
     it = sentences if isinstance(sentences, list) else iter(sentences)
     total = len(sentences) if isinstance(sentences, list) else None
     pbar = tqdm(
-        it, desc=desc or "Filtering", unit="sent",
+        it, desc=desc or "Filtering", unit=" sentences",
         leave=True, total=total, position=0, dynamic_ncols=True,
     )
     for sent in pbar:
@@ -153,7 +153,7 @@ def _filter_with_spacy(
     it = sentences if isinstance(sentences, list) else iter(sentences)
     total = len(sentences) if isinstance(sentences, list) else None
     pbar = tqdm(
-        it, desc=desc or "Filtering", unit="sent",
+        it, desc=desc or "Filtering", unit=" sent",
         leave=True, total=total, position=0, dynamic_ncols=True,
     )
     for sent in pbar:
@@ -293,7 +293,7 @@ def filter_sentences_multi(
 
     results: dict = {cid: [] for cid, _ in configs_with_ids}
     it = sentences if isinstance(sentences, list) else iter(sentences)
-    pbar = tqdm(it, desc="Filtering", unit="sent", leave=True, position=0, dynamic_ncols=True)
+    pbar = tqdm(it, desc="Filtering", unit=" sent", leave=True, position=0, dynamic_ncols=True)
     n_processed = 0
 
     for sent in pbar:

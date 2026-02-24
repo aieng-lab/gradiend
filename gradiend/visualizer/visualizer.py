@@ -63,6 +63,8 @@ class Visualizer:
         self,
         decoder_results: Optional[Dict[str, Any]] = None,
         class_ids: Optional[List[str]] = None,
+        target_class: Optional[str] = None,
+        increase_target_probabilities: bool = True,
         use_cache: Optional[bool] = None,
         **kwargs: Any,
     ) -> str:
@@ -86,6 +88,8 @@ class Visualizer:
             decoder_results=decoder_results,
             plotting_data=plotting_data,
             class_ids=class_ids,
+            target_class=target_class,
+            increase_target_probabilities=increase_target_probabilities,
             **kwargs
         )
 

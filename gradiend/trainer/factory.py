@@ -16,7 +16,7 @@ def create_model_with_gradiend(
     model: Union[str, ModelWithGradiend],
     model_class: Type[ModelWithGradiend],
     param_map: Optional[List[str]] = None,
-    activation: str = 'tanh',
+    activation_encoder: str = 'tanh',
     activation_decoder: str = 'id',
     bias_decoder: bool = True,
     torch_dtype: torch.dtype = torch.float32,
@@ -32,7 +32,7 @@ def create_model_with_gradiend(
     Args:
         model: Base model name/path or ModelWithGradiend instance
         param_map: List of param names to use (None = all core model params (e.g., excluding prediction layers)
-        activation: Activation function for encoder
+        activation_encoder: Activation function for encoder
         activation_decoder: Activation function for decoder
         bias_decoder: Whether decoder has bias
         torch_dtype: Data type for model
@@ -57,7 +57,7 @@ def create_model_with_gradiend(
     model_with_gradiend = model_class.from_pretrained(
         model,
         param_map=param_map,
-        activation=activation,
+        activation_encoder=activation_encoder,
         activation_decoder=activation_decoder,
         bias_decoder=bias_decoder,
         torch_dtype=torch_dtype,

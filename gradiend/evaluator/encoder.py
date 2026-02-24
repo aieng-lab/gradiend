@@ -44,7 +44,7 @@ def encode_dataset_to_rows(
     _tqdm_kw = dict(
         desc="Encoding",
         total=total,
-        leave=True,
+        leave=False,
         ncols=80,
         dynamic_ncols=False,
         ascii=True,
@@ -199,10 +199,12 @@ class EncoderEvaluator:
             max_size = create_kwargs.get("max_size")
             try:
                 n_eval = len(eval_data)
-                if max_size is None and n_eval > 500:
+                if max_size is None and n_eval > 5000:
                     logger.warning(
-                        "encoder eval: max_size is not set and eval data has %d samples. "
-                        "Computation may be slow. Set encoder_eval_max_size or max_size to cap.",
+                        "encoder eval: max_size is not set and eval data has %d samples across all classes. "
+                        "Note: encoder_eval_max_size is applied per feature class; total samples may exceed this. "
+                        "Computation may be slow. Consider setting encoder_eval_max_size, encoder_eval_train_max_size, "
+                        "or max_size to cap.",
                         n_eval,
                     )
             except TypeError:

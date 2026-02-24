@@ -124,15 +124,22 @@ class Evaluator:
         selector: Optional[Any] = None,
         summary_extractor: Optional[Any] = None,
         summary_metrics: Optional[Any] = None,
+        target_class: Optional[Any] = None,
+        increase_target_probabilities: bool = True,
+        plot: bool = False,
+        show: Optional[bool] = None,
     ) -> Dict[str, Any]:
         """
-        Run decoder grid evaluation and return summary + grid results.
+        Run decoder grid evaluation and return summary + grid for one direction (strengthen or weaken).
+
+        Only the dataset and feature-factor combinations required for the requested direction are computed.
+        Use increase_target_probabilities=True (default) for strengthen, False for weaken.
 
         Args:
             model_with_gradiend: Optional ModelWithGradiend (or path) to evaluate.
                 If None, the trainer's model is used.
             feature_factors: Optional list of feature factors to test. If None,
-                DecoderEvaluator derives defaults from trainer target classes.
+                derived from direction and target classes.
             lrs: Optional list of learning rates to test. If None, defaults are used.
             use_cache: If True, cached decoder grid results are reused when
                 available under the trainer's experiment_dir. If None, defaults
@@ -146,13 +153,17 @@ class Evaluator:
             summary_extractor: Optional callable(results) -> (candidates, ctx). Use to add derived metrics
                 (e.g. bpi, fpi, mpi) to candidates; then pass summary_metrics.
             summary_metrics: Optional list of metric names to summarize (e.g. ["bpi", "fpi", "mpi"]).
+            target_class: If set (str or list of str), evaluate only for this target class (or classes).
+                Restricts feature factors and datasets for efficiency. When None, evaluates for all target classes.
+            increase_target_probabilities: If True (default), compute strengthen summaries only (keys e.g. "3SG").
+                If False, compute weaken summaries only (keys e.g. "3SG_weaken"). Only required combinations are evaluated.
+            plot: If True, after selection run any missing dataset evaluations for plotting, update cache, then plot.
+            show: If True, display the plot; if False, only save. When None and plot=True, defaults to True.
 
         Returns:
-            A dict with:
-            - summary: Per-metric selection summary (best candidate id, value,
-                feature_factor, and learning_rate).
-            - grid: Mapping of candidate id -> evaluation results, including a
-                "base" entry for the unmodified model.
+            Flat dict: for strengthen, keys like result['3SG']; for weaken, keys like result['3SG_weaken'].
+            Each entry has value, feature_factor, learning_rate, id, strengthen, lms, base_lms. Plus 'grid'.
+            When plot=True, also 'plot_paths' and 'plot_path'.
         """
         kwargs = dict(
             trainer=self._trainer,
@@ -166,6 +177,10 @@ class Evaluator:
             training_like_df=training_like_df,
             neutral_df=neutral_df,
             summary_metrics=summary_metrics,
+            target_class=target_class,
+            increase_target_probabilities=increase_target_probabilities,
+            plot=plot,
+            show=show if show is not None else plot,
         )
         if selector is not None:
             kwargs["selector"] = selector
@@ -248,3 +263,18 @@ class Evaluator:
             NotImplementedError: If no Visualizer is configured.
         """
         return self._delegate_to_visualizer("plot_encoder_scatter", **kwargs)
+
+    def plot_probability_shifts(self, **kwargs: Any) -> Any:
+        """
+        Plot decoder probability shifts vs learning rate.
+
+        Args:
+            **kwargs: Forwarded to the Visualizer implementation (decoder_results, class_ids, use_cache, etc.).
+
+        Returns:
+            Path to saved plot file or empty string.
+
+        Raises:
+            NotImplementedError: If no Visualizer is configured.
+        """
+        return self._delegate_to_visualizer("plot_probability_shifts", **kwargs)

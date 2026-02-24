@@ -61,5 +61,6 @@ dec_results = trainer.evaluate_decoder()
 
 ## Notes
 
+- **eval_neutral_data** is optional. When omitted, decoder evaluation uses training-like data (test split with factual masks filled in) for LMS; target tokens are auto-ignored. See [Evaluation (intra-model)](../tutorials/evaluation-intra-model.md#neutral-data-for-decoder-evaluation-lms).
 - Encoder analysis on neutral data uses CLM gradients, since the custom MLM head only provides gradients for its target tokens (neutral targets are not defined there).
 - Decoder evaluation (probabilities of predicting target tokens) uses the base decoder even when the model includes a custom MLM head. This keeps evaluation grounded in the actual base model behavior rather than the auxiliary head.

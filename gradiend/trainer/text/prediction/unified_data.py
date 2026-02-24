@@ -26,6 +26,10 @@ from gradiend.trainer.text.prediction.unified_schema import (
 
 logger = get_logger(__name__)
 
+# Optional column for tracking raw class id after merge (for analysis)
+RAW_LABEL_CLASS = "raw_label_class"
+RAW_ALTERNATIVE_CLASS = "raw_alternative_class"
+
 
 def apply_factual_casing(factual: str, alternative: str) -> str:
     """Apply the factual token's casing pattern to the alternative token.
@@ -65,6 +69,128 @@ def _load_dataframe_from_path(path: Union[str, Path]) -> pd.DataFrame:
     if suf == ".parquet":
         return pd.read_parquet(p)
     raise ValueError(f"Unsupported file extension for data: {suf}. Use .csv or .parquet.")
+
+
+def merge_per_class_dfs(
+    class_dfs: Dict[str, pd.DataFrame],
+    merge_map: Dict[str, List[str]],
+    target_classes: Optional[List[str]] = None,
+) -> Dict[str, pd.DataFrame]:
+    """Merge per-class DataFrames by class_merge_map. Returns {group_id: df}.
+
+    Base classes are grouped into merged keys. Unmapped classes (e.g. 3PL) are
+    kept as-is when in target_classes. Each row gets raw_class_id for analysis.
+    Adds a column named by the merged key (or keeps existing for unmapped) with
+    the factual token so per_class_dict_to_unified can find it.
+    """
+    base_to_merged: Dict[str, str] = {}
+    for merged, bases in merge_map.items():
+        for b in bases:
+            if b in base_to_merged:
+                raise ValueError(
+                    f"class_merge_map: base class {b!r} appears in multiple merged classes."
+                )
+            base_to_merged[b] = merged
+
+    if target_classes and len(target_classes) == 2:
+        keys_to_include = set(target_classes)
+    else:
+        keys_to_include = set(merge_map.keys()) | {
+            c for c in class_dfs.keys() if c not in base_to_merged
+        }
+
+    result: Dict[str, pd.DataFrame] = {}
+    for key in keys_to_include:
+        if key in merge_map:
+            dfs = []
+            for base in merge_map[key]:
+                if base not in class_dfs:
+                    continue
+                df = class_dfs[base].copy()
+                df["raw_class_id"] = base
+                # Add column named by merged key with factual token (base column has it)
+                if base in df.columns:
+                    df[key] = df[base]
+                elif "label" in df.columns:
+                    df[key] = df["label"]
+                else:
+                    df[key] = df["token"] if "token" in df.columns else df.iloc[:, 2]
+                dfs.append(df)
+            if dfs:
+                result[key] = pd.concat(dfs, ignore_index=True)
+        else:
+            if key in class_dfs:
+                df = class_dfs[key].copy()
+                df["raw_class_id"] = key
+                result[key] = df
+    return result
+
+
+def apply_class_merge_to_merged_df(
+    df: pd.DataFrame,
+    merge_map: Dict[str, List[str]],
+    label_class_col: str = "label_class",
+    target_class_col: str = "alternative_class",
+    target_classes: Optional[List[str]] = None,
+    keep_raw: bool = True,
+    transition_groups: Optional[List[List[str]]] = None,
+) -> pd.DataFrame:
+    """Map label_class and target_class to merged group IDs; optionally limit base transitions.
+
+    - Optionally filter base-class transitions using transition_groups (clusters of raw
+      class ids). Only rows where BOTH raw classes lie in the same cluster (and differ)
+      are kept (e.g. [["1SG","1PL"], ["3SG","3PL"]] keeps 1SG↔1PL and 3SG↔3PL).
+    - Then map to merged ids via merge_map and drop same-group transitions.
+
+    Use before merged_to_unified when data has base class IDs and class_merge_map
+    is set.
+    """
+    base_to_merged: Dict[str, str] = {}
+    for merged, bases in merge_map.items():
+        for b in bases:
+            if b in base_to_merged:
+                raise ValueError(
+                    f"class_merge_map: base class {b!r} appears in multiple merged classes."
+                )
+            base_to_merged[b] = merged
+
+    out = df.copy()
+    # Preserve raw base classes for analysis / transition grouping
+    if keep_raw:
+        out[RAW_LABEL_CLASS] = out[label_class_col].astype(str)
+        out[RAW_ALTERNATIVE_CLASS] = out[target_class_col].astype(str)
+
+    # Optional: restrict to transitions within specified base-class clusters
+    if transition_groups:
+        clusters = [set(g) for g in transition_groups if g]
+
+        def _allowed(row: pd.Series) -> bool:
+            src = str(row[label_class_col])
+            tgt = str(row[target_class_col])
+            if src == tgt:
+                return False
+            for g in clusters:
+                if src in g and tgt in g:
+                    return True
+            return False
+
+        out = out[out.apply(_allowed, axis=1)].copy()
+
+    # Map base classes to merged ids
+    out[label_class_col] = out[label_class_col].astype(str).map(
+        lambda x: base_to_merged.get(x, x)
+    )
+    out[target_class_col] = out[target_class_col].astype(str).map(
+        lambda x: base_to_merged.get(x, x)
+    )
+    # Drop same-group transitions after merge (e.g. singular->singular)
+    out = out[out[label_class_col] != out[target_class_col]].copy()
+    if target_classes and len(target_classes) == 2:
+        pair_set = set(target_classes)
+        out = out[
+            out[label_class_col].isin(pair_set) & out[target_class_col].isin(pair_set)
+        ].copy()
+    return out
 
 
 def resolve_dataframe(
@@ -168,7 +294,7 @@ def all_subsets_to_mlm_df(
     if not rows:
         raise ValueError(f"all_subsets_to_mlm_df produced no rows for split '{split}'.")
     out = pd.DataFrame(rows)
-    logger.info(f"MLM training data from all subsets: {len(out)} rows from {len(class_dfs)} classes")
+    logger.info("MLM training data: %s rows from %s classes", len(out), len(class_dfs))
     return out
 
 
@@ -376,7 +502,7 @@ def per_class_dict_to_unified(
     if not rows:
         raise ValueError("per_class_dict_to_unified produced no rows.")
     out = pd.DataFrame(rows)
-    logger.info(f"Unified data: {len(out)} rows from {len(class_dfs)} class DataFrames")
+    logger.debug("Unified data: %s rows from %s classes", len(out), len(class_dfs))
     return out
 
 
@@ -550,5 +676,5 @@ def load_hf_per_class(
         if masked_col not in out.columns:
             raise ValueError(f"Subset '{class_name}' missing column '{masked_col}'.")
         result[class_name] = out
-        logger.info(f"Loaded subset '{class_name}': {len(out)} rows")
+        logger.debug("Loaded subset '%s': %s rows", class_name, len(out))
     return result

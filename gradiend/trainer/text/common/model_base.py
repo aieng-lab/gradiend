@@ -6,14 +6,14 @@ loading/saving, and from_pretrained. Prediction-specific logic (create_gradients
 create_inputs, mask_and_encode) lives in TextPredictionModelWithGradiend.
 """
 
-from typing import Any, Dict
+from typing import Any, Dict, Optional, Union
 
 import torch
 from gradiend.util import get_logger
 from gradiend.model.model_with_gradiend import ModelWithGradiend
 from gradiend.model import ParamMappedGradiendModel
 from gradiend.trainer.text.common.loading import AutoModelForLM, AutoTokenizerForLM, InstructTokenizerWrapper
-from gradiend.model.utils import is_decoder_only_model
+from gradiend.model.utils import is_decoder_only_model, infer_device_map_for_gradiend
 
 logger = get_logger(__name__)
 
@@ -63,12 +63,37 @@ class TextModelWithGradiend(ModelWithGradiend):
         torch_dtype: torch.dtype = torch.float32,
         base_model_device=None,
         trust_remote_code: bool = False,
+        device_encoder=None,
+        device_decoder=None,
+        device_map: Optional[Union[bool, Dict]] = None,
         **kwargs,
     ) -> tuple:
-        load_kwargs = {"dtype": torch_dtype, "trust_remote_code": trust_remote_code}
+        load_kwargs = {"torch_dtype": torch_dtype, "trust_remote_code": trust_remote_code}
+        load_path = base_model_id if base_model_id is not None else (
+            load_directory if isinstance(load_directory, str) else getattr(load_directory, "name_or_path")
+        )
+
+        use_device_map = device_map is True or (isinstance(device_map, dict) and device_map)
+        computed_device_map = None
+        if use_device_map and device_encoder is not None and device_decoder is not None and base_model_device is not None:
+            if isinstance(device_map, dict):
+                computed_device_map = device_map
+            else:
+                computed_device_map = infer_device_map_for_gradiend(
+                    load_path,
+                    device_encoder=device_encoder,
+                    device_decoder=device_decoder,
+                    device_base_model=base_model_device,
+                    torch_dtype=torch_dtype,
+                    trust_remote_code=trust_remote_code,
+                    warn_if_unavailable=True,
+                )
+            if computed_device_map is not None:
+                load_kwargs["device_map"] = computed_device_map
+
         if base_model_id is not None:
             base_model = AutoModelForLM.from_pretrained(base_model_id, **load_kwargs)
-            if base_model_device is not None:
+            if base_model_device is not None and computed_device_map is None:
                 base_model = base_model.to(base_model_device)
             tokenizer_id = None
             if gradiend_kwargs:
@@ -79,13 +104,13 @@ class TextModelWithGradiend(ModelWithGradiend):
 
         if isinstance(load_directory, str):
             base_model = AutoModelForLM.from_pretrained(load_directory, **load_kwargs)
-            if base_model_device is not None:
+            if base_model_device is not None and computed_device_map is None:
                 base_model = base_model.to(base_model_device)
             tokenizer = AutoTokenizerForLM.from_pretrained(load_directory, trust_remote_code=trust_remote_code)
             return base_model, tokenizer
 
         base_model = load_directory
-        if base_model_device is not None:
+        if base_model_device is not None and computed_device_map is None:
             base_model = base_model.to(base_model_device)
         tokenizer = AutoTokenizerForLM.from_pretrained(base_model.name_or_path, trust_remote_code=trust_remote_code)
         return base_model, tokenizer

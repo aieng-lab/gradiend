@@ -18,7 +18,7 @@ from gradiend import (
     TrainingArguments,
 )
 
-# Output folder for generated data; training and trainer both use this
+# Output folder for generated data; trainer uses this
 DATA_DIR = "data/english_pronouns"
 
 
@@ -36,7 +36,7 @@ def main():
     )
 
     args = TrainingArguments(
-        experiment_dir="runs/english_pronoun_singular_plural",
+        experiment_dir="runs/english_pronouns",
         train_batch_size=8,
         eval_steps=100,
         num_train_epochs=2,

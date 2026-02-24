@@ -6,6 +6,7 @@ get_model(), evaluator_class with lazy Evaluator. Training logic lives in _train
 override _train() in subclasses to customize.
 """
 
+import gc
 import os
 import tempfile
 import shutil
@@ -496,6 +497,8 @@ class Trainer(FeatureLearningDefinition):
             logger.info(
                 f"GRADIEND model already exists at {output_dir}, skipping training. Use use_cache=False to retrain."
             )
+            # Ensure data is loaded so target_classes, pair, etc. are available for evaluate_encoder / evaluate_decoder
+            getattr(self, "_ensure_data_for_training", lambda: None)()
             return output_dir
         if has_saved_model(output_dir):
             invalidate_experiment_caches(self.experiment_dir)
@@ -591,6 +594,13 @@ class Trainer(FeatureLearningDefinition):
         )
         model_with_gradiend.save_pretrained(output_dir)
         logger.info(f"Saved trained model to {output_dir}")
+        # Release GPU memory before next seed in multi-seed training
+        if getattr(config, "max_seeds", 1) > 1:
+            self._model_instance = None
+            del model_with_gradiend
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
         return output_dir
 
     def train(
@@ -660,7 +670,7 @@ class Trainer(FeatureLearningDefinition):
             args = TrainingArguments()
         args.__post_init__()  # validate e.g. not both supervised_encoder and supervised_decoder
         
-        # Handle output_dir in training_args_overrides (for backward compatibility)
+        # Support output_dir in training_args_overrides
         if output_dir is None and "output_dir" in training_args_overrides:
             output_dir = training_args_overrides.pop("output_dir")
 
@@ -687,6 +697,8 @@ class Trainer(FeatureLearningDefinition):
             self._model_arg = output_dir
             self._model_instance = None
             self._last_train_used_cache = True
+            # Ensure data is loaded so target_classes, pair, etc. are available for evaluate_encoder / evaluate_decoder
+            getattr(self, "_ensure_data_for_training", lambda: None)()
             return self
 
         self._last_train_used_cache = False
@@ -802,6 +814,7 @@ class Trainer(FeatureLearningDefinition):
                             load_model_path,
                             feature_definition=self,
                             model_class=model_with_gradiend_cls,
+                            training_args=args,
                             trust_remote_code=getattr(args, "trust_remote_code", False),
                         )
                         max_size = args.train_max_size
@@ -835,6 +848,7 @@ class Trainer(FeatureLearningDefinition):
                         seed_model = _post_prune(seed_model, args.post_prune_config)
                         seed_model.save_pretrained(out_path)
                         logger.info("Seed %s: saved post-pruned model to %s", seed_value, out_path)
+                        del seed_model  # Release reference for GC
 
                 seed_results[seed_value] = out_path
                 stats = self.get_training_stats(out_path)
@@ -871,7 +885,11 @@ class Trainer(FeatureLearningDefinition):
                     logger.warning("Seed %s: full validation encoder eval failed: %s", seed_value, e)
                 finally:
                     self._model_arg = prev_model_arg
-                    self._model_instance = prev_model_instance
+                    # Don't restore _model_instance in multi-seed: keep it cleared to free GPU memory
+                    if getattr(args, "max_seeds", 1) <= 1:
+                        self._model_instance = prev_model_instance
+                    else:
+                        self._model_instance = None
 
                 selection_score = eval_corr if eval_corr is not None else score
                 if selection_score is not None and (best_score is None or selection_score > best_score):
@@ -927,6 +945,12 @@ class Trainer(FeatureLearningDefinition):
                         f"with metric={convergent_metric} threshold={threshold}"
                     )
                     break
+
+                # Release GPU memory before loading next seed to avoid accumulation
+                self._model_instance = None
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
 
             if best_seed is None:
                 raise RuntimeError("Multi-seed training finished, but no valid training stats were found.")
@@ -1094,22 +1118,70 @@ class Trainer(FeatureLearningDefinition):
         return self.evaluator.plot_encoder_scatter(**kwargs)
 
     def evaluate_decoder(
-            self,
-            lrs: Optional[Sequence[float]] = None,
-            feature_factors: Optional[Sequence[float]] = None,
-            use_cache: Optional[bool] = None,
-            max_size_training_like: Optional[int] = None,
-            max_size_neutral: Optional[int] = None,
-            eval_batch_size: Optional[int] = None,
-            training_like_df: Optional[pd.DataFrame] = None,
-            neutral_df: Optional[pd.DataFrame] = None,
-            selector: Optional[Any] = None,
-            summary_extractor: Optional[Any] = None,
-            summary_metrics: Optional[Sequence[str]] = None,
+        self,
+        lrs: Optional[Sequence[float]] = None,
+        feature_factors: Optional[Sequence[float]] = None,
+        use_cache: Optional[bool] = None,
+        max_size_training_like: Optional[int] = None,
+        max_size_neutral: Optional[int] = None,
+        eval_batch_size: Optional[int] = None,
+        training_like_df: Optional[pd.DataFrame] = None,
+        neutral_df: Optional[pd.DataFrame] = None,
+        selector: Optional[Any] = None,
+        summary_extractor: Optional[Any] = None,
+        summary_metrics: Optional[Sequence[str]] = None,
+        target_class: Optional[Union[str, List[str]]] = None,
+        increase_target_probabilities: bool = True,
+        plot: bool = False,
+        show: Optional[bool] = None,
     ) -> Dict[str, Any]:
-        """Delegate to evaluator.evaluate_decoder. When use_cache=True and experiment_dir is set, uses cached grid results.
-        Override lrs/feature_factors via arguments or decoder_eval_lrs/decoder_eval_feature_factors in TrainingArguments.
-        Pass selector (SelectionPolicy), summary_extractor (to add custom metrics to candidates), and summary_metrics (e.g. ["bpi", "fpi", "mpi"]) for custom decoder summary behavior."""
+        """
+        Run decoder grid evaluation for one direction (strengthen or weaken).
+
+        Delegates to `evaluator.evaluate_decoder`. Only the datasets and feature-factor combinations
+        required for the chosen direction are computed. When use_cache=True and experiment_dir is set,
+        cached grid results are reused when available.
+
+        Args:
+            lrs: Optional sequence of learning rates to evaluate. If None, defaults are taken from
+                `TrainingArguments.decoder_eval_lrs`.
+            feature_factors: Optional sequence of feature factors to evaluate. If None, defaults are taken
+                from `TrainingArguments.decoder_eval_feature_factors`.
+            use_cache: If True, reuse cached decoder grid results when available under experiment_dir.
+                If None, defaults are taken from `TrainingArguments.use_cache` (default: False).
+            max_size_training_like: Maximum number of samples per variant for training-like decoder
+                evaluation data. If None, defaults are taken from
+                `TrainingArguments.decoder_eval_max_size_training_like`.
+            max_size_neutral: Maximum number of samples per variant for neutral decoder evaluation data
+                (and LMS text cap). If None, defaults are taken from
+                `TrainingArguments.decoder_eval_max_size_neutral`.
+            eval_batch_size: Optional batch size used during decoder evaluation (e.g. for LMS calls).
+                If None, an appropriate default is chosen by the evaluator.
+            training_like_df: Optional pre-computed training-like DataFrame. When provided, this is used
+                instead of creating training-like evaluation data inside the evaluator.
+            neutral_df: Optional pre-computed neutral DataFrame. When provided, this is used instead of
+                creating neutral evaluation data inside the evaluator.
+            selector: Optional selection policy (e.g. `SelectionPolicy`) controlling how the best candidate
+                per metric is chosen.
+            summary_extractor: Optional callable that post-processes raw decoder results and attaches
+                derived metrics (e.g. bpi, fpi, mpi) before summarization.
+            summary_metrics: Optional sequence of metric names to summarize (e.g. ["bpi", "fpi", "mpi"]).
+            target_class: Optional target class id (or list of ids) to evaluate. When set (e.g. "3SG"),
+                restricts evaluation to that class (or classes) for efficiency. When None, all
+                target classes are evaluated.
+            increase_target_probabilities: If True (default), compute **strengthen** summaries only
+                (keys like "3SG"). If False, compute **weaken** summaries only (keys like "3SG_weaken").
+            plot: If True, after selection run any missing evaluations needed for plotting, update cache,
+                then create decoder plots.
+            show: Controls whether plots are shown when plot=True. If True, display plots; if False,
+                only save them. When None and plot=True, defaults to True.
+
+        Returns:
+            Dict with flattened decoder summaries. For strengthen, keys like dec["3SG"]; for weaken,
+            keys like dec["3SG_weaken"]. Each summary entry includes value, feature_factor, learning_rate,
+            id, strengthen, lms, base_lms. The dict always includes "grid", and when plot=True also
+            "plot_paths" and/or "plot_path".
+        """
         use_cache = self._default_from_training_args(use_cache, "use_cache", fallback=False)
         max_size_training_like = self._default_from_training_args(
             max_size_training_like, "decoder_eval_max_size_training_like"
@@ -1131,6 +1203,10 @@ class Trainer(FeatureLearningDefinition):
             selector=selector,
             summary_extractor=summary_extractor,
             summary_metrics=summary_metrics,
+            target_class=target_class,
+            increase_target_probabilities=increase_target_probabilities,
+            plot=plot,
+            show=show,
         )
 
     def evaluate_encoder(
@@ -1244,15 +1320,35 @@ class Trainer(FeatureLearningDefinition):
         path = model_path if model_path is not None else self.model_path
         return super().get_encodings(path, **kwargs)
 
-    def get_encoder_metrics(self, model_path: Optional[str] = None, **kwargs: Any) -> Any:
-        """Get encoder metrics; default model_path to current trainer model path."""
+    def get_encoder_metrics(
+        self,
+        model_path: Optional[str] = None,
+        encoder_df: Optional[pd.DataFrame] = None,
+        **kwargs: Any,
+    ) -> Any:
+        """
+        Get unified encoder metrics from encoder_df or from cached results.
+
+        Args:
+            model_path: Path to the model; defaults to the trainer's current model path.
+            encoder_df: Optional DataFrame with encoded values and labels. If provided, metrics
+                are computed directly from this DataFrame (same format as evaluate_encoder output).
+                Use when you already have encoder outputs, e.g. from evaluate_encoder(return_df=True).
+            **kwargs: Additional arguments passed to the base implementation (e.g. split, use_cache).
+                When using cache instead of encoder_df, pass the same kwargs you use for
+                evaluate_encoder.
+
+        Returns:
+            Dict with n_samples, correlation, mean_by_class, etc., or None if encoder_df is empty.
+        """
         path = model_path if model_path is not None else self.model_path
-        return super().get_encoder_metrics(path, **kwargs)
+        return super().get_encoder_metrics(path, encoder_df=encoder_df, **kwargs)
 
     def rewrite_base_model(
         self,
         decoder_results: Optional[Dict[str, Any]] = None,
-        metric_key: Optional[Union[str, List[str]]] = None,
+        target_class: Optional[Union[str, List[str]]] = None,
+        increase_target_probabilities: bool = True,
         output_dir: Optional[str] = None,
         base_model: Optional[Any] = None,
         decoder_stats_metric_name: Optional[str] = None,
@@ -1261,9 +1357,13 @@ class Trainer(FeatureLearningDefinition):
         """
         Rewrite the base model by applying GRADIEND decoder updates based on decoder evaluation results.
 
-        Accepts/loads internally the cached decoder results and selects feature factor and learning rate
-        automatically (but also accepts manual parameters via decoder_results). Optionally saves the
-        rewritten model(s) to disk if output_dir is provided.
+        The decoder evaluation selects a feature factor and learning rate per target class and direction
+        (strengthening vs weakening). This method applies the selected config: by default it strengthens
+        the given target class(es); use increase_target_probabilities=False to apply the weakening config
+        instead (evaluate_decoder currently only produces strengthen summaries).
+
+        Accepts/loads internally the cached decoder results when experiment_dir is set. Optionally saves
+        the rewritten model(s) to disk if output_dir is provided.
 
         When called on a Trainer, the trained model is used automatically (base_model not needed).
         When experiment_dir is set, decoder_results can be omitted and will be loaded from cache
@@ -1272,22 +1372,28 @@ class Trainer(FeatureLearningDefinition):
         Args:
             decoder_results: Output from evaluate_decoder. Optional when
                 experiment_dir is set (then loaded from cache).
-            metric_key: Metric name(s) present in decoder_results (e.g. "combined_score",
-                or per-class key like "white"). Pass a list to get one rewritten model per key.
+            target_class: Target class(es) to rewrite for. Must be key(s) present in decoder_results
+                summary (e.g. per-class ids like "3SG", "masc_nom", or "combined_score"). Pass a single
+                string for one model, or a list of strings for one rewritten model per class. For
+                strengthening, use the class id (e.g. "masc_nom"); for weakening, the summary key is
+                "<class>_weaken" but you pass the class id here and set increase_target_probabilities=False.
+            increase_target_probabilities: If True (default), apply the config that strengthens the
+                target class (higher probability for that class). If False, apply the config that weakens
+                it (uses opposite feature factor; evaluate_decoder currently only produces strengthen summaries).
             output_dir: Optional directory where the rewritten model(s) should be saved.
                 If provided, models are saved to disk. If None, models are returned in memory only.
-                For a single metric_key, this is the exact save directory. For multiple metric_keys,
-                experiment_dir must be set (output_dir is only used for a single metric_key).
+                For a single target_class, this is the exact save directory. For multiple target_classes,
+                experiment_dir must be set (output_dir is only used for a single target_class).
             base_model: ModelWithGradiend to rewrite; if None, uses current trainer model.
-            decoder_stats_metric_name: When loading decoder_results from cache, metric_name
-                used to locate the cache file. Defaults to first metric_key or "combined_score".
+            decoder_stats_metric_name: When loading decoder_results from cache, the summary key
+                used to locate the cache file. Defaults to first target_class or "combined_score".
             **decoder_stats_kwargs: Used to locate the cache file (feature_factors, lrs, etc.).
 
         Returns:
             If output_dir is None:
-                Rewritten model when metric_key is a single string; list of models when metric_key is a list.
+                Rewritten model when target_class is a single string; list of models when target_class is a list.
             If output_dir is provided:
-                Path to the saved rewritten model directory, or list of paths when metric_key is a list.
+                Path to the saved rewritten model directory, or list of paths when target_class is a list.
         """
         if base_model is None:
             base_model = self.get_model()
@@ -1306,7 +1412,7 @@ class Trainer(FeatureLearningDefinition):
                 )
             load_metric = (
                 decoder_stats_metric_name
-                or (metric_key[0] if isinstance(metric_key, list) and metric_key else metric_key)
+                or (target_class[0] if isinstance(target_class, list) and target_class else target_class)
                 or "combined_score"
             )
             stats_file = resolve_decoder_stats_path(
@@ -1332,15 +1438,19 @@ class Trainer(FeatureLearningDefinition):
                     "Run evaluate_decoder() first or provide decoder_results explicitly."
                 )
 
-        summary_source = decoder_results.get("summary", decoder_results)
-        keys_to_process: List[str] = (
-            [metric_key] if isinstance(metric_key, str) else (metric_key or [])
+        _reserved = {"grid", "plot_path", "plot_paths"}
+        summary_source = {k: v for k, v in decoder_results.items() if k not in _reserved}
+        raw_keys: List[str] = (
+            [target_class] if isinstance(target_class, str) else (target_class or [])
         )
-        if not keys_to_process:
+        if not raw_keys:
             raise ValueError(
-                "metric_key must be a non-empty string or list of strings present in decoder results. "
+                "target_class must be a non-empty string or list of strings present in decoder results. "
                 f"Available keys: {list(summary_source.keys())}"
             )
+        keys_to_process: List[str] = [
+            k if increase_target_probabilities else f"{k}_weaken" for k in raw_keys
+        ]
 
         # When output_dir is passed but empty, user intended to save but gave no path
         if output_dir is not None and not str(output_dir).strip():
@@ -1362,16 +1472,19 @@ class Trainer(FeatureLearningDefinition):
             if len(keys_to_process) > 1 and not has_experiment_dir:
                 raise ValueError(
                     "Cannot save multiple rewritten models without experiment_dir. "
-                    "Set experiment_dir on TrainingArguments (output_dir is only used for a single metric_key)."
+                    "Set experiment_dir on TrainingArguments (output_dir is only used for a single target_class)."
                 )
 
         rewritten_models: List[Any] = []
         for key in keys_to_process:
             summary = summary_source.get(key)
             if not summary or "feature_factor" not in summary or "learning_rate" not in summary:
+                hint = ""
+                if not increase_target_probabilities and not key.endswith("_weaken"):
+                    hint = " evaluate_decoder currently only produces strengthen summaries."
                 raise ValueError(
                     f"Decoder results do not contain summary for metric '{key}'. "
-                    f"Available keys: {list(summary_source.keys())}"
+                    f"Available keys: {list(summary_source.keys())}.{hint}"
                 )
             feature_factor = summary["feature_factor"]
             lr = summary["learning_rate"]
@@ -1390,7 +1503,7 @@ class Trainer(FeatureLearningDefinition):
                 lr = summary["learning_rate"]
                 explicit = output_dir if len(keys_to_process) == 1 else None
                 key_output_dir = require_output_path(
-                    self.experiment_dir, explicit, ARTIFACT_MODEL_CHANGED, metric_key=key
+                    self.experiment_dir, explicit, ARTIFACT_MODEL_CHANGED, target_class=key
                 )
                 os.makedirs(key_output_dir, exist_ok=True)
                 rewritten_models[i].save_pretrained(key_output_dir)

@@ -4,12 +4,10 @@ Utility functions for GRADIEND models.
 import json
 import logging
 import os
-import re
-from typing import Dict, Tuple, Optional
+from typing import Dict, Tuple, Optional, Any, Union
 
 import torch
 import torch.nn as nn
-from transformers import AutoConfig
 
 logger = logging.getLogger(__name__)
 
@@ -220,70 +218,6 @@ def is_decoder_only_model(model_or_tokenizer):
     return False
 
 
-def estimate_model_size(model_name_or_path, trust_remote_code=False):
-    """
-    Estimate model size in billions of parameters from training_args.
-    
-    Always uses training_args to estimate model size. Falls back to name extraction
-    only if training_args cannot be loaded.
-    
-    Args:
-        model_name_or_path: Model name or path
-        trust_remote_code: If True, pass to Hugging Face from_pretrained (e.g. for EuroBERT)
-    
-    Returns:
-        Estimated model size in billions (float), or None if cannot determine
-    """
-    # Try to load config and estimate from hidden_size and num_layers
-    try:
-        config = AutoConfig.from_pretrained(model_name_or_path, trust_remote_code=trust_remote_code)
-        if hasattr(config, "hidden_size") and hasattr(config, "num_hidden_layers"):
-            hidden_size = config.hidden_size
-            num_layers = config.num_hidden_layers
-            vocab_size = getattr(config, "vocab_size", 32000)
-
-            # Rough parameter count estimation
-            # Embedding: vocab_size * hidden_size
-            # Layers: num_layers * (hidden_size^2 * 12) for attention + MLP
-            # This is a simplified estimate but works reasonably well
-            embedding_params = vocab_size * hidden_size
-            layer_params = num_layers * (hidden_size ** 2 * 12)
-            total_params = embedding_params + layer_params
-
-            return total_params / 1e9
-    except Exception:
-        pass
-
-    # Try to resolve base model from GRADIEND checkpoint metadata
-    try:
-        from gradiend.model import ParamMappedGradiendModel
-
-        gradiend = ParamMappedGradiendModel.from_pretrained(model_name_or_path)
-        base_model_id = gradiend.base_model_id
-
-        if base_model_id:
-            config = AutoConfig.from_pretrained(base_model_id, trust_remote_code=trust_remote_code)
-            if hasattr(config, "hidden_size") and hasattr(config, "num_hidden_layers"):
-                hidden_size = config.hidden_size
-                num_layers = config.num_hidden_layers
-                vocab_size = getattr(config, "vocab_size", 32000)
-
-                embedding_params = vocab_size * hidden_size
-                layer_params = num_layers * (hidden_size ** 2 * 12)
-                total_params = embedding_params + layer_params
-
-                return total_params / 1e9
-    except Exception:
-        pass
-    
-    # Fallback: Try to extract from model name (e.g., "Llama-3.2-3B" -> 3.0)
-    size_match = re.search(r'(\d+(?:\.\d+)?)[Bb]', str(model_name_or_path))
-    if size_match:
-        return float(size_match.group(1))
-    
-    return None
-
-
 def read_gradiend_context(load_directory: str) -> Tuple[str, str, Optional[Dict[str, int]]]:
     """
     Read source/target and optional feature_class_encoding_direction from gradiend_context.json.
@@ -334,209 +268,214 @@ def write_gradiend_context(
 
 
 def resolve_device_config_for_model(
-    model_name_or_path,
-    torch_dtype=torch.float32,
-    is_training=False,
     device=None,
     device_encoder=None,
     device_decoder=None,
     device_base_model=None,
-    trust_remote_code=False,
+    encoder_decoder_same_device: bool = False,
 ):
     """
-    Determine device configuration for models based on size, dtype, and training mode.
-    
-    Memory estimation considers:
-    - Model size (parameters)
-    - Data type (bfloat16 uses ~half memory of float32)
-    - Training vs inference (training needs ~2-3x more memory)
-    
-    Thresholds (based on A100 80GB):
-    - 1B bfloat16: ~40GB (single GPU OK for inference, may need 2 for training)
-    - 3B bfloat16: 2 GPUs for inference, 3 GPUs for training
-    
+    Determine device configuration from GPU count.
+
+    Placement rules:
+    - **1 GPU**: encoder, decoder, base_model all on cuda:0
+    - **2 GPUs**, encoder_decoder_same_device=False: encoder+base on cuda:0, decoder on cuda:1
+    - **2 GPUs**, encoder_decoder_same_device=True: encoder+decoder on cuda:0, base on cuda:1
+    - **>=3 GPUs**, encoder_decoder_same_device=False: encoder cuda:0, decoder cuda:1, base cuda:2
+    - **>=3 GPUs**, encoder_decoder_same_device=True: encoder+decoder cuda:0, base on cuda:1,2,...
+    - **0 GPUs**: all on CPU (unavoidable)
+    - **CPU (explicit)**: pass device=\"cpu\" to force CPU when GPUs are available
+
+    Override individual devices with device_encoder, device_decoder, device_base_model.
+    Pass device=\"cpu\" or device=torch.device(\"cpu\") to load on CPU intentionally.
+
     Args:
-        model_name_or_path: Model name or path
-        torch_dtype: Data type (torch.float32, torch.bfloat16, etc.)
-        is_training: If True, assumes training mode (needs more GPUs)
-        device: Single device to use for all components (if provided, overrides auto-detection)
-        device_encoder: Override encoder device (if None, auto-detect or use device)
-        device_decoder: Override decoder device (if None, auto-detect or use device)
-        device_base_model: Override base model device (if None, auto-detect or use device)
-    
+        device: Single device for all components. Pass \"cpu\" to force CPU.
+        device_encoder: Override encoder device.
+        device_decoder: Override decoder device.
+        device_base_model: Override base model device.
+        encoder_decoder_same_device: If True, put encoder and decoder on same GPU (cuda:0),
+            giving the base model the remaining GPUs.
+
     Returns:
         Tuple of (device_encoder, device_decoder, device_base_model, requires_multiple_gpus).
-
-        - device_encoder: torch.device used for GRADIEND encoder operations.
-        - device_decoder: torch.device used for GRADIEND decoder operations.
-        - device_base_model: torch.device used for the base model forward/backward.
-        - requires_multiple_gpus: True when the heuristic suggests multiple GPUs,
-          False when a single device should be sufficient.
     """
-    # If a single device is provided, use it for all components unless individually overridden
-    if device is not None:
-        device = torch.device(device) if isinstance(device, str) else device
-        if device_encoder is None:
-            device_encoder = device
-        if device_decoder is None:
-            device_decoder = device
-        if device_base_model is None:
-            device_base_model = device
-        logger.info(f"Using provided device for all components: {device}")
-        return device_encoder, device_decoder, device_base_model, device_encoder != device_decoder
-    
-    # If all individual devices are provided, use them directly
-    if device_encoder is not None and device_decoder is not None and device_base_model is not None:
-        logger.info(f"Using provided device configuration: encoder={device_encoder}, decoder={device_decoder}, base_model={device_base_model}")
-        return device_encoder, device_decoder, device_base_model, device_encoder != device_decoder
-
-
-    # Check if any device is provided - if so, we should respect it and only auto-detect the rest
-    has_any_device_override = device_encoder is not None or device_decoder is not None or device_base_model is not None
-    
-    model_size = estimate_model_size(model_name_or_path, trust_remote_code=trust_remote_code)
     cuda_count = torch.cuda.device_count()
-    
-    if model_size is None:
-        # If we can't determine size, assume small model
-        default_device = torch.device("cuda:0" if cuda_count > 0 else "cpu")
-        if has_any_device_override:
-            # Respect provided devices, use default for None
-            if device_encoder is None:
-                device_encoder = default_device
-            if device_decoder is None:
-                device_decoder = device_encoder
-            if device_base_model is None:
-                device_base_model = device_encoder
-            logger.info(f"Could not determine model size. Using provided devices with defaults: encoder={device_encoder}, decoder={device_decoder}, base_model={device_base_model}")
-        else:
-            logger.warning(f"Could not determine model size for {model_name_or_path}. Using single device: {default_device}")
-            device_encoder = device_decoder = device_base_model = default_device
+
+    def _to_device(x):
+        return torch.device(x) if isinstance(x, str) else x
+
+    # Explicit device override (e.g. device="cpu"): use for all components unless individually overridden
+    if device is not None:
+        dev = _to_device(device)
+        device_encoder = _to_device(device_encoder) if device_encoder is not None else dev
+        device_decoder = _to_device(device_decoder) if device_decoder is not None else dev
+        device_base_model = _to_device(device_base_model) if device_base_model is not None else dev
         return device_encoder, device_decoder, device_base_model, device_encoder != device_decoder
-    
-    # Determine bytes per parameter based on dtype
-    if torch_dtype in (torch.bfloat16, torch.float16):
-        bytes_per_param = 2
-    elif torch_dtype == torch.float32:
-        bytes_per_param = 4
-    else:
-        bytes_per_param = 4  # Default to float32
-    
-    # Estimate memory needed per GPU
-    # model_size is in billions, so convert to actual parameters, then to GB
-    # Base model: model_size (billions) * 1e9 * bytes_per_param / (1024^3) = GB
-    # Training needs ~2-3x more (gradients, optimizer states, activations)
-    memory_multiplier = 3.0 if is_training else 1.5  # Conservative estimate
-    estimated_memory_gb = model_size * 1e9 * bytes_per_param * memory_multiplier / (1024 ** 3)
-    
-    # If no GPUs available, use CPU (unless devices are explicitly provided)
+
+    # All individual devices provided: use them
+    if device_encoder is not None and device_decoder is not None and device_base_model is not None:
+        device_encoder = _to_device(device_encoder)
+        device_decoder = _to_device(device_decoder)
+        device_base_model = _to_device(device_base_model)
+        logger.debug(
+            f"Device config: encoder={device_encoder}, decoder={device_decoder}, base_model={device_base_model}"
+        )
+        return device_encoder, device_decoder, device_base_model, device_encoder != device_decoder
+
+    # Auto-place based on GPU count (fill only None slots)
     if cuda_count == 0:
-        cpu_device = torch.device("cpu")
-        if has_any_device_override:
-            # Respect provided devices, use CPU for None
-            if device_encoder is None:
-                device_encoder = cpu_device
-            if device_decoder is None:
-                device_decoder = device_encoder
-            if device_base_model is None:
-                device_base_model = device_encoder
-            logger.info(f"No GPUs available. Using provided devices with CPU defaults: encoder={device_encoder}, decoder={device_decoder}, base_model={device_base_model}")
-        else:
-            logger.info(f"No GPUs available. Using CPU for all components (estimated {estimated_memory_gb:.1f}GB)")
-            device_encoder = device_decoder = device_base_model = cpu_device
-        return device_encoder, device_decoder, device_base_model, device_encoder != device_decoder
-    
-    # Get available GPU memory
-    gpu_memory_gb = torch.cuda.get_device_properties(0).total_memory // (1024 ** 3)
-    
-    # Thresholds for multi-GPU setup
-    # For inference: if estimated memory > 60% of single GPU, use multiple GPUs
-    # For training: if estimated memory > 40% of single GPU, use multiple GPUs
-    single_gpu_threshold = 0.6 if not is_training else 0.4
-    needs_multiple_gpus = estimated_memory_gb > (gpu_memory_gb * single_gpu_threshold)
-    
-    # If multiple GPUs needed but only one available, use single GPU with warning
-    # (unless devices are explicitly provided)
-    if needs_multiple_gpus and cuda_count < 2:
-        single_gpu_device = torch.device("cuda:0")
-        if has_any_device_override:
-            # Respect provided devices, use single GPU for None
-            if device_encoder is None:
-                device_encoder = single_gpu_device
-            if device_decoder is None:
-                device_decoder = device_encoder
-            if device_base_model is None:
-                device_base_model = device_encoder
-            logger.warning(
-                f"Model ({model_size:.2f}B parameters, estimated {estimated_memory_gb:.1f}GB) "
-                f"may benefit from multiple GPUs, but only 1 GPU available. "
-                f"Using provided devices with single GPU defaults: encoder={device_encoder}, decoder={device_decoder}, base_model={device_base_model}"
-            )
-        else:
-            logger.warning(
-                f"Model ({model_size:.2f}B parameters, estimated {estimated_memory_gb:.1f}GB) "
-                f"may benefit from multiple GPUs, but only 1 GPU available. Using single GPU: {single_gpu_device}. "
-                f"Consider using CPU mode if GPU memory is insufficient."
-            )
-            device_encoder = device_decoder = device_base_model = single_gpu_device
+        cpu = torch.device("cpu")
+        device_encoder = _to_device(device_encoder) if device_encoder is not None else cpu
+        device_decoder = _to_device(device_decoder) if device_decoder is not None else cpu
+        device_base_model = _to_device(device_base_model) if device_base_model is not None else cpu
         return device_encoder, device_decoder, device_base_model, False
-    
-    if needs_multiple_gpus:
-        # Use multiple GPUs - only auto-detect devices that are None
-        if device_encoder is None:
-            device_encoder = torch.device("cuda:0")
-        if device_decoder is None:
-            device_decoder = torch.device("cuda:1")
-        
-        # Decide where to put base model (only if not provided)
-        if device_base_model is None:
-            # Check if we can fit base model on encoder GPU
-            if estimated_memory_gb * 0.5 < gpu_memory_gb * 0.7:  # Base model + encoder can fit on one GPU
-                device_base_model = device_encoder
-                logger.info(
-                    f"Using GPU configuration: encoder={device_encoder}, decoder={device_decoder}, "
-                    f"base_model={device_encoder} (estimated {estimated_memory_gb:.1f}GB, GPU has {gpu_memory_gb}GB)"
-                )
-            elif cuda_count >= 3:
-                device_base_model = torch.device("cuda:2")
-                logger.info(
-                    f"Using GPU configuration: encoder={device_encoder}, decoder={device_decoder}, "
-                    f"base_model={device_base_model} (estimated {estimated_memory_gb:.1f}GB)"
-                )
-            else:
-                # Only 2 GPUs available, put base model on encoder GPU (may cause OOM)
-                device_base_model = device_encoder
-                logger.warning(
-                    f"Only 2 GPUs available. Base model will share GPU with encoder "
-                    f"(estimated {estimated_memory_gb:.1f}GB on {gpu_memory_gb}GB GPU). "
-                    f"This may cause OOM errors. Consider using a third GPU or reducing model size."
-                )
+
+    if cuda_count == 1:
+        # Single GPU: all on cuda:0 (no logging)
+        dev = torch.device("cuda:0")
+        device_encoder = _to_device(device_encoder) if device_encoder is not None else dev
+        device_decoder = _to_device(device_decoder) if device_decoder is not None else dev
+        device_base_model = _to_device(device_base_model) if device_base_model is not None else dev
+        return device_encoder, device_decoder, device_base_model, False
+
+    # 2+ GPUs: non-trivial placement — log
+    cuda0 = torch.device("cuda:0")
+    cuda1 = torch.device("cuda:1")
+    cuda2 = torch.device("cuda:2")
+    if cuda_count == 2:
+        if encoder_decoder_same_device:
+            device_encoder = _to_device(device_encoder) if device_encoder is not None else cuda0
+            device_decoder = _to_device(device_decoder) if device_decoder is not None else cuda0
+            device_base_model = _to_device(device_base_model) if device_base_model is not None else cuda1
+            logger.debug(f"2 GPUs (encoder+decoder same): encoder+decoder on {device_encoder}, base on {device_base_model}")
         else:
-            logger.info(
-                f"Using GPU configuration: encoder={device_encoder}, decoder={device_decoder}, "
-                f"base_model={device_base_model} (estimated {estimated_memory_gb:.1f}GB)"
-            )
-        
-        return device_encoder, device_decoder, device_base_model, True
+            device_encoder = _to_device(device_encoder) if device_encoder is not None else cuda0
+            device_decoder = _to_device(device_decoder) if device_decoder is not None else cuda1
+            device_base_model = _to_device(device_base_model) if device_base_model is not None else device_encoder
+            logger.debug(f"2 GPUs: encoder+base on {device_encoder}, decoder on {device_decoder}")
     else:
-        # Single GPU is sufficient - only auto-detect devices that are None
-        if device_encoder is None:
-            device_encoder = torch.device("cuda:0" if cuda_count > 0 else "cpu")
-        if device_decoder is None:
-            device_decoder = device_encoder
-        if device_base_model is None:
-            device_base_model = device_encoder
-        
-        # Boundary warning if close to threshold
-        if estimated_memory_gb > gpu_memory_gb * 0.5:
-            logger.warning(
-                f"Model estimated memory ({estimated_memory_gb:.1f}GB) is close to GPU capacity ({gpu_memory_gb}GB). "
-                f"May experience OOM errors."
+        # >=3 GPUs
+        if encoder_decoder_same_device:
+            device_encoder = _to_device(device_encoder) if device_encoder is not None else cuda0
+            device_decoder = _to_device(device_decoder) if device_decoder is not None else cuda0
+            device_base_model = _to_device(device_base_model) if device_base_model is not None else cuda1
+            logger.debug(
+                f"{cuda_count} GPUs (encoder+decoder same): encoder+decoder on {device_encoder}, "
+                f"base on {device_base_model} (device_map can use cuda:1,2,...)"
             )
         else:
+            device_encoder = _to_device(device_encoder) if device_encoder is not None else cuda0
+            device_decoder = _to_device(device_decoder) if device_decoder is not None else cuda1
+            device_base_model = _to_device(device_base_model) if device_base_model is not None else cuda2
             logger.debug(
-                f"Model ({model_size:.2f}B parameters, {torch_dtype}, {'training' if is_training else 'inference'}) "
-                f"fits on single device: {device_encoder} (estimated {estimated_memory_gb:.1f}GB)"
+                f"{cuda_count} GPUs: encoder={device_encoder}, decoder={device_decoder}, base_model={device_base_model}"
             )
-        
-        return device_encoder, device_decoder, device_base_model, False
+    return device_encoder, device_decoder, device_base_model, True
+
+
+def infer_device_map_for_gradiend(
+    name_or_path: str,
+    device_encoder: torch.device,
+    device_decoder: torch.device,
+    device_base_model: torch.device,
+    torch_dtype: torch.dtype = torch.float32,
+    trust_remote_code: bool = False,
+    *,
+    warn_if_unavailable: bool = True,
+) -> Optional[Dict[str, Union[int, str]]]:
+    """
+    Infer a device_map for the base model that restricts placement to GPUs not used by GRADIEND.
+
+    Only needed when multiple GPUs are available for the base (e.g. 3+ GPUs with split
+    encoder/decoder, or 2+ GPUs with encoder_decoder_same_device). When only one GPU is
+    available for the base, the caller should use .to(device) instead; accelerate is not required.
+
+    Returns None if device_map cannot be computed. Caller should fall back to single-device loading.
+    """
+    try:
+        from accelerate import infer_auto_device_map
+        from transformers import AutoConfig, AutoModelForCausalLM, AutoModelForMaskedLM
+    except ImportError:
+        if warn_if_unavailable:
+            logger.warning(
+                "device_map requested but accelerate is not installed. "
+                "Install with: pip install accelerate. Falling back to single-device loading."
+            )
+        else:
+            logger.debug("accelerate or transformers not available for device_map inference")
+        return None
+
+    # Build max_memory: 0 for encoder/decoder GPUs, full for the rest
+    cuda_count = torch.cuda.device_count()
+    if cuda_count == 0:
+        return None
+
+    def _gpu_index(dev: Any) -> Optional[int]:
+        if dev.type != "cuda":
+            return None
+        return dev.index if dev.index is not None else 0
+
+    reserved_indices = set()
+    for d in (device_encoder, device_decoder):
+        idx = _gpu_index(d)
+        if idx is not None:
+            reserved_indices.add(idx)
+
+    base_gpu_count = sum(1 for i in range(cuda_count) if i not in reserved_indices)
+    if base_gpu_count <= 1:
+        # Only one GPU for base: use .to(device) instead; accelerate not needed
+        return None
+
+    base_idx = _gpu_index(device_base_model)
+    if base_idx is not None and base_idx in reserved_indices:
+        if warn_if_unavailable:
+            logger.warning(
+                "device_map requested but base model shares GPU with encoder/decoder. "
+                "Using single-device loading."
+            )
+        return None
+
+    max_memory: Dict[Union[int, str], Union[int, str]] = {}
+    for i in range(cuda_count):
+        if i in reserved_indices:
+            max_memory[i] = "0MiB"
+        else:
+            try:
+                total = torch.cuda.get_device_properties(i).total_memory
+                max_memory[i] = f"{int(total * 0.95 / 1e9)}GiB"
+            except Exception:
+                logger.warning(f"Could not get total memory for cuda:{i}; Falling back to single-device loading.")
+                return None
+
+    config = AutoConfig.from_pretrained(name_or_path, trust_remote_code=trust_remote_code)
+    if hasattr(config, "init_device"):
+        config.init_device = "meta"
+    model_type = getattr(config, "model_type", "").lower()
+
+    # Create minimal model for infer_auto_device_map (meta device to avoid loading weights)
+    try:
+        if "llama" in model_type or "mistral" in model_type or "qwen" in model_type or "gpt" in model_type:
+            model = AutoModelForCausalLM.from_config(config, torch_dtype=torch_dtype)
+        else:
+            try:
+                model = AutoModelForCausalLM.from_config(config, torch_dtype=torch_dtype)
+            except Exception:
+                model = AutoModelForMaskedLM.from_config(config, torch_dtype=torch_dtype)
+    except Exception as e:
+        if warn_if_unavailable:
+            logger.warning("device_map requested but could not create model from config: %s. Using single-device loading.", e)
+        else:
+            logger.debug("Could not create model from config for device_map: %s", e)
+        return None
+
+    try:
+        device_map = infer_auto_device_map(model, max_memory=max_memory)
+    except Exception as e:
+        if warn_if_unavailable:
+            logger.warning("device_map requested but infer_auto_device_map failed: %s. Using single-device loading.", e)
+        else:
+            logger.debug("infer_auto_device_map failed: %s", e)
+        return None
+
+    return device_map

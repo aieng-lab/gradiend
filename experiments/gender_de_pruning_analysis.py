@@ -6,7 +6,8 @@ Goal: find a good default topk proportion balancing efficiency vs recall.
 - Encoder metric: correlation from trainer.evaluate_encoder().
 - Decoder metric: <target_class> from trainer.evaluate_decoder().
 
-Suggested settings (per user request): 1000 steps, eval_steps=500.
+Post-pruning is applied outside the trainer: we always save the model without post-pruning,
+then load, apply post_prune, and analyze. This keeps the trainer focused on training only.
 """
 
 from __future__ import annotations
@@ -15,14 +16,15 @@ import json
 import math
 import os
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 from matplotlib import pyplot as plt
 
 from gradiend import TextPredictionTrainer, TrainingArguments
 from gradiend.trainer import PrePruneConfig, PostPruneConfig
-from gradiend.trainer.core.pruning import pre_prune
+from gradiend.trainer.core.pruning import post_prune, pre_prune
+from gradiend.util.paths import ARTIFACT_MODEL, resolve_output_path
 
 
 @dataclass
@@ -34,6 +36,7 @@ class RunResult:
     heuristic_recall: Optional[float] = None
     heuristic_precision: Optional[float] = None
     heuristic_f1: Optional[float] = None
+    error: Optional[str] = None  # Set when run failed (e.g. empty model); ensures we skip on restart
 
 
 def _ensure_dir(path: str) -> None:
@@ -41,16 +44,28 @@ def _ensure_dir(path: str) -> None:
         os.makedirs(path, exist_ok=True)
 
 
+def _checkpoint_path(output_dir: str, run_id: str) -> str:
+    """Resolve model checkpoint path for a run (matches trainer output layout)."""
+    exp_dir = os.path.join(output_dir.rstrip("/\\"), str(run_id).strip("/\\"))
+    path = resolve_output_path(exp_dir, None, ARTIFACT_MODEL)
+    if path is None:
+        raise ValueError(f"Could not resolve checkpoint path for run_id={run_id!r}")
+    return path
+
+
 def _topk_mask(importance: torch.Tensor, topk: float) -> torch.Tensor:
+    """topk=1.0 (float) means keep all (return all True). topk int = keep top-k dims."""
     if not torch.is_tensor(importance):
         raise TypeError("importance must be a torch.Tensor")
     flat = importance.detach().flatten()
     n = flat.numel()
     if n == 0:
         return torch.zeros(0, dtype=torch.bool)
+    if isinstance(topk, float) and topk == 1.0:
+        return torch.ones(n, dtype=torch.bool)
     if isinstance(topk, float):
         if not (0.0 < topk <= 1.0):
-            raise ValueError("topk must be in (0,1] when float")
+            raise ValueError("topk must be in (0,1] when float (use 1.0 for no pruning)")
         k = int(math.ceil(topk * n))
     else:
         k = int(topk)
@@ -80,26 +95,46 @@ def _mask_metrics(heuristic_mask: torch.Tensor, oracle_mask: torch.Tensor) -> Tu
     return recall, precision, f1
 
 
-def _run_encoder_eval(trainer: TextPredictionTrainer, max_size: int = 200) -> float:
-    result = trainer.evaluate_encoder(max_size=max_size, use_cache=True)
+def _run_encoder_eval(
+    trainer: TextPredictionTrainer, max_size: int = 200, use_cache: bool = True
+) -> float:
+    result = trainer.evaluate_encoder(max_size=max_size, use_cache=use_cache)
     return float(result.get("correlation", 0.0)) if result else 0.0
 
 
-
 def _run_decoder_eval(
-    trainer: TextPredictionTrainer, target_class: str, max_size: int = 200
+    trainer: TextPredictionTrainer,
+    target_class: str,
+    max_size: int = 200,
+    use_cache: bool = True,
 ) -> float:
     result = trainer.evaluate_decoder(
         lrs=[1e-3],
         max_size_training_like=max_size,
         max_size_neutral=max_size,
-        use_cache=True,
+        use_cache=use_cache,
     )
     summary = result.get("summary", {}) if result else {}
-    key = target_class
-    if key in summary:
-        return float(summary[key].get("value", 0.0))
+    if target_class in summary:
+        return float(summary[target_class].get("value", 0.0))
     return 0.0
+
+
+def _run_evals_with_model(
+    trainer: TextPredictionTrainer,
+    model: Any,
+    target_class: str,
+    max_size: int = 200,
+) -> Tuple[float, float]:
+    """Run encoder and decoder eval using the given model (injected into trainer)."""
+    prev_instance = trainer._model_instance
+    trainer._model_instance = model
+    try:
+        enc = _run_encoder_eval(trainer, max_size=max_size, use_cache=False)
+        dec = _run_decoder_eval(trainer, target_class=target_class, max_size=max_size, use_cache=False)
+        return enc, dec
+    finally:
+        trainer._model_instance = prev_instance
 
 
 def _build_trainer(
@@ -148,16 +183,52 @@ def _compute_oracle_mask(
     topk: float,
     part: str = "decoder-weight",
 ) -> torch.Tensor:
-    """
-    Compute the weight-based top-k mask (oracle) for pre-prune heuristic quality.
-
-    Used to compare the pre-prune heuristic (gradient-mean based) against the
-    post-training weight-based selection. Recall/precision/F1 measure how well
-    the gradient heuristic approximates the ideal weight-based top-k.
-    """
+    """Compute the weight-based top-k mask (oracle) for pre-prune heuristic quality."""
     model = trainer.get_model()
     importance = model.get_weight_importance(part=part).to("cpu")
     return _topk_mask(importance, topk)
+
+
+def _load_existing_results(results_path: str) -> List[RunResult]:
+    """Load existing results for restartability; returns [] if file missing."""
+    if not os.path.isfile(results_path):
+        return []
+    with open(results_path, "r") as f:
+        payload = json.load(f)
+    out = []
+    for r in payload:
+        enc = r.get("encoder_correlation")
+        dec = r.get("decoder_prob")
+        if enc is None:
+            enc = float("nan")
+        if dec is None:
+            dec = float("nan")
+        out.append(
+            RunResult(
+                topk=r["topk"],
+                mode=r["mode"],
+                encoder_correlation=enc,
+                decoder_prob=dec,
+                heuristic_recall=r.get("heuristic_recall"),
+                heuristic_precision=r.get("heuristic_precision"),
+                heuristic_f1=r.get("heuristic_f1"),
+                error=r.get("error"),
+            )
+        )
+    return out
+
+
+def _has_result(results: List[RunResult], topk: float, mode: str) -> bool:
+    return any(r.topk == topk and r.mode == mode for r in results)
+
+
+def _append_and_save(
+    results: List[RunResult],
+    result: RunResult,
+    results_path: str,
+) -> None:
+    results.append(result)
+    _save_results(results, results_path)
 
 
 def run_analysis(
@@ -165,93 +236,124 @@ def run_analysis(
     topk_values: List[float],
     pair: Tuple[str, str],
     output_dir: str,
+    results_path: Optional[str] = None,
 ) -> List[RunResult]:
     _ensure_dir(output_dir)
+    results_path = results_path or os.path.join(output_dir, "pruning_analysis_results.json")
+    results = _load_existing_results(results_path)
 
     base_args = dict(
         experiment_dir=output_dir,
-        train_batch_size=32,
-        encoder_eval_max_size=500,
-        decoder_eval_max_size_training_like=500,
+        train_batch_size=8,
+        encoder_eval_max_size=100,
+        decoder_eval_max_size_training_like=100,
         decoder_eval_max_size_neutral=1000,
         eval_steps=1000,
         num_train_epochs=1,
-        max_steps=5000,
+        max_steps=1000,
         source="alternative",
         target="diff",
         eval_batch_size=8,
-        learning_rate=1e-5,
+        learning_rate=1e-4,
         use_cache=True,
         add_identity_for_other_classes=True,
     )
 
-    results: List[RunResult] = []
     target_class = pair[1]
+    max_size = 200
+
+
+    def _record_failed(topk: float, mode: str, err: BaseException) -> None:
+        _append_and_save(
+            results,
+            RunResult(
+                topk=topk,
+                mode=mode,
+                encoder_correlation=float("nan"),
+                decoder_prob=float("nan"),
+                error=str(err),
+            ),
+            results_path,
+        )
+
+    # ---- Post-only: train once without post-pruning, then apply post_prune per topk ----
+    post_baseline_run_id = "prune_post_baseline"
+    args_post_baseline = TrainingArguments(**base_args)
+    trainer_post = _build_trainer(run_id=post_baseline_run_id, pair=pair, args=args_post_baseline)
+    trainer_post.train()
+    checkpoint_path = _checkpoint_path(output_dir, post_baseline_run_id)
 
     for topk in topk_values:
-        # Pre-prune only
-        args = TrainingArguments(
-            **base_args,
-            pre_prune_config=PrePruneConfig(n_samples=32, topk=topk, source="diff"),
-        )
-        run_id = f"prune_pre_only_topk_{topk:.4f}"
-        trainer = _build_trainer(run_id=run_id, pair=pair, args=args)
-        heuristic_mask = _compute_pre_prune_heuristic_mask(trainer, topk=topk)
-        trainer.train()
-        oracle_mask = _compute_oracle_mask(trainer, topk=topk)
-        recall, precision, f1 = _mask_metrics(heuristic_mask, oracle_mask)
-        enc_corr = _run_encoder_eval(trainer)
-        dec_prob = _run_decoder_eval(trainer, target_class=target_class)
-        results.append(
-            RunResult(
-                topk=topk,
-                mode="pre",
-                encoder_correlation=enc_corr,
-                decoder_prob=dec_prob,
-                heuristic_recall=recall,
-                heuristic_precision=precision,
-                heuristic_f1=f1,
+        if _has_result(results, topk, "post"):
+            continue
+        try:
+            model = trainer_post.load_model(checkpoint_path)
+            pruned = post_prune(model, PostPruneConfig(topk=topk, part="decoder-weight", inplace=False))
+            enc_corr, dec_prob = _run_evals_with_model(trainer_post, pruned, target_class, max_size=max_size)
+            _append_and_save(
+                results,
+                RunResult(topk=topk, mode="post", encoder_correlation=enc_corr, decoder_prob=dec_prob),
+                results_path,
             )
-        )
+        except NotImplementedError as e:
+            _record_failed(topk, "post", e)
 
-        # Post-prune only
-        args = TrainingArguments(
-            **base_args,
-            post_prune_config=PostPruneConfig(topk=topk, part="decoder-weight"),
-        )
-        run_id = f"prune_post_only_topk_{topk:.4f}"
-        trainer = _build_trainer(run_id=run_id, pair=pair, args=args)
-        trainer.train()
-        enc_corr = _run_encoder_eval(trainer)
-        dec_prob = _run_decoder_eval(trainer, target_class=target_class)
-        results.append(
-            RunResult(
-                topk=topk,
-                mode="post",
-                encoder_correlation=enc_corr,
-                decoder_prob=dec_prob,
-            )
-        )
+    # ---- Pre-only and pre+post: per topk ----
+    for topk in topk_values:
+        # Pre-prune only (no post-pruning in trainer)
+        if not _has_result(results, topk, "pre"):
+            try:
+                args = TrainingArguments(
+                    **base_args,
+                    pre_prune_config=PrePruneConfig(n_samples=32, topk=topk, source="diff"),
+                )
+                # Must be unique per topk: .4f would collapse 0.000001..0.00005 to "0.0000"; .6f + replace keeps dirs distinct
+                run_id = f"prune_pre_only_topk_{topk:.6f}".replace(".", "_")
+                trainer = _build_trainer(run_id=run_id, pair=pair, args=args)
+                heuristic_mask = _compute_pre_prune_heuristic_mask(trainer, topk=topk)
+                trainer.train()
+                oracle_mask = _compute_oracle_mask(trainer, topk=topk)
+                recall, precision, f1 = _mask_metrics(heuristic_mask, oracle_mask)
+                enc_corr = _run_encoder_eval(trainer, max_size=max_size)
+                dec_prob = _run_decoder_eval(trainer, target_class=target_class, max_size=max_size)
+                _append_and_save(
+                    results,
+                    RunResult(
+                        topk=topk,
+                        mode="pre",
+                        encoder_correlation=enc_corr,
+                        decoder_prob=dec_prob,
+                        heuristic_recall=recall,
+                        heuristic_precision=precision,
+                        heuristic_f1=f1,
+                    ),
+                    results_path,
+                )
+            except Exception as e:
+                _record_failed(topk, "pre", e)
 
-        # Combined pre + post (same topk)
-        args = TrainingArguments(
-            **base_args,
-            pre_prune_config=PrePruneConfig(n_samples=32, topk=topk, source="diff"),
-            post_prune_config=PostPruneConfig(topk=topk, part="decoder-weight"),
-        )
-        run_id = f"prune_pre_post_topk_{topk:.4f}"
-        trainer = _build_trainer(run_id=run_id, pair=pair, args=args)
-        trainer.train()
-        enc_corr = _run_encoder_eval(trainer)
-        dec_prob = _run_decoder_eval(trainer, target_class=target_class)
-        results.append(
-            RunResult(
-                topk=topk,
-                mode="pre_post",
-                encoder_correlation=enc_corr,
-                decoder_prob=dec_prob,
-            )
-        )
+        # Pre + post: train with pre-prune only, then load and apply post_prune before eval
+        if not _has_result(results, topk, "pre_post"):
+            try:
+                args = TrainingArguments(
+                    **base_args,
+                    pre_prune_config=PrePruneConfig(n_samples=32, topk=topk, source="diff"),
+                )
+                # Unique per topk (see pre-only comment)
+                run_id = f"prune_pre_post_topk_{topk:.6f}".replace(".", "_")
+                trainer = _build_trainer(run_id=run_id, pair=pair, args=args)
+                trainer.train()
+                checkpoint_path_pre = _checkpoint_path(output_dir, run_id)
+                model = trainer.load_model(checkpoint_path_pre)
+                pruned = post_prune(model, PostPruneConfig(topk=topk, part="decoder-weight", inplace=False))
+                enc_corr, dec_prob = _run_evals_with_model(trainer, pruned, target_class, max_size=max_size)
+                _append_and_save(
+                    results,
+                    RunResult(topk=topk, mode="pre_post", encoder_correlation=enc_corr, decoder_prob=dec_prob),
+                    results_path,
+                )
+            except Exception as e:
+                _record_failed(topk, "pre_post", e)
 
     return results
 
@@ -266,8 +368,11 @@ def _plot_metric(
     modes = sorted({r.mode for r in results})
     plt.figure(figsize=(8, 5))
     for mode in modes:
-        xs = [r.topk for r in results if r.mode == mode]
-        ys = [getattr(r, metric) for r in results if r.mode == mode]
+        pts = [(r.topk, getattr(r, metric)) for r in results if r.mode == mode]
+        pts = [(x, y) for x, y in pts if not (isinstance(y, float) and math.isnan(y))]
+        if not pts:
+            continue
+        xs, ys = zip(*pts)
         plt.plot(xs, ys, marker="o", label=mode)
     plt.xscale("log")
     plt.xlabel("topk")
@@ -281,7 +386,13 @@ def _plot_metric(
 
 
 def _plot_pre_prune_heuristics(results: List[RunResult], output_path: str) -> None:
-    pre = [r for r in results if r.mode == "pre" and r.heuristic_recall is not None]
+    pre = [
+        r
+        for r in results
+        if r.mode == "pre"
+        and r.heuristic_recall is not None
+        and not (isinstance(r.heuristic_recall, float) and math.isnan(r.heuristic_recall))
+    ]
     if not pre:
         return
     xs = [r.topk for r in pre]
@@ -301,14 +412,31 @@ def _plot_pre_prune_heuristics(results: List[RunResult], output_path: str) -> No
 
 
 def _save_results(results: List[RunResult], output_path: str) -> None:
-    payload = [r.__dict__ for r in results]
+    def _to_serializable(d: Dict[str, Any]) -> Dict[str, Any]:
+        out = {}
+        for k, v in d.items():
+            if v is not None and isinstance(v, float) and (v != v or v == float("inf") or v == float("-inf")):
+                out[k] = None  # nan/inf not valid JSON
+            else:
+                out[k] = v
+        return out
+
+    payload = [_to_serializable(r.__dict__) for r in results]
     _ensure_dir(os.path.dirname(output_path))
     with open(output_path, "w") as f:
         json.dump(payload, f, indent=2)
 
 
 if __name__ == "__main__":
-    topk_values = [0.00001, 0.0002, 0.0005, 0.0001, 0.0002, 0.0005, 0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.0]
+    topk_values = [
+        0.000001, 0.000002, 0.000005,
+        0.00001, 0.00002, 0.00005,
+        0.0001, 0.0002, 0.0005,
+        0.001, 0.002, 0.005,
+        0.01, 0.02, 0.05,
+        0.1, 0.2, 0.5,
+        1.0
+    ]
     pair = ("fem_nom", "fem_dat")
     output_dir = os.path.join("runs", "pruning_analysis", "german_de")
 

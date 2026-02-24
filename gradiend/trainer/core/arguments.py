@@ -4,7 +4,7 @@ Training arguments for GRADIEND Trainer (HF-like API).
 
 import dataclasses
 from dataclasses import dataclass, field
-from typing import Optional, Callable, Union, Any, List
+from typing import Optional, Callable, Union, Any, List, Dict
 
 import torch
 import torch.nn as nn
@@ -137,11 +137,34 @@ class TrainingArguments:
     params: Optional[List[str]] = None
     """If set, only these parameter names or wildcards are included in the GRADIEND param map when building from a base model. None = include all backbone parameters (default). Enables future params selection processes."""
 
+    activation_encoder: Optional[str] = None
+    """Encoder activation name (e.g. 'tanh', 'gelu', 'relu'). None = model default ('tanh')."""
+
+    activation_decoder: Optional[str] = None
+    """Decoder activation name (e.g. 'id', 'tanh'). None = model default ('id')."""
+
+    bias_decoder: Optional[bool] = None
+    """Whether the decoder linear layer uses a bias term. None = model default (True)."""
+
+    latent_dim: Optional[int] = None
+    """GRADIEND latent dimension (number of features). None = model default (1)."""
+
     normalize_gradiend: bool = True
     """Whether to normalize GRADIEND encodings during training, i.e., first target class is encoded to +1 and second to -1. This is recommended for enhanced comparability between runs."""
 
     torch_dtype: Optional[torch.dtype] = None
     """dtype for model; None = torch.float32."""
+
+    device_map: bool = True
+    """If True (default), load base model with device_map spread across GPUs not used by GRADIEND.
+    Only applies when multiple GPUs are available for the base model (see encoder_decoder_same_device).
+    Requires accelerate when device_map would be used; falls back to single-device loading otherwise."""
+
+    encoder_decoder_same_device: bool = False
+    """If True, place encoder and decoder on the same GPU (cuda:0), giving the base model the rest.
+    Useful for large base models with pre-pruning: encoder+decoder are small and can share GPU 0;
+    base model can use cuda:1 (2 GPUs) or cuda:1,2,3... with device_map (3+ GPUs). If False (default),
+    encoder and decoder are split across cuda:0 and cuda:1 when 2+ GPUs are available."""
 
     # ----- Multi-seed training -----
     max_seeds: int = 3

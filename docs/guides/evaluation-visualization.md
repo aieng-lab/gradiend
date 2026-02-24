@@ -41,7 +41,7 @@ plot_training_convergence(training_stats=stats_dict, output="convergence.pdf")
 |-----------|------|---------|-------------|
 | `label_name_mapping` | `Dict[str, str]` | `None` | Map class/feature-class ids to display labels (e.g. `"masc_nom"` → `"Masc. Nom."`). Use when raw ids are technical or hard to read. |
 | `plot_mean_by_class` | `bool` | `True` | Include subplot for mean encoded value per class. |
-| `plot_mean_by_feature_class` | `bool` | `True` | Include subplot for mean encoded value per feature class. |
+| `plot_mean_by_feature_class` | `bool \| None` | `None` (auto) | Include subplot for mean encoded value per feature class. When `None`, defaults to `False` if redundant with mean-by-class (e.g. all_classes == target_classes or no identity transitions), otherwise `True`. |
 | `plot_correlation` | `bool` | `True` | Include subplot for correlation over steps. |
 | `best_step` | `bool` | `True` | Draw vertical line and mark best checkpoint step. |
 | `title` | `str` or `bool` | `True` | `True` = use `run_id`, `False` = no title, string = custom title. |

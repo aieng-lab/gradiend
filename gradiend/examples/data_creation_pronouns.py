@@ -32,7 +32,7 @@ def main():
         hf_config="20220301.en",
         preprocess=TextPreprocessConfig(
             split_to_sentences=True,
-            min_chars=10,
+            min_chars=20,
             max_chars=200,
         ),
         trust_remote_code=True,
@@ -40,7 +40,7 @@ def main():
         feature_targets=[
             TextFilterConfig(target="I", spacy_tags={"pos": "PRON"}, id="1SG"),
             TextFilterConfig(target="we", spacy_tags={"pos": "PRON"}, id="1PL"),
-            TextFilterConfig(target="you", spacy_tags={"pos": "PRON"}, id="2"),
+            TextFilterConfig(target="you", spacy_tags={"pos": "PRON"}, id="2SGPL"),
             TextFilterConfig(
                 targets=["he", "she", "it"],
                 spacy_tags={"pos": "PRON"},
@@ -53,7 +53,7 @@ def main():
 
     print("=== Training data (per_class, balance='try') ===")
     training = creator.generate_training_data(
-        max_size_per_class=100,
+        max_size_per_class=1000,
         format="per_class",
         balance="try",
     )
@@ -66,7 +66,7 @@ def main():
     print("\n=== Neutral data (pronouns excluded) ===")
     neutral = creator.generate_neutral_data(
         additional_excluded_words=NEUTRAL_EXCLUDE_ENGLISH_PRONOUNS,
-        max_size=100,
+        max_size=1000,
     )
     print(neutral.head(10).to_string())
     print(f"\n  Total neutral sentences: {len(neutral)}")

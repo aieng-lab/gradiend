@@ -37,6 +37,9 @@ def plot_encoder_distributions(
     legend_ncol: int = 2,
     cmap: str = "tab20",
     img_format: str = "pdf",
+    dpi: Optional[int] = None,
+    figsize: Optional[Tuple[float, float]] = None,
+    **kwargs: Any,
 ) -> str:
     """
     Plot encoder distributions as grouped split violins.
@@ -70,6 +73,7 @@ def plot_encoder_distributions(
         legend_loc: Matplotlib legend location (default "best").
         legend_ncol: Number of columns for the legend (default 2).
         cmap: Matplotlib colormap name for palette (default "tab20").
+        figsize: Figure size (width, height) in inches. If None, uses (max(6, 1.5 * n_groups), 3).
 
     Returns:
         Path to saved plot PDF, or "" if nothing to plot or plot was shown only (no save path).
@@ -265,7 +269,8 @@ def plot_encoder_distributions(
     x_id_order = list(range(len(group_order)))
     df_plot["x_cat"] = pd.Categorical(df_plot["x_id"], categories=x_id_order, ordered=True)
 
-    plt.figure(figsize=(max(8, len(group_order) * 2.0), 6))
+    _figsize = figsize if figsize is not None else (max(6, 1.5 * len(group_order)), 3)
+    plt.figure(figsize=_figsize)
     ax = sns.violinplot(
         data=df_plot,
         x="x_cat",
@@ -430,7 +435,10 @@ def plot_encoder_distributions(
     plt.grid(axis="y", alpha=0.3, zorder=0)
     if out_path:
         os.makedirs(os.path.dirname(out_path), exist_ok=True)
-        plt.savefig(out_path, bbox_inches="tight")
+        save_kwargs: Dict[str, Any] = {"bbox_inches": "tight"}
+        if dpi is not None:
+            save_kwargs["dpi"] = dpi
+        plt.savefig(out_path, **save_kwargs)
         logger.info("Saved encoder distribution plot: %s", out_path)
     elif not show:
         plt.close()

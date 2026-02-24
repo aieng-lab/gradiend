@@ -248,10 +248,10 @@ class TextPredictionDataCreator:
         success_rates = {}
         for class_id, matches in results_per_class.items():
             n = len(matches)
-            rate = (n / n_processed * 100.0) if n_processed else 0.0
+            rate = (n / n_processed) if n_processed else 0.0  # fraction in [0, 1]
             success_rates[class_id] = rate
             cap_str = f"/{max_size_per_class}" if max_size_per_class is not None else ""
-            tqdm.write(f"  {class_id}: {n}{cap_str} matches (success rate: {rate:.2f}%)")
+            logger.info("  %s: %s%s matches (success rate: %.2f%%)", class_id, n, cap_str, 100 * rate)
             cfg = config_by_id[class_id]
             rows = []
             for sent, spans in matches:
@@ -273,14 +273,13 @@ class TextPredictionDataCreator:
             class_dfs[class_id] = df
 
         if stats_per_group:
-            tqdm.write(f"Training filter stats (instances per group): {stats_per_group}")
+            logger.info("Training filter stats (instances per group): %s", stats_per_group)
             if total_target is not None and total_target > 0:
                 pct = 100.0 * total_so_far / total_target
-                tqdm.write(f"Overall: {total_so_far}/{total_target} ({pct:.1f}%)")
+                logger.info("Overall: %s/%s (%.1f%%)", total_so_far, total_target, pct)
             if success_rates:
                 avg_rate = sum(success_rates.values()) / len(success_rates)
-                tqdm.write(f"Success rate per class: {success_rates}")
-                tqdm.write(f"Average success rate: {avg_rate:.2f}")
+                logger.info("Success rate per class: %s; average: %.2f%%", success_rates, 100 * avg_rate)
 
         if balance is not False:
             class_dfs = _apply_balance(
@@ -389,10 +388,10 @@ class TextPredictionDataCreator:
             if max_size is not None:
                 from itertools import islice
                 neutral = list(islice(sentence_stream, max_size))
-                tqdm.write(f"Neutral: no exclusion filters, stopped at max_size={max_size} (got {len(neutral)}).")
+                logger.info("Neutral: no exclusion filters, stopped at max_size=%s (got %s).", max_size, len(neutral))
             else:
                 neutral = list(sentence_stream)
-                tqdm.write(f"Neutral: no exclusion filters, kept all {len(neutral)} sentences.")
+                logger.info("Neutral: no exclusion filters, kept all %s sentences.", len(neutral))
         else:
             neutral, neutral_stats = _filter_neutral(
                 sentence_stream,
@@ -405,7 +404,7 @@ class TextPredictionDataCreator:
             total_sent = neutral_stats.get("total", 0)
             kept = neutral_stats.get("kept", 0)
             rate = (kept / total_sent) if total_sent else 0.0
-            tqdm.write(f"Neutral filter stats: {neutral_stats} (success rate: {rate:.2f})")
+            logger.info("Neutral filter stats: %s (success rate: %.2f)", neutral_stats, rate)
         if neutral is None:
             neutral = []
         rows = [{"text": s} for s in neutral]
@@ -545,7 +544,7 @@ def _filter_neutral(
     excluded_count = 0
     total_count = 0
     it = iter(sentences)
-    pbar = tqdm(it, desc="Neutral filter", unit="sent", leave=True, position=0, dynamic_ncols=True)
+    pbar = tqdm(it, desc="Neutral filter", unit=" sent", leave=True, position=0, dynamic_ncols=True)
     for sent in pbar:
         total_count += 1
         if word_pattern and word_pattern.search(sent):

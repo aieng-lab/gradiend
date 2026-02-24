@@ -13,6 +13,9 @@ args = TrainingArguments(
     experiment_dir="runs/examples/german_de_decoder_only",
     train_batch_size=8,
     encoder_eval_max_size=10,
+    train_max_size=500,
+    decoder_eval_max_size_training_like=100,
+    decoder_eval_max_size_neutral=100,
     eval_steps=100,
     max_steps=1000,
     source="alternative",
@@ -47,7 +50,7 @@ print(f"   MLM head saved at {mlm_head_path}\n")
 trainer.train()
 
 max_size = 100
-enc_eval = trainer.evaluate_encoder(max_size=max_size, use_cache=False, return_df=True)
+enc_eval = trainer.evaluate_encoder(max_size=max_size, return_df=True)
 enc_df = enc_eval.get("encoder_df")
 if enc_df is not None:
     trainer.plot_encoder_distributions(encoder_df=enc_df)

@@ -8,6 +8,11 @@ from typing import Dict, Union, List, Optional, Tuple
 
 from gradiend.visualizer.plot_optional import _require_matplotlib, _require_seaborn
 from gradiend.visualizer.topk.venn_ import compute_topk_sets
+from gradiend.trainer.core.stats import load_training_stats
+from gradiend.util.logging import get_logger
+
+
+logger = get_logger(__name__)
 
 
 def _validate_and_complete_pretty_groups(
@@ -29,6 +34,32 @@ def _validate_and_complete_pretty_groups(
     missing = set(model_ids) - covered
     if missing:
         pretty_groups["Other"] = sorted(missing)
+
+
+def _extract_best_correlation_for_models(models: Dict[str, object]) -> Dict[str, float]:
+    """
+    Extract best correlation per model from training stats (training.json).
+
+    Looks for training.json under model.name_or_path using load_training_stats.
+    Returns a mapping model_id -> correlation. Models without stats are skipped.
+    """
+    metrics: Dict[str, float] = {}
+    for mid, model in models.items():
+        model_path = getattr(model, "name_or_path", None)
+        if not model_path:
+            continue
+        try:
+            run_info = load_training_stats(model_path)
+        except Exception as e:
+            logger.debug("Could not load training stats for %s from %s: %s", mid, model_path, e)
+            continue
+        if not run_info:
+            continue
+        bsc = run_info.get("best_score_checkpoint") or {}
+        corr = bsc.get("correlation")
+        if isinstance(corr, (int, float)):
+            metrics[mid] = float(corr)
+    return metrics
 
 
 def plot_topk_overlap_heatmap(
@@ -57,6 +88,11 @@ def plot_topk_overlap_heatmap(
     tick_label_fontsize: Optional[Union[int, float]] = None,
     group_label_fontsize: Optional[Union[int, float]] = None,
     cbar_pad: Optional[float] = None,
+    row_metric: Optional[Dict[str, float]] = None,
+    row_metric_label: Optional[str] = "corr",
+    row_metric_cmap: str = "magma",
+    row_metric_vmin: Optional[float] = None,
+    row_metric_vmax: Optional[float] = None,
 ) -> Dict[str, object]:
     """
     Plot a heatmap visualizing pairwise overlap between top-k weight index sets
@@ -277,6 +313,7 @@ def plot_topk_overlap_heatmap(
     # scale: linear, log, sqrt, or power (color scale only; data values unchanged)
     import numpy as np
     from matplotlib.colors import LogNorm, PowerNorm
+    from mpl_toolkits.axes_grid1 import make_axes_locatable
 
     mat_arr = np.array(mat)
     norm = None
@@ -318,6 +355,34 @@ def plot_topk_overlap_heatmap(
         linecolor=linecolor,
     )
 
+    # Optional side column: per-row metric (e.g. best correlation)
+    if row_metric:
+        metric_vals: List[float] = []
+        for mid in model_ids:
+            v = row_metric.get(mid)
+            metric_vals.append(float(v) if isinstance(v, (int, float)) else np.nan)
+        arr = np.asarray(metric_vals, dtype=float).reshape(-1, 1)
+        if not np.all(np.isnan(arr)):
+            m_vmin = row_metric_vmin if row_metric_vmin is not None else float(np.nanmin(arr))
+            m_vmax = row_metric_vmax if row_metric_vmax is not None else float(np.nanmax(arr))
+            divider_metric = make_axes_locatable(ax)
+            ax_metric = divider_metric.append_axes("left", size="5%", pad=0.2)
+            sns.heatmap(
+                arr,
+                ax=ax_metric,
+                cmap=row_metric_cmap,
+                vmin=m_vmin,
+                vmax=m_vmax,
+                cbar=False,
+                xticklabels=[row_metric_label] if row_metric_label else [],
+                yticklabels=[],
+                square=True,
+                linewidths=0.5,
+                linecolor=linecolor,
+            )
+            ax_metric.yaxis.set_ticks_position("left")
+            ax_metric.tick_params(axis="x", rotation=90)
+
     # tick label font size
     if tick_label_fontsize is not None:
         for label in ax.get_xticklabels():
@@ -330,7 +395,9 @@ def plot_topk_overlap_heatmap(
 
     # add group indicators on top and right when pretty_groups provided
     if pretty_groups is not None:
-        from mpl_toolkits.axes_grid1 import make_axes_locatable
+        # Use a shared divider attached to the main heatmap axes. When a metric column
+        # was added on the left, its own divider was used and does not affect this one.
+        divider = make_axes_locatable(ax)
 
         id_to_group = {mid: gname for gname, ids in pretty_groups.items() for mid in ids}
         group_col_spans = {}
@@ -421,3 +488,101 @@ def plot_topk_overlap_heatmap(
             "topk": topk,
             "part": part,
         }
+
+
+def plot_topk_overlap_heatmap_with_correlation(
+    models: Dict[str, object],
+    topk: int = 1000,
+    part: str = "decoder-weight",
+    value: str = "intersection_frac",
+    order: Union[str, List[str]] = "input",
+    cluster: bool = False,
+    annot: Union[bool, str] = "auto",
+    fmt: Optional[str] = None,
+    figsize: Optional[Tuple[float, float]] = None,
+    cmap: str = "viridis",
+    vmin: Optional[float] = None,
+    vmax: Optional[float] = None,
+    title: Optional[Union[str, bool]] = False,
+    output_path: Optional[str] = None,
+    show: bool = True,
+    return_data: bool = True,
+    pretty_labels: Optional[Dict[str, str]] = None,
+    pretty_groups: Optional[Dict[str, List[str]]] = None,
+    scale: str = "linear",
+    scale_gamma: Optional[float] = None,
+    show_values: Optional[bool] = None,
+    annot_fontsize: Optional[Union[int, float]] = None,
+    tick_label_fontsize: Optional[Union[int, float]] = None,
+    group_label_fontsize: Optional[Union[int, float]] = None,
+    cbar_pad: Optional[float] = None,
+) -> Dict[str, object]:
+    """
+    Convenience wrapper for plot_topk_overlap_heatmap with a correlation side column.
+
+    Uses training.json under each model's name_or_path to extract best-score correlation
+    (via load_training_stats) and passes it as row_metric with label "corr".
+    Falls back to the plain heatmap when no correlations can be found.
+    """
+    row_metric = _extract_best_correlation_for_models(models)
+    if not row_metric:
+        logger.warning(
+            "No correlation values found for any model; falling back to plain top-k overlap heatmap."
+        )
+        return plot_topk_overlap_heatmap(
+            models,
+            topk=topk,
+            part=part,
+            value=value,
+            order=order,
+            cluster=cluster,
+            annot=annot,
+            fmt=fmt,
+            figsize=figsize,
+            cmap=cmap,
+            vmin=vmin,
+            vmax=vmax,
+            title=title,
+            output_path=output_path,
+            show=show,
+            return_data=return_data,
+            pretty_labels=pretty_labels,
+            pretty_groups=pretty_groups,
+            scale=scale,
+            scale_gamma=scale_gamma,
+            show_values=show_values,
+            annot_fontsize=annot_fontsize,
+            tick_label_fontsize=tick_label_fontsize,
+            group_label_fontsize=group_label_fontsize,
+            cbar_pad=cbar_pad,
+        )
+
+    return plot_topk_overlap_heatmap(
+        models,
+        topk=topk,
+        part=part,
+        value=value,
+        order=order,
+        cluster=cluster,
+        annot=annot,
+        fmt=fmt,
+        figsize=figsize,
+        cmap=cmap,
+        vmin=vmin,
+        vmax=vmax,
+        title=title,
+        output_path=output_path,
+        show=show,
+        return_data=return_data,
+        pretty_labels=pretty_labels,
+        pretty_groups=pretty_groups,
+        scale=scale,
+        scale_gamma=scale_gamma,
+        show_values=show_values,
+        annot_fontsize=annot_fontsize,
+        tick_label_fontsize=tick_label_fontsize,
+        group_label_fontsize=group_label_fontsize,
+        cbar_pad=cbar_pad,
+        row_metric=row_metric,
+        row_metric_label="corr",
+    )

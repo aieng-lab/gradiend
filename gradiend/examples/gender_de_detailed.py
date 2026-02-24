@@ -158,9 +158,9 @@ for transition, pairs in configs.items():
         print(f"  encoder metrics: {enc_eval}")
 
         dec_results = trainer.evaluate_decoder()
-        print(f"  decoder summary: {list(dec_results['summary'])}")
+        print(f"  decoder summary: {[k for k in dec_results if k not in ('grid', 'plot_path', 'plot_paths')]}")
 
-        #trainer.rewrite_base_model(decoder_results=dec_stats, metric_key=pair[0], output_dir="./output")
+        #trainer.rewrite_base_model(decoder_results=dec_stats, target_class=pair[0], output_dir="./output")
         trainer.cpu()  # move model to CPU to free GPU for next config
         models_for_heatmap[trainer.run_id] = trainer.get_model()
         models_by_transition.setdefault(transition, {})[" - ".join(pair)] = trainer.get_model()

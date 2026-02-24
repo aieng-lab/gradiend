@@ -195,8 +195,8 @@ class TestSelectAndSaveChangedModel:
             "grid": {},
         }
 
-    def test_rewrite_base_model_accepts_metric_key_as_class_id(self):
-        """metric_key as class id (e.g. 'masc_nom') should match summary key directly."""
+    def test_rewrite_base_model_accepts_target_class_as_class_id(self):
+        """target_class as class id (e.g. 'masc_nom') should match summary key directly."""
         args = TrainingArguments(experiment_dir=None)
         trainer = MockTrainerForTest(model="mock-base", args=args)
         mock_model = MagicMock()
@@ -208,7 +208,7 @@ class TestSelectAndSaveChangedModel:
 
         changed = trainer.rewrite_base_model(
             decoder_results=decoder_results,
-            metric_key="masc_nom",
+            target_class="masc_nom",
         )
 
         assert changed is not None
@@ -217,8 +217,8 @@ class TestSelectAndSaveChangedModel:
             feature_factor=1.0,
         )
 
-    def test_rewrite_base_model_accepts_metric_key_as_class_id_for_fem_nom(self):
-        """metric_key 'fem_nom' should match summary key directly."""
+    def test_rewrite_base_model_accepts_target_class_as_class_id_for_fem_nom(self):
+        """target_class 'fem_nom' should match summary key directly."""
         args = TrainingArguments(experiment_dir=None)
         trainer = MockTrainerForTest(model="mock-base", args=args)
         mock_model = MagicMock()
@@ -230,7 +230,7 @@ class TestSelectAndSaveChangedModel:
 
         changed = trainer.rewrite_base_model(
             decoder_results=decoder_results,
-            metric_key="fem_nom",
+            target_class="fem_nom",
         )
 
         assert changed is not None
@@ -239,8 +239,8 @@ class TestSelectAndSaveChangedModel:
             feature_factor=-1.0,
         )
 
-    def test_rewrite_base_model_metric_key_list_accepts_multiple_class_ids(self):
-        """metric_key as list can specify multiple class ids."""
+    def test_rewrite_base_model_target_class_list_accepts_multiple_class_ids(self):
+        """target_class as list can specify multiple class ids."""
         args = TrainingArguments(experiment_dir=None)
         trainer = MockTrainerForTest(model="mock-base", args=args)
         mock_model = MagicMock()
@@ -252,7 +252,7 @@ class TestSelectAndSaveChangedModel:
 
         changed_list = trainer.rewrite_base_model(
             decoder_results=decoder_results,
-            metric_key=["masc_nom", "fem_nom"],
+            target_class=["masc_nom", "fem_nom"],
         )
 
         assert len(changed_list) == 2
@@ -287,7 +287,7 @@ class TestSelectAndSaveChangedModel:
 
         changed = trainer.rewrite_base_model(
             decoder_results=None,
-            metric_key="masc_nom",
+            target_class="masc_nom",
         )
 
         assert changed is not None
@@ -306,7 +306,7 @@ class TestSelectAndSaveChangedModel:
         with pytest.raises(ValueError) as exc_info:
             trainer.rewrite_base_model(
                 decoder_results=None,
-                metric_key="masc_nom",
+                target_class="masc_nom",
             )
 
         assert "No decoder results cache found" in str(exc_info.value)
@@ -327,7 +327,7 @@ class TestSelectAndSaveChangedModel:
         with pytest.raises(ValueError) as exc_info:
             trainer.rewrite_base_model(
                 decoder_results=decoder_results,
-                metric_key="x",
+                target_class="x",
                 output_dir="",  # Empty string should trigger save path check
             )
 
@@ -358,7 +358,7 @@ class TestSelectAndSaveChangedModel:
 
         result = trainer.rewrite_base_model(
             decoder_results=decoder_results,
-            metric_key="masc_nom",
+            target_class="masc_nom",
             output_dir=output_dir,
         )
 
@@ -391,7 +391,7 @@ class TestSelectAndSaveChangedModel:
 
         result = trainer.rewrite_base_model(
             decoder_results=decoder_results,
-            metric_key="masc_nom",
+            target_class="masc_nom",
             # No output_dir
         )
 
@@ -406,7 +406,7 @@ class TestSelectAndSaveChangedModel:
             assert not mock_rewritten.save_pretrained.called
 
     def test_rewrite_base_model_saves_multiple_models_with_experiment_dir(self, tmp_path):
-        """When multiple metric_keys and experiment_dir, rewrite_base_model saves all models."""
+        """When multiple target classes and experiment_dir, rewrite_base_model saves all models."""
         args = TrainingArguments(experiment_dir=str(tmp_path))
         trainer = MockTrainerForTest(model="mock-base", args=args)
         
@@ -421,7 +421,7 @@ class TestSelectAndSaveChangedModel:
 
         result = trainer.rewrite_base_model(
             decoder_results=decoder_results,
-            metric_key=["masc_nom", "fem_nom"],
+            target_class=["masc_nom", "fem_nom"],
             output_dir=str(tmp_path),  # With experiment_dir, this is used as parent
         )
 
@@ -434,7 +434,7 @@ class TestSelectAndSaveChangedModel:
         assert mock_rewritten2.save_pretrained.called
 
     def test_rewrite_base_model_raises_when_multiple_keys_without_experiment_dir(self):
-        """When multiple metric_keys without experiment_dir, rewrite_base_model raises."""
+        """When multiple target classes without experiment_dir, rewrite_base_model raises."""
         args = TrainingArguments(experiment_dir=None)
         trainer = MockTrainerForTest(model="mock-base", args=args)
         trainer._model_instance = MagicMock()
@@ -444,14 +444,14 @@ class TestSelectAndSaveChangedModel:
         with pytest.raises(ValueError) as exc_info:
             trainer.rewrite_base_model(
                 decoder_results=decoder_results,
-                metric_key=["masc_nom", "fem_nom"],
+                target_class=["masc_nom", "fem_nom"],
                 output_dir="./output",  # Single output_dir not enough for multiple keys
             )
 
         assert "multiple" in str(exc_info.value).lower() or "experiment_dir" in str(exc_info.value)
 
     def test_rewrite_base_model_returns_single_path_for_single_key_with_output_dir(self, tmp_path):
-        """When single metric_key with output_dir, rewrite_base_model returns single path string."""
+        """When single target_class with output_dir, rewrite_base_model returns single path string."""
         args = TrainingArguments(experiment_dir=str(tmp_path))
         trainer = MockTrainerForTest(model="mock-base", args=args)
         
@@ -473,7 +473,7 @@ class TestSelectAndSaveChangedModel:
 
         result = trainer.rewrite_base_model(
             decoder_results=decoder_results,
-            metric_key="masc_nom",  # Single key
+            target_class="masc_nom",  # Single key
             output_dir=output_dir,
         )
 

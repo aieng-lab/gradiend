@@ -1,10 +1,13 @@
-from gradiend import TextPredictionTrainer, TrainingArguments
+from gradiend import TextPredictionTrainer, TrainingArguments, PrePruneConfig, PostPruneConfig
 
 model_name = "bert-base-german-cased"
 args = TrainingArguments(
     experiment_dir="runs/examples/german_de",
     train_batch_size=8,
     encoder_eval_max_size=20,
+    train_max_size=500,
+    decoder_eval_max_size_training_like=100,
+    decoder_eval_max_size_neutral=500,
     eval_steps=100,
     num_train_epochs=1,
     max_steps=500,
@@ -16,6 +19,8 @@ args = TrainingArguments(
     add_identity_for_other_classes=True,
     max_seeds=3,
     min_convergent_seeds=2,
+    pre_prune_config=PrePruneConfig(n_samples=16, topk=0.01, source="diff"),
+    post_prune_config=PostPruneConfig(topk=0.001, part="decoder-weight"),
 )
 
 pair = ("masc_nom", "fem_nom") # nominative male vs female (along a gender axis)
@@ -42,11 +47,14 @@ enc_results = trainer.evaluate_encoder(max_size=100, return_df=True, plot=True, 
 print(f"  encoder metrics: {enc_results}")
 
 dec_results = trainer.evaluate_decoder()
-print(f"  decoder summary: {list(dec_results['summary'].keys())}")
+print(f"  decoder summary: {[k for k in dec_results if k not in ('grid', 'plot_path', 'plot_paths')]}")
 print(f"  decoder grid size: {len(dec_results['grid'])}")
 
 trainer.rewrite_base_model(
     decoder_results=dec_results,
     output_dir="./output",
-    metric_key="masc_nom",
+    target_class="masc_nom",
 )
+
+
+trainer.plot_probability_shifts(decoder_results=dec_results)

@@ -118,3 +118,7 @@ This report helps debug why a particular seed was chosen and how training-time m
 | **supervised_encoder** | `False` | If `True`, train only the encoder (baseline mode). |
 | **supervised_decoder** | `False` | If `True`, train only the decoder (baseline mode). |
 | **use_cached_gradients** | `False` | Use cached gradients if available (faster, higher memory/disk). |
+| **class_merge_map** | `None` | Optional mapping from base feature classes to merged classes (e.g. `{"singular": ["1SG","3SG"], "plural": ["1PL","3PL"]}`). When set, training and evaluation use the merged ids; with exactly two merged keys, `target_classes` can be omitted. |
+| **class_merge_transition_groups** | `None` | Optional list of base‑class clusters that limit which raw transitions are created before merging. Only transitions where both raw classes lie in the same cluster (and differ) are kept (e.g. `[["1SG","1PL"], ["3SG","3PL"]]` keeps 1SG↔1PL and 3SG↔3PL, but drops 1SG→3PL). |
+
+Device placement is automatic from GPU count (1 GPU → all on cuda:0; 2 GPUs → encoder+base on cuda:0, decoder on cuda:1; ≥3 GPUs → each on its own). To force CPU, pass `device="cpu"` when loading the model. See [FAQ: Device placement](../faq.md#device-placement).

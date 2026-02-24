@@ -38,7 +38,8 @@ class AutoModelForLM(nn.Module):
         Handles special cases like decoder-only models with MLM heads and Llama models.
         """
         hf_dtype = kwargs.get("torch_dtype", kwargs.get("dtype", torch_dtype))
-        load_kwargs = {"trust_remote_code": trust_remote_code, "dtype": hf_dtype, **{k: v for k, v in kwargs.items() if k != "torch_dtype"}}
+        rest = {k: v for k, v in kwargs.items() if k not in ("torch_dtype", "dtype")}
+        load_kwargs = {"trust_remote_code": trust_remote_code, "torch_dtype": hf_dtype, **rest}
         try:
             model = AutoModelForMaskedLM.from_pretrained(name_or_path, **load_kwargs)
         except Exception:

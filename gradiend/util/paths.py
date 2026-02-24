@@ -34,7 +34,7 @@ _DEFAULT_SUBPATHS = {
     ARTIFACT_CONVERGENCE_PLOT: "training_convergence.pdf",
     ARTIFACT_DECODER_ANALYSIS_DIR: "decoder_analysis",
     ARTIFACT_DECODER_ANALYSIS_SUMMARY: "decoder_analysis.json",
-    ARTIFACT_MODEL_CHANGED: None,  # requires metric_key
+    ARTIFACT_MODEL_CHANGED: None,  # requires target_class
     ARTIFACT_CACHE_GRADIENTS: "cache/gradients",
 }
 
@@ -271,7 +271,7 @@ def resolve_output_path(
         experiment_dir: Root directory for the experiment (e.g. from TrainingArguments.experiment_dir).
         explicit_path: User-provided path for this artifact (overrides experiment_dir).
         artifact_type: One of ARTIFACT_* constants.
-        **extra: For ARTIFACT_MODEL_CHANGED pass metric_key=str. For ARTIFACT_MODEL the default
+        **extra: For ARTIFACT_MODEL_CHANGED pass target_class=str. For ARTIFACT_MODEL the default
             is experiment_dir/model (one model per experiment dir). For ARTIFACT_ENCODER_PLOT
             pass run_id and model_name for {run_id}_{name}_encoder_distributions.pdf.
 
@@ -286,10 +286,10 @@ def resolve_output_path(
 
     base = os.path.normpath(str(experiment_dir).strip())
     if artifact_type == ARTIFACT_MODEL_CHANGED:
-        metric_key = extra.get("metric_key")
-        if metric_key is None:
+        target_class = extra.get("target_class")
+        if target_class is None:
             return None
-        return os.path.join(base, f"{metric_key}")
+        return os.path.join(base, f"{target_class}")
     # One experiment dir = one model; model lives at experiment_dir/model (no models/id/name)
     if artifact_type == ARTIFACT_ENCODER_PLOT and "run_id" in extra and "model_name" in extra:
         rid = extra.get("run_id") or "run"

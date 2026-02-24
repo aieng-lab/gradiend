@@ -64,7 +64,7 @@ trainer.train()
 
 enc_result = trainer.evaluate_encoder(plot=True)
 dec = trainer.evaluate_decoder()
-changed_model = trainer.rewrite_base_model(decoder_results=dec, metric_key="3SG")
+changed_model = trainer.rewrite_base_model(decoder_results=dec, target_class="3SG")
 ```
 
 Runnable script with more data: `python -m gradiend.examples.start_workflow`

@@ -12,7 +12,6 @@ from typing import List, Dict
 
 import numpy as np
 import torch
-from tqdm import tqdm
 
 from gradiend.model.utils import is_decoder_only_model
 from gradiend.util.logging import get_logger
@@ -51,7 +50,6 @@ def compute_probability_shift_score_clm(
     targets,
     key_text='masked',
     batch_size=16,
-    data_class_col=None,
     dataset_class_col=None,
 ):
     """
@@ -64,16 +62,11 @@ def compute_probability_shift_score_clm(
         targets: Dict mapping class_name -> list of tokens
         key_text: Column name for masked text
         batch_size: Batch size for evaluation
-        data_class_col: DEPRECATED - kept for backward compatibility. If set, filters results
-            to counterfactual probabilities only (for selection logic).
         dataset_class_col: Column name identifying dataset class (e.g., "label_class" or "factual_id").
             If None, uses "label_class" if available, else "factual_id".
 
     Returns:
-        If dataset_class_col is provided or can be inferred:
-            Dict[str, Dict[str, float]]: {dataset_class: {class_name: prob, ...}, ...}
-        Otherwise (backward compatibility):
-            Dict[str, float]: {class_name: prob, ...} (filtered by data_class_col if provided)
+        Dict[str, Dict[str, float]]: {dataset_class: {class_name: prob, ...}, ...}
     """
     model.eval()
     device = model.device
@@ -127,7 +120,7 @@ def compute_probability_shift_score_clm(
     n_batches = (len(rows) + batch_size - 1) // batch_size
 
     with torch.no_grad():
-        for start in tqdm(range(0, len(rows), batch_size), desc="Decoder prob (CLM)", total=n_batches):
+        for start in range(0, len(rows), batch_size):
             batch = rows[start:start + batch_size]
 
             if is_decoder_only:
@@ -183,8 +176,7 @@ def compute_probability_shift_score_clm(
             for class_name, probs in class_probs.items()
         }
 
-    # Always return probs_by_dataset structure
-    # Backward compatibility filtering happens in evaluate_base_model
+    # Return probs_by_dataset structure; selection filtering is done in evaluate_base_model
     if probs_by_dataset_means:
         means_str = ", ".join(
             f"{ds_cls}: {', '.join(f'{cls}={prob:.4f}' for cls, prob in sorted(cls_probs.items()))}"
@@ -206,7 +198,6 @@ def compute_probability_shift_score_mlm(
     targets,
     key_text='masked',
     batch_size=16,
-    data_class_col=None,
     dataset_class_col=None,
 ):
     """
@@ -219,21 +210,16 @@ def compute_probability_shift_score_mlm(
         targets: Dict mapping class_name -> list of tokens
         key_text: Column name for masked text
         batch_size: Batch size for evaluation
-        data_class_col: DEPRECATED - kept for backward compatibility. If set, filters results
-            to counterfactual probabilities only (for selection logic).
         dataset_class_col: Column name identifying dataset class (e.g., "label_class" or "factual_id").
             If None, uses "label_class" if available, else "factual_id".
 
     Returns:
-        If dataset_class_col is provided or can be inferred:
-            Dict[str, Dict[str, float]]: {dataset_class: {class_name: prob, ...}, ...}
-        Otherwise (backward compatibility):
-            Dict[str, float]: {class_name: prob, ...} (filtered by data_class_col if provided)
+        Dict[str, Dict[str, float]]: {dataset_class: {class_name: prob, ...}, ...}
     """
     model.eval()
     device = model.device
     if is_decoder_only_model(model):
-        return compute_probability_shift_score_clm(model, tokenizer, df, targets, key_text, batch_size, data_class_col)
+        return compute_probability_shift_score_clm(model, tokenizer, df, targets, key_text, batch_size, dataset_class_col)
 
     _tokenizer = tokenizer.tokenizer if hasattr(tokenizer, 'tokenizer') else tokenizer
     vocab_norm_map = _build_vocab_norm_map(_tokenizer)
@@ -279,7 +265,7 @@ def compute_probability_shift_score_mlm(
     n_batches = (len(rows) + batch_size - 1) // batch_size
 
     with torch.no_grad():
-        for start in tqdm(range(0, len(rows), batch_size), desc="Decoder prob (MLM)", total=n_batches):
+        for start in range(0, len(rows), batch_size):
             batch = rows[start:start + batch_size]
             texts = [r[key_text] for r in batch]
             targets_by_len = defaultdict(list)
@@ -337,8 +323,7 @@ def compute_probability_shift_score_mlm(
             for class_name, probs in class_probs.items()
         }
 
-    # Always return probs_by_dataset structure
-    # Backward compatibility filtering happens in evaluate_base_model
+    # Return probs_by_dataset structure; selection filtering is done in evaluate_base_model
     if probs_by_dataset_means:
         means_str = ", ".join(
             f"{ds_cls}: {', '.join(f'{cls}={prob:.4f}' for cls, prob in sorted(cls_probs.items()))}"
@@ -372,9 +357,9 @@ def compute_lms(model, tokenizer, texts, ignore, max_texts=None, batch_size=32):
     return result
 
 
-def evaluate_probability_shift_score(model, tokenizer, targets, eval_data_df, key_text='masked', data_class_col=None, dataset_class_col=None):
+def evaluate_probability_shift_score(model, tokenizer, targets, eval_data_df, key_text='masked', dataset_class_col=None):
     """
-    Generic feature score evaluation: computes probabilities for all classes on all datasets.
+    Compute probabilities for all classes on all datasets.
 
     Args:
         model: Model to evaluate
@@ -382,16 +367,11 @@ def evaluate_probability_shift_score(model, tokenizer, targets, eval_data_df, ke
         targets: Dict mapping class_name -> list of tokens
         eval_data_df: DataFrame with evaluation data
         key_text: Column name for masked text
-        data_class_col: DEPRECATED - kept for backward compatibility. If set, returns filtered
-            counterfactual probabilities (for selection logic).
         dataset_class_col: Column name identifying dataset class (e.g., "label_class" or "factual_id").
             If None, auto-detects from dataframe columns.
 
     Returns:
-        If dataset_class_col is provided or can be inferred:
-            Dict[str, Dict[str, float]]: {dataset_class: {class_name: prob, ...}, ...}
-        Otherwise (backward compatibility):
-            Dict[str, float]: {class_name: prob, ...} (filtered by data_class_col if provided)
+        Dict[str, Dict[str, float]]: {dataset_class: {class_name: prob, ...}, ...}
 
     Probabilities are taken from the model's forward only: for decoder/generative models
     we use next-token (CLM) logits at the position after the prefix; for MaskedLM we use
@@ -399,8 +379,8 @@ def evaluate_probability_shift_score(model, tokenizer, targets, eval_data_df, ke
     pass the CLM (base decoder) when using a decoder-only MLM-head model.
     """
     return compute_probability_shift_score_mlm(
-        model, tokenizer, eval_data_df, targets=targets, key_text=key_text, 
-        data_class_col=data_class_col, dataset_class_col=dataset_class_col
+        model, tokenizer, eval_data_df, targets=targets, key_text=key_text,
+        dataset_class_col=dataset_class_col
     )
 
 
