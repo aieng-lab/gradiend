@@ -456,7 +456,8 @@ class FeatureLearningDefinition(DataProvider, ABC):
         Expected (source_id, target_id) or source_id keys for encoder analysis, without iterating eval data.
         Modality-independent; uses definition.target_classes, definition.pair, definition.training_args.add_identity_for_other_classes.
         When add_identity_for_other_classes=False: every pair of classes (excluding identities).
-        When add_identity_for_other_classes=True: the two training transitions + identity pairs for all other classes.
+        When add_identity_for_other_classes=True: the two training transitions + identity pairs for non-target
+        classes only (all_classes \\ target_classes; none if all_classes equals target_classes).
         Call after create_eval_data (or anything that sets self.target_classes) so self.pair is available.
         """
         target_classes = self.target_classes or []
@@ -472,7 +473,8 @@ class FeatureLearningDefinition(DataProvider, ABC):
             return frozenset()
         c1, c2 = pair[0], pair[1]
         training = frozenset({(c1, c2), (c2, c1)})
-        identity_others = frozenset((c, c) for c in target_classes if c not in (c1, c2))
+        # Identity only for non-target classes (all_classes \ target_classes)
+        identity_others = frozenset((c, c) for c in (self.non_target_classes or []))
         return training | identity_others
 
     @abstractmethod

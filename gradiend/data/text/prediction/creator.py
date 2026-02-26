@@ -106,6 +106,7 @@ class TextPredictionDataCreator:
         training_basename: str = "training",
         neutral_basename: str = "neutral",
         output_format: Literal["csv", "parquet", "hf"] = "csv",
+        use_cache: bool = False,
     ) -> None:
         """Initialize with shared config for both generate methods.
 
@@ -127,6 +128,8 @@ class TextPredictionDataCreator:
             neutral_basename: Base name for neutral output (default "neutral").
             output_format: "csv" (default), "parquet", or "hf" (HuggingFace datasets; per_class saves as subsets).
                 "hf" requires the datasets library; falls back to csv with a warning if not installed.
+            use_cache: If True and output_dir is set, generate_training_data and generate_neutral_data
+                load from existing files in output_dir when available instead of regenerating.
         """
         if not isinstance(text_column, str):
             raise TypeError(f"text_column must be str, got {type(text_column).__name__}")
@@ -154,6 +157,8 @@ class TextPredictionDataCreator:
             raise TypeError(f"output_format must be str, got {type(output_format).__name__}")
         if output_format not in ("csv", "parquet", "hf"):
             raise TypeError(f"output_format must be 'csv', 'parquet', or 'hf', got {output_format!r}")
+        if not isinstance(use_cache, bool):
+            raise TypeError(f"use_cache must be bool, got {type(use_cache).__name__}")
 
         self.base_data = base_data
         self.text_column = text_column
@@ -170,6 +175,7 @@ class TextPredictionDataCreator:
         self.training_basename = training_basename
         self.neutral_basename = neutral_basename
         self.output_format = output_format
+        self.use_cache = use_cache
         self._texts_cache: Optional[List[str]] = None
 
     def _resolve_output_path(self, name: Literal["training", "neutral"], explicit: Optional[str]) -> Optional[str]:
@@ -185,6 +191,68 @@ class TextPredictionDataCreator:
             return str(self.output_dir / f"{basename}.parquet")
         # hf: directory, no extension
         return str(self.output_dir / basename)
+
+    def _load_cached_training(
+        self,
+        path: str,
+        format: str,
+    ) -> Optional[Union[Dict[str, pd.DataFrame], pd.DataFrame]]:
+        """Load training data from path when use_cache and output_dir are set. Returns None if path does not exist."""
+        p = Path(path)
+        if not p.exists():
+            return None
+        fmt = self.output_format
+        if fmt == "csv":
+            df = pd.read_csv(path)
+        elif fmt == "parquet":
+            df = pd.read_parquet(path)
+        else:
+            try:
+                from datasets import load_from_disk
+            except ImportError:
+                return None
+            ds = load_from_disk(path)
+            if hasattr(ds, "keys"):
+                class_dfs = {k: v.to_pandas() for k, v in ds.items()}
+                if format == "per_class":
+                    return class_dfs
+                if format == "minimal":
+                    return _to_minimal(class_dfs)
+                return _to_merged(class_dfs)
+            df = ds.to_pandas()
+        if format == "per_class":
+            group_col = "label_class" if "label_class" in df.columns else "feature_class_id"
+            if group_col not in df.columns:
+                return df
+            out = {}
+            for k, g in df.groupby(group_col, sort=False):
+                g = g.drop(columns=[group_col], errors="ignore").copy()
+                if "label" in g.columns:
+                    g[str(k)] = g["label"]
+                out[str(k)] = g
+            return out
+        if format == "minimal":
+            minimal_cols = ["masked", "label", "label_class", "split"]
+            if all(c in df.columns for c in minimal_cols):
+                return df[minimal_cols].copy()
+        return df
+
+    def _load_cached_neutral(self, path: str) -> Optional[pd.DataFrame]:
+        """Load neutral data from path when use_cache and output_dir are set. Returns None if path does not exist."""
+        p = Path(path)
+        if not p.exists():
+            return None
+        fmt = self.output_format
+        if fmt == "csv":
+            return pd.read_csv(path)
+        if fmt == "parquet":
+            return pd.read_parquet(path)
+        try:
+            from datasets import load_from_disk
+        except ImportError:
+            return None
+        ds = load_from_disk(path)
+        return ds.to_pandas()
 
     def _get_texts(
         self, base_override: Optional[Union[str, pd.DataFrame, List[str]]] = None
@@ -242,6 +310,13 @@ class TextPredictionDataCreator:
         """
         if abs((train_ratio + val_ratio + test_ratio) - 1.0) > 1e-6:
             raise ValueError("train_ratio, val_ratio, test_ratio must sum to 1.0")
+        if self.use_cache and self.output_dir is not None:
+            out_path = output or self._resolve_output_path("training", None)
+            if out_path is not None:
+                cached = self._load_cached_training(out_path, format)
+                if cached is not None:
+                    logger.info("Using cached training data from %s", out_path)
+                    return cached
         texts = self._get_texts()
         configs_with_ids = [
             (_class_id(cfg, i), cfg) for i, cfg in enumerate(self.feature_targets)
@@ -272,13 +347,13 @@ class TextPredictionDataCreator:
         class_dfs = {}
         stats_per_group = {cid: len(matches) for cid, matches in results_per_class.items()}
         total_so_far = sum(stats_per_group.values())
-        success_rates = {}
+        match_rates = {}
         for class_id, matches in results_per_class.items():
             n = len(matches)
-            rate = (n / n_processed) if n_processed else 0.0  # fraction in [0, 1]
-            success_rates[class_id] = rate
+            rate = (n / n_processed) if n_processed else 0.0  # fraction of corpus that matched this class
+            match_rates[class_id] = rate
             cap_str = f"/{max_size_per_class}" if max_size_per_class is not None else ""
-            logger.info("  %s: %s%s matches (success rate: %.2f%%)", class_id, n, cap_str, 100 * rate)
+            logger.info("  %s: %s%s matches (%.2f%% of sentences scanned)", class_id, n, cap_str, 100 * rate)
             cfg = config_by_id[class_id]
             rows = []
             for sent, spans in matches:
@@ -304,9 +379,18 @@ class TextPredictionDataCreator:
             if total_target is not None and total_target > 0:
                 pct = 100.0 * total_so_far / total_target
                 logger.info("Overall: %s/%s (%.1f%%)", total_so_far, total_target, pct)
-            if success_rates:
-                avg_rate = sum(success_rates.values()) / len(success_rates)
-                logger.info("Success rate per class: %s; average: %.2f%%", success_rates, 100 * avg_rate)
+            if match_rates:
+                rates_vals = list(match_rates.values())
+                if len(set(rates_vals)) == 1:
+                    logger.info(
+                        "Match rate: %.2f%% of sentences scanned matched each class (single stream, shared denominator)",
+                        100 * rates_vals[0],
+                    )
+                else:
+                    logger.info(
+                        "Match rate per class (fraction of sentences scanned): %s",
+                        {k: f"{100 * v:.2f}%" for k, v in match_rates.items()},
+                    )
 
         if balance is not False:
             class_dfs = _apply_balance(
@@ -401,6 +485,13 @@ class TextPredictionDataCreator:
         Returns:
             DataFrame with at least "text" column.
         """
+        if self.use_cache and self.output_dir is not None:
+            out_path = output or self._resolve_output_path("neutral", None)
+            if out_path is not None:
+                cached = self._load_cached_neutral(out_path)
+                if cached is not None:
+                    logger.info("Using cached neutral data from %s", out_path)
+                    return cached
         texts = self._get_texts(base_override=base_data)
         sentence_stream = iter_sentences_from_texts(
             texts,

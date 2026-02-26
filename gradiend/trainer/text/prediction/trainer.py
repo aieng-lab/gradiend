@@ -324,7 +324,7 @@ class TextPredictionTrainer(Trainer):
             decoder_eval_lms_max_samples: Max samples for LMS in decoder eval.
             eval_neutral_data: DataFrame or path for neutral evaluation data.
             eval_neutral_max_rows: Max rows to load from neutral HF datasets.
-            img_format: Image format for plots (e.g. 'pdf', 'png'). Default 'pdf'.
+            img_format: Image format for plots (e.g. 'pdf', 'png'). Default 'png'.
             img_dpi: DPI for saved plots (e.g. 600 for publication). None = use visualizer default.
         """
         # Type checks for key scalar parameters (optional params may be None)
@@ -682,14 +682,14 @@ class TextPredictionTrainer(Trainer):
 
     def plot_training_convergence(self, **kwargs: Any) -> Any:
         if "img_format" not in kwargs:
-            kwargs["img_format"] = getattr(self.config, "img_format", "pdf")
+            kwargs["img_format"] = getattr(self.config, "img_format", "png")
         if "dpi" not in kwargs and getattr(self.config, "img_dpi", None) is not None:
             kwargs["dpi"] = self.config.img_dpi
         return super().plot_training_convergence(**kwargs)
 
     def plot_encoder_distributions(self, **kwargs: Any) -> Any:
         if "img_format" not in kwargs:
-            kwargs["img_format"] = getattr(self.config, "img_format", "pdf")
+            kwargs["img_format"] = getattr(self.config, "img_format", "png")
         if "dpi" not in kwargs and getattr(self.config, "img_dpi", None) is not None:
             kwargs["dpi"] = self.config.img_dpi
         return super().plot_encoder_distributions(**kwargs)
@@ -706,7 +706,7 @@ class TextPredictionTrainer(Trainer):
         """Plot decoder evaluation probability shifts vs learning rate for a target class.
         Uses target_class and increase_target_probabilities (default True = strengthen) to choose which summary config to plot."""
         if "img_format" not in kwargs:
-            kwargs["img_format"] = getattr(self.config, "img_format", "pdf")
+            kwargs["img_format"] = getattr(self.config, "img_format", "png")
         if "dpi" not in kwargs and getattr(self.config, "img_dpi", None) is not None:
             kwargs["dpi"] = self.config.img_dpi
         return self.evaluator.plot_probability_shifts(
@@ -948,9 +948,9 @@ class TextPredictionTrainer(Trainer):
                 "feature_class_id": _feature_class_id(src, tgt),
             })
 
-        if add_identity and self.all_classes and len(self.all_classes) > 2:
-            neutral_classes = [c for c in self.all_classes if c not in class_pair]
-            if neutral_classes:
+        # Identity transitions only for classes in all_classes that are not in target_classes
+        neutral_classes = [c for c in (self.all_classes or []) if c not in (self.target_classes or [])]
+        if add_identity and neutral_classes:
                 neutral_data = split_data[split_data[UNIFIED_FACTUAL_CLASS].isin(neutral_classes)].copy()
                 for _, row in neutral_data.iterrows():
                     c = row[UNIFIED_FACTUAL_CLASS]

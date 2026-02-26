@@ -51,7 +51,7 @@ def _plot_all_target_classes(
         return []
     decoder_results = {**summary, "grid": relevant_results}
     cfg = getattr(trainer, "config", None)
-    img_format = getattr(cfg, "img_format", "pdf") if cfg else "pdf"
+    img_format = getattr(cfg, "img_format", "png") if cfg else "png"
     do_show = show if show is not None else True
     paths: List[str] = []
     for key in plot_keys:

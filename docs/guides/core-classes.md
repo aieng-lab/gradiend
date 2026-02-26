@@ -394,7 +394,7 @@ modified_model = model.rewrite_base_model(
 
 ## Next steps
 
-- **[Start here](../start.md)** — Run a complete example
+- **[Start here](../start.md)** — Run a complete example; script also in [gradiend/examples](https://github.com/aieng-lab/gradiend/tree/main/gradiend/examples) on GitHub
 - **[API reference](../api/index.md)** — Complete API documentation
 - **[Tutorials](../tutorials/data-generation.md)** — Step-by-step workflows
 - **[Guides](data-handling.md)** — Detailed guides for specific topics

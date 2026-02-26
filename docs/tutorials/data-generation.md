@@ -151,14 +151,6 @@ Pass `training` and `neutral` to `TextPredictionTrainer` as `data=training` and 
 
 ---
 
-## What you did
-
-- Understood that **syncretism** (one form, several grammatical roles) makes string-only matching insufficient when the feature is defined by role.
-- Used **TextFilterConfig** with **spacy_tags** to restrict matches to a single grammatical cell (e.g. “der” = nominative masculine only).
-- Built a **TextPredictionDataCreator** with one filter per gender–case cell (e.g. 12 for the full German definite singular paradigm) and generated **training** and **neutral** data for use with the trainer.
-
----
-
 ## Next steps
 
 - **[Tutorial: Training](training.md)** — Configure the trainer, pruning, convergence plot, and multi-seed.

@@ -5,6 +5,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from gradiend.trainer.core.arguments import TrainingArguments
 from gradiend.trainer.text.prediction.trainer import TextPredictionConfig, TextPredictionTrainer
 from gradiend.trainer.text.prediction.unified_data import (
     UNIFIED_ALTERNATIVE,
@@ -45,6 +46,27 @@ def _per_class_dict():
             "masked": ["[MASK] there"],
             "split": ["train"],
             "3PL": ["they"],
+        }),
+    }
+
+
+def _per_class_dict_three_classes():
+    """Per-class dict with three classes (3SG, 3PL, Other) for identity-for-other tests."""
+    return {
+        "3SG": pd.DataFrame({
+            "masked": ["[MASK] here"],
+            "split": ["train"],
+            "3SG": ["he"],
+        }),
+        "3PL": pd.DataFrame({
+            "masked": ["[MASK] there"],
+            "split": ["train"],
+            "3PL": ["they"],
+        }),
+        "Other": pd.DataFrame({
+            "masked": ["[MASK] person"],
+            "split": ["train"],
+            "Other": ["they"],
         }),
     }
 
@@ -257,3 +279,59 @@ class TestStandardPipelinePerDataFormat:
         training_data = trainer.create_training_data(tokenizer, split="train", batch_size=1)
         assert training_data is not None
         assert len(training_data) >= 1
+
+
+class TestAddIdentityForOtherClasses:
+    """Identity transitions are added only for non-target classes (all_classes \\ target_classes)."""
+
+    @pytest.fixture(scope="class")
+    def tokenizer(self):
+        from transformers import AutoTokenizer
+        return AutoTokenizer.from_pretrained("bert-base-uncased")
+
+    def test_add_identity_not_added_when_all_classes_equal_target_classes(self, tokenizer):
+        """When all_classes is set to target_classes, no identity rows are added."""
+        config = TextPredictionConfig(
+            data=_per_class_dict(),
+            target_classes=["3SG", "3PL"],
+            all_classes=["3SG", "3PL"],
+            use_class_names_as_columns=True,
+        )
+        training_args = TrainingArguments(add_identity_for_other_classes=True)
+        trainer = TextPredictionTrainer(
+            model="bert-base-uncased",
+            config=config,
+            training_args=training_args,
+        )
+        trainer._ensure_data()
+        training_data = trainer.create_training_data(tokenizer, split="train", batch_size=1)
+        df = training_data.data
+        identity_rows = df[df["factual_id"] == df["alternative_id"]]
+        assert len(identity_rows) == 0, (
+            "Expected no identity rows when all_classes equals target_classes"
+        )
+
+    def test_add_identity_only_for_non_target_classes(self, tokenizer):
+        """When all_classes has extra classes, identity rows are added only for non-target classes."""
+        config = TextPredictionConfig(
+            data=_per_class_dict_three_classes(),
+            target_classes=["3SG", "3PL"],
+            use_class_names_as_columns=True,
+        )
+        training_args = TrainingArguments(add_identity_for_other_classes=True)
+        trainer = TextPredictionTrainer(
+            model="bert-base-uncased",
+            config=config,
+            training_args=training_args,
+        )
+        trainer._ensure_data()
+        assert set(trainer.all_classes) == {"3SG", "3PL", "Other"}
+        training_data = trainer.create_training_data(tokenizer, split="train", batch_size=1)
+        df = training_data.data
+        identity_rows = df[df["factual_id"] == df["alternative_id"]]
+        assert len(identity_rows) >= 1, "Expected at least one identity row for non-target class Other"
+        non_target = {"Other"}
+        for _, row in identity_rows.iterrows():
+            assert row["factual_id"] in non_target, (
+                f"Identity row should be for non-target class only, got factual_id={row['factual_id']!r}"
+            )

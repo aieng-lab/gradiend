@@ -2,7 +2,7 @@
 
 This page walks through a **self-contained** workflow: you train and evaluate a GRADIEND model for singular-plural feature based on English third person pronouns.
 
-**Runnable script:** [gradiend/examples/start_workflow.py](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/start_workflow.py). 
+**Runnable script:** [gradiend/examples/start_workflow.py](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/start_workflow.py) on GitHub. From the project root:
 
 ```bash
 python -m gradiend.examples.start_workflow
@@ -184,7 +184,7 @@ The `changed_base_model` is expected to be biased towards singular (i.e., **stre
 
 The example above keeps things intentionally simple: one feature (3SG vs 3PL), two classes, and a small artificial corpus. Once that works, you can extend it in several directions:
 
-- **Add more feature classes**: extend `feature_targets` with more `TextFilterConfig`s (e.g. 1SG, 1PL, 2SGPL, 3SG, 3PL for pronouns) and regenerate data via `TextPredictionDataCreator`. You can then train multiple GRADIENDs (different `target_classes` / `run_id`s) and compare them using the [top‑k overlap heatmap](tutorials/evaluation-inter-model.md) (`plot_topk_overlap_heatmap`), as demonstrated in the detailed examples.
+- **Add more feature classes**: extend `feature_targets` with more `TextFilterConfig`s (e.g. 1SG, 1PL, 2SGPL, 3SG, 3PL for pronouns) and regenerate data via `TextPredictionDataCreator` (recommended to use `spacy_tags={"pos": "PRON"}` and `spacy_model="en_core_web_sm"` to reduce data noise). You can then train multiple GRADIENDs (different `target_classes` / `run_id`s) and compare them using the [top‑k overlap heatmap](tutorials/evaluation-inter-model.md) (`plot_topk_overlap_heatmap`), as demonstrated in the detailed examples.
 
 - **Merge fine‑grained classes into higher‑level features**: when your data has more than two base classes (e.g. 1SG, 1PL, 3SG, 3PL), you can learn higher‑level features by merging:
 

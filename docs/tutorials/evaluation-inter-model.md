@@ -93,7 +93,7 @@ High values (e.g. bright cells) mean the two runs share many of their top-k para
 
 ---
 
-## See also
+## Next steps
 
 - [Tutorial: Evaluation (intra-model)](evaluation-intra-model.md) — Encoder/decoder evaluation and decoder config selection.
 - [Tutorial: Model Rewrite](model-rewrite.md) — Apply decoder-selected rewrites and save changed checkpoints.

@@ -4,9 +4,9 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gradiend"
-version = "0.1.0"
+version = "0.1.1"
 description = "GRADIEND: Gradient-based Targeted Feature Learning within Neural Networks"
-readme = "README.md"
+readme = "PYPI.md"
 requires-python = ">=3.9"
 license = {text = "See LICENSE file"}
 authors = [
@@ -86,8 +86,10 @@ exclude_lines = [
     "raise NotImplementedError",
 ]
 
-[tool.setuptools]
-packages = ["gradiend"]
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["gradiend*"]
+exclude = ["gradiend.examples*"]
 
 [tool.setuptools.package-data]
 gradiend = ["py.typed"]

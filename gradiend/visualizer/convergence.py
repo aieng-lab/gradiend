@@ -301,7 +301,7 @@ def plot_training_convergence(
     show: bool = True,
     title: Union[str, bool] = True,
     figsize: Optional[Tuple[float, float]] = None,
-    img_format: str = "pdf",
+    img_format: str = "png",
     dpi: Optional[int] = None,
     legend_ncol: Optional[int] = None,
     legend_bbox_to_anchor: Optional[Tuple[float, float]] = None,

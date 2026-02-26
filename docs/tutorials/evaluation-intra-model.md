@@ -164,7 +164,7 @@ dec_results = trainer.evaluate_decoder()
 
 ---
 
-## See also
+## Next steps
 
 - [Tutorial: Evaluation (inter-model)](evaluation-inter-model.md) — Top-k overlap and heatmaps for comparing multiple runs.
 - [Tutorial: Model Rewrite](model-rewrite.md) — Apply decoder-selected rewrites and save changed checkpoints.

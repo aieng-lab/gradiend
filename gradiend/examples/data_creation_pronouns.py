@@ -49,6 +49,7 @@ def main():
             TextFilterConfig(target="they", spacy_tags={"pos": "PRON"}, id="3PL"),
         ],
         output_dir='data/english_pronouns',
+        use_cache=True, # only recompute if no cache is available (manually set to False to force recomputation after parameter changes)
     )
 
     print("=== Training data (per_class, balance='try') ===")

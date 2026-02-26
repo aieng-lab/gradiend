@@ -11,7 +11,7 @@ Run the test suite in `tests/` (excludes slow and integration tests by default i
 python -m pytest tests/ -v --tb=long
 ```
 
-**Examples-are-running (smoke) tests:** Check that all `gradiend.examples` scripts run to completion (no metric checks). From the project root:
+**Examples-are-running (smoke) tests:** Check that all `gradiend.examples` scripts run to completion (no metric checks). Run from the **project root** (examples are in the [repository](https://github.com/aieng-lab/gradiend/tree/main/gradiend/examples), not in the pip package):
 
 ```bash
 pytest test_bench/examples/ -v -s

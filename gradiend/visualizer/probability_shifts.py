@@ -348,7 +348,7 @@ def plot_probability_shifts(
         # Construct output path
         experiment_dir = trainer.experiment_dir
         run_id = getattr(trainer, "run_id", None)
-        img_format = kwargs.get("img_format", "pdf")
+        img_format = kwargs.get("img_format", "png")
         
         if run_id:
             output_dir = os.path.join(experiment_dir, run_id)

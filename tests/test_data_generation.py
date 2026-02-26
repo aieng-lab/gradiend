@@ -142,3 +142,61 @@ class TestCreatorOutputDirAndSave:
         neutral = creator.generate_neutral_data(max_size=5)
         assert len(neutral) <= 5
         assert "text" in neutral.columns
+
+    def test_use_cache_returns_cached_training_when_available(self):
+        """When use_cache=True and output_dir is set, generate_training_data returns cached data if file exists."""
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            creator = TextPredictionDataCreator(
+                base_data=["He walks.", "She runs.", "They play."],
+                feature_targets=[
+                    TextFilterConfig(id="3SG", targets=["he", "she"]),
+                    TextFilterConfig(id="3PL", targets=["they"]),
+                ],
+                output_dir=str(base),
+                output_format="csv",
+                seed=42,
+            )
+            first = creator.generate_training_data(
+                max_size_per_class=10, format="unified", min_rows_per_class_for_split=0
+            )
+            assert (base / "training.csv").is_file()
+            creator_cached = TextPredictionDataCreator(
+                base_data=["He walks.", "She runs.", "They play."],
+                feature_targets=[
+                    TextFilterConfig(id="3SG", targets=["he", "she"]),
+                    TextFilterConfig(id="3PL", targets=["they"]),
+                ],
+                output_dir=str(base),
+                output_format="csv",
+                seed=42,
+                use_cache=True,
+            )
+            cached = creator_cached.generate_training_data(
+                max_size_per_class=10, format="unified", min_rows_per_class_for_split=0
+            )
+            pd.testing.assert_frame_equal(first, cached)
+
+    def test_use_cache_returns_cached_neutral_when_available(self):
+        """When use_cache=True and output_dir is set, generate_neutral_data returns cached data if file exists."""
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            creator = TextPredictionDataCreator(
+                base_data=["Hello world.", "Another sentence."],
+                feature_targets=[TextFilterConfig(targets=["he"])],
+                output_dir=str(base),
+                output_format="csv",
+                seed=42,
+            )
+            first = creator.generate_neutral_data(max_size=10)
+            assert (base / "neutral.csv").is_file()
+            creator_cached = TextPredictionDataCreator(
+                base_data=["Hello world.", "Another sentence."],
+                feature_targets=[TextFilterConfig(targets=["he"])],
+                output_dir=str(base),
+                output_format="csv",
+                seed=42,
+                use_cache=True,
+            )
+            cached = creator_cached.generate_neutral_data(max_size=10)
+            pd.testing.assert_frame_equal(first, cached)

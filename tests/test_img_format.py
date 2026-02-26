@@ -15,9 +15,9 @@ from gradiend.visualizer.encoder_distributions import plot_encoder_distributions
 class TestImgFormatConfig:
     """TextPredictionConfig img_format default and storage."""
 
-    def test_config_default_img_format_is_pdf(self):
+    def test_config_default_img_format_is_png(self):
         config = TextPredictionConfig(data=pd.DataFrame(), target_classes=["A", "B"])
-        assert config.img_format == "pdf"
+        assert config.img_format == "png"
 
     def test_config_stores_img_format(self):
         config = TextPredictionConfig(
@@ -185,9 +185,9 @@ class TestConvergencePlotAutoSave:
         with patch("matplotlib.pyplot.show"):
             path = trainer.plot_training_convergence(show=False)
         assert path
-        assert path.endswith(".pdf")
+        assert path.endswith(".png")
         assert os.path.exists(path)
-        assert "training_convergence.pdf" in path
+        assert "training_convergence.png" in path
 
     def test_plot_automatically_called_after_training_when_experiment_dir_set(self, tmp_path):
         """train() automatically saves convergence plot when experiment_dir is set."""
@@ -218,7 +218,7 @@ class TestConvergencePlotAutoSave:
             with patch("matplotlib.pyplot.show"):
                 trainer.train(use_cache=False)
 
-        plot_path = tmp_path / "training_convergence.pdf"
+        plot_path = tmp_path / "training_convergence.png"
         assert plot_path.exists(), f"Expected convergence plot at {plot_path}"
 
     def test_convergence_plot_includes_identity_classes(self):

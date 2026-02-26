@@ -16,7 +16,7 @@ The method is described in detail in the paper: **[GRADIEND: Feature Learning wi
 > While GRADIEND is methodologically defined to work with any *gradient-learned* and *weight-based* model, this library currently only supports *text prediction* models (specifically `transformers.AutoModelForMaskedLM` and `transformers.AutoModelForCausalLM`).
 > However, the library is designed to be modular and we plan to support more models in the future (e.g., text classification, vision, ...).
 
-Example use cases:
+Example use cases ([gradiend/examples](https://github.com/aieng-lab/gradiend/tree/main/gradiend/examples) on GitHub):
 - **[English pronouns](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/english_pronouns.ipynb)** — notebook; [script](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/english_pronouns.py)
 - **[English gender](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/gender_en.py)**
 - **[German gender–case](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/gender_de_detailed.py)**

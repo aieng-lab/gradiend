@@ -137,7 +137,7 @@ trainer.rewrite_base_model(
 
 ---
 
-## See also
+## Next steps
 
 - [Tutorial: Evaluation (intra-model)](evaluation-intra-model.md) — Encoder and decoder evaluation, including decoder config selection.
 - [Tutorial: Evaluation (inter-model)](evaluation-inter-model.md) — Comparing runs (e.g. top-k overlap, heatmaps).

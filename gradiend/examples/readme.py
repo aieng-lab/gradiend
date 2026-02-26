@@ -1,25 +1,7 @@
-"""
-Minimal start-to-end GRADIEND workflow with TextPredictionDataCreator.
+"""Mirrors the README quick-start example. Run with: python -m gradiend.examples.readme"""
+from gradiend import TextPredictionDataCreator, TextFilterConfig, TrainingArguments, TextPredictionTrainer
 
-Uses 75+ artificial sentences (3SG: he/she/it, 3PL: they, neutral).
-Matches docs/start.md. From project root: python -m gradiend.examples.start_workflow (or download from GitHub gradiend/examples)
-"""
-# Reproducibility: set before importing torch (must be before gradiend/torch use CUDA)
-import os
-os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
-os.environ.setdefault("OMP_NUM_THREADS", "1")
-
-import pandas as pd
-
-from gradiend import (
-    TextFilterConfig,
-    TextPredictionDataCreator,
-    TrainingArguments,
-    TextPredictionTrainer,
-)
-
-# 75+ sentences: mix of 3SG (he/she/it), 3PL (they), both in one sentence, and neutral.
-ARTIFICIAL_TEXTS = [
+base = [
     "The chef tasted the soup, then he added a pinch of pepper and stirred it.",
     "The pianist closed her eyes and played the final chord; she had practised it for weeks.",
     "The dog ran to the door; it wanted to go outside and chase the ball.",
@@ -97,59 +79,22 @@ ARTIFICIAL_TEXTS = [
     "The gate was left open so the horse got out and it wandered off.",
     "The contract is valid for twelve months from the signing date.",
 ]
+creator = TextPredictionDataCreator(
+    base_data=base,
+    feature_targets=[
+        TextFilterConfig(targets=["he", "she", "it"], id="3SG"),
+        TextFilterConfig(target="they", id="3PL"),
+    ],
+)
+training = creator.generate_training_data(max_size_per_class=30)
+neutral = creator.generate_neutral_data(additional_excluded_words=["i", "we", "you"], max_size=10)
 
-NEUTRAL_EXCLUDE = [
-    "i", "we", "you", "he", "she", "it", "they",
-    "me", "us", "him", "her", "them",
-]
+args = TrainingArguments(train_batch_size=2, eval_steps=5, max_steps=20, learning_rate=1e-3)
+#args = TrainingArguments(train_batch_size=2, eval_steps=5, max_steps=20, learning_rate=1e-3, experiment_dir="runs/readme")
+trainer = TextPredictionTrainer(model="bert-base-cased", data=training, eval_neutral_data=neutral, args=args)
+trainer.train()
+trainer.plot_training_convergence()
 
-
-def create_data():
-    """Build training and neutral data with TextPredictionDataCreator (matches start.md)."""
-    creator = TextPredictionDataCreator(
-        base_data=ARTIFICIAL_TEXTS,
-        feature_targets=[
-            TextFilterConfig(targets=["he", "she", "it"], id="3SG"),
-            TextFilterConfig(targets=["they"], id="3PL"),
-        ],
-    )
-    training = creator.generate_training_data(max_size_per_class=50)
-    neutral = creator.generate_neutral_data(
-        additional_excluded_words=NEUTRAL_EXCLUDE,
-        max_size=50,
-    )
-    return training, neutral
-
-
-def train_and_evaluate(training, neutral):
-    """Train, evaluate encoder/decoder, and return the selected changed model (matches start.md)."""
-    args = TrainingArguments(
-        train_batch_size=4,
-        eval_steps=5,
-        num_train_epochs=5,
-        max_steps=25,
-        learning_rate=1e-3,
-        experiment_dir='runs/examples/start_workflow'
-    )
-    trainer = TextPredictionTrainer(
-        model="bert-base-uncased",
-        data=training,
-        eval_neutral_data=neutral,
-        max_counterfactuals_per_sentence=2,
-        img_format='png',
-        args=args,
-    )
-    trainer.train()
-    trainer.plot_training_convergence()
-
-    enc_result = trainer.evaluate_encoder(plot=True)
-    print("Correlation:", enc_result["correlation"])
-    dec = trainer.evaluate_decoder(plot=True, target_class="3SG")
-    print(dec["3SG"])
-    changed_base_model = trainer.rewrite_base_model(decoder_results=dec, target_class="3SG")
-
-    return trainer, enc_result, dec, changed_base_model
-
-
-training, neutral = create_data()
-trainer, enc_result, dec, changed_base_model = train_and_evaluate(training, neutral)
+enc_result = trainer.evaluate_encoder(plot=True)
+dec = trainer.evaluate_decoder(plot=True, target_class="3SG")
+changed_model = trainer.rewrite_base_model(decoder_results=dec, target_class="3SG")

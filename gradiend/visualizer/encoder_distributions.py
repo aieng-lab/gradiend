@@ -37,7 +37,7 @@ def plot_encoder_distributions(
     legend_ncol: Optional[int] = None,
     legend_bbox_to_anchor: Optional[Tuple[float, float]] = None,
     cmap: str = "tab20",
-    img_format: str = "pdf",
+    img_format: str = "png",
     dpi: Optional[int] = None,
     figsize: Optional[Tuple[float, float]] = None,
     target_and_neutral_only: bool = True,

@@ -49,7 +49,7 @@ plot_training_convergence(training_stats=stats_dict, output="convergence.pdf")
 | `output` | `str` | `None` | Explicit output file path. |
 | `experiment_dir` | `str` | `None` | Used to resolve default artifact path when `output` is not set. |
 | `show` | `bool` | `True` | Whether to call `plt.show()`. |
-| `img_format` | `str` | `"pdf"` | Image format (e.g. `"pdf"`, `"png"`). Appended to output path. |
+| `img_format` | `str` | `"png"` | Image format (e.g. `"pdf"`, `"png"`). Appended to output path. |
 
 ### Use cases
 
@@ -98,7 +98,7 @@ trainer.plot_encoder_distributions(encoder_df=enc_df, legend_name_mapping={...})
 | `output` | `str` | `None` | Explicit output path. |
 | `output_dir` | `str` | `None` | Output directory when `output` and `experiment_dir` are not set. |
 | `show` | `bool` | `True` | Whether to call `plt.show()`. |
-| `img_format` | `str` | `"pdf"` | Image format (e.g. `"pdf"`, `"png"`). |
+| `img_format` | `str` | `"png"` | Image format (e.g. `"pdf"`, `"png"`). |
 
 ### Use cases
 
@@ -247,7 +247,7 @@ Dict with `per_model` (label → list of weight indices; keys match input `model
 
 ## Image format and output paths
 
-Plots that save to disk use `img_format` (e.g. `"pdf"`, `"png"`) when available. If `experiment_dir` is set via `TrainingArguments`, the trainer resolves default paths under that directory (e.g. `[experiment_dir]/[run_id]/training_convergence.pdf`). You can override with explicit `output`, `output_path`, or `output_dir` parameters.
+Plots that save to disk use `img_format` (e.g. `"pdf"`, `"png"`) when available. If `experiment_dir` is set via `TrainingArguments`, the trainer resolves default paths under that directory (e.g. `[experiment_dir]/[run_id]/training_convergence.png`). You can override with explicit `output`, `output_path`, or `output_dir` parameters.
 
 ---
 

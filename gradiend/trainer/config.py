@@ -15,7 +15,7 @@ class TrainerConfig:
     such as visualization/plotting options used by all trainers.
     """
 
-    img_format: str = "pdf"
+    img_format: str = "png"
     """Image format for plots (e.g. encoder distributions, training convergence). Forwarded to visualizer."""
 
     img_dpi: Optional[int] = None

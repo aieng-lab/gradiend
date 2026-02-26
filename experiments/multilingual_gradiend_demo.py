@@ -33,7 +33,7 @@ args = TrainingArguments(
     encoder_eval_max_size=50,
     decoder_eval_max_size_training_like=100,
     decoder_eval_max_size_neutral=500,
-    num_train_epochs=1,
+    num_train_epochs=3,
     max_seeds=5,
     min_convergent_seeds=1,
     source="alternative",
@@ -201,11 +201,13 @@ def train_pronoun():
             "Run gradiend.examples.data_creation_pronouns to generate training.csv and neutral.csv."
         )
     for c1, c2 in pronoun_pairs:
+        args.add_identity_for_other_classes = False
         trainer = TextPredictionTrainer(
             model=model_name,
             run_id=f"pronoun_{c1}_{c2}",
             data=str(training_path),
             target_classes=[c1, c2],
+            all_classes=[c1, c2],
             masked_col="masked",
             split_col="split",
             eval_neutral_data=str(neutral_path),

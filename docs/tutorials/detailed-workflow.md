@@ -120,7 +120,7 @@ For **why** each option matters and what to change when, follow the part tutoria
 
 ---
 
-## Where to go next
+## Next steps
 
 - **[Data generation](data-generation.md)** — Syncretism, spaCy tags, one filter per gender–case cell.
 - **[Training](training.md)** — `experiment_dir` and `run_id`, source/target, pre- and post-pruning, multi-seed, convergence plot.

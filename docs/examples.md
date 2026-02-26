@@ -1,6 +1,6 @@
 # Examples
 
-These examples are intended as inspiration for data handling and workflow variations. Links point to the source in the repository.
+These examples are intended as inspiration for data handling and workflow variations. They are **not installed with the pip package**; see [gradiend/examples](https://github.com/aieng-lab/gradiend/tree/main/gradiend/examples) on GitHub to download a file or read to get inspired.
 
 ## Quick start
 

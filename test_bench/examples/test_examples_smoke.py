@@ -30,6 +30,7 @@ EXAMPLE_RUNS_DIR = PROJECT_ROOT / "runs" / "examples"
 # data_creation_pronouns must run before english_pronouns (creates data it needs)
 EXAMPLE_MODULES = [
     "gradiend.examples.start_workflow",
+    "gradiend.examples.readme",
     "gradiend.examples.race_religion",
     "gradiend.examples.gender_en",
     "gradiend.examples.gender_de",

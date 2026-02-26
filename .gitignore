@@ -6,6 +6,8 @@
 logs/
 experiments/
 site/
+build/
+dist/
 
 *.pdf
 *.png
@@ -20,3 +22,4 @@ test_bench/results/
 *.pyc
 
 gradiend.egg-info/
+
