@@ -1,9 +1,16 @@
 # Tutorial: Evaluation (intra-model)
 
-This tutorial covers **intra-model** evaluation: encoder and decoder evaluation for a **single** trained GRADIEND model, i.e., evaluating whether the encoder separates the feature classes, whether the decoder can shift the base model’s behavior, and how we can derive a GRADIEND-modified model with probabilities shifted towards the targeted feature class. 
+This tutorial covers **intra-model** evaluation: encoder and decoder evaluation for a **single** trained GRADIEND model, i.e., evaluating whether the encoder separates feature classes and whether the decoder can shift the base model’s behavior under language-model constraints.
 
 To run code yourself, you should have a trained GRADIEND model (e.g. after [Tutorial: Training](training.md)). 
 For **comparing multiple runs** (top-k overlap, heatmaps), see [Tutorial: Evaluation (inter-model)](evaluation-inter-model.md).
+
+!!! tip "Optional dependency: plotting"
+    Encoder distribution plots and decoder evaluation plots in this tutorial require the **plot** extra. If you did not install it with GRADIEND, install it with:
+
+    ```bash
+    pip install gradiend[plot]
+    ```
 
 ---
 
@@ -21,7 +28,8 @@ The trainer runs your evaluation data (and optionally neutral data) through the 
 enc_eval = trainer.evaluate_encoder(max_size=100, split='test', return_df=True, plot=True)
 ```
 Options:
-- **max_size**: Maximum number of examples to encode per *input class* (for speed; set to `None` for all). Input class are defined by feature class ids (i.e., per training transition) and the up to two neutral datasets. 
+
+- **max_size**: Maximum number of examples to encode per *input class* (for speed; set to `None` for all). Input classes are defined by feature class ids (i.e., per training transition) and each neutral dataset is a input class. 
 - **split**: Which split to evaluate on (e.g. `test`, `val`).
 - **return_df**: Whether to include the full DataFrame of encoded values and metadata in the returned dict (can be large).
 - **plot**: Whether to create a distribution plot of encoded values by class (see below).
@@ -52,7 +60,7 @@ We expect that the target training classes encode to polarly different values  (
 To visually highlight the special role of target classes, we mark their violins and legend entries in **bold**.
 
 
-This plot has a lot of options to customize, e.g., to make the class labels human-readable (e.g. `masc_nom` → “masc nominative”) or to group classes into broader categories (e.g. all neutral variants into “neutral”). See [Evaluation & visualization](../guides/evaluation-visualization.md#2-encoder-distribution-plot) for full customization options.
+This plot has a lot of options to customize, e.g., to make the class labels human-readable (e.g. `masc_nom` → “masc nominative”) or to group classes into broader categories (e.g. all neutral variants into “neutral”). By default the plot shows only the target (training) transition(s) and neutral data; use `plot_kwargs=dict(target_and_neutral_only=False)` with `evaluate_encoder(plot=True)` to show all transitions. See [Evaluation & visualization](../guides/evaluation-visualization.md#2-encoder-distribution-plot) for full customization options.
 
 
 ### Encoder Metrics 
@@ -122,21 +130,10 @@ For best practice, provide true neutral data (e.g. via `TextPredictionDataCreato
 
 ---
 
-### Selecting the “changed” model (target_class)
+### Next step: model rewrite
 
-The decoder results dict has one or more **target class** keys (e.g. your `target_classes` ids like `"masc_nom"`, `"fem_nom"`). Each key has a recommended **feature_factor** and **learning_rate**.
-
-- **rewrite_base_model(decoder_results=..., target_class="masc_nom")** rewrites the base model **in memory** only: it takes the trainer’s trained model and applies the decoder with the best config for that class. It returns the rewritten model (e.g. a `BertForMaskedLM`) that you can use for inference or further evaluation. By default, it **strengthens** the target class (increases its token probabilities). Decoder evaluation produces strengthen summaries only. To weaken, run evaluate_decoder(increase_target_probabilities=False) (keys e.g. "masc_nom_weaken") and rewrite_base_model(..., increase_target_probabilities=False).
-- **target_class** can be a single string (one model) or a list of strings (one model per class). Use the class id when you want the model biased toward that class (e.g. `target_class="masc_nom"` for “stronger masculine nominative”).
-- If you set **experiment_dir** and have already run **evaluate_decoder(use_cache=True)**, you can omit **decoder_results**: the trainer will load the cached decoder stats from disk when available (so you can call **rewrite_base_model(target_class="masc_nom")** without keeping the large dict in memory). This requires **use_cache=True** when running **evaluate_decoder** so that the decoder results cache is populated.
-
-
-
----
-
-### Saving the changed model to disk
-
-Pass **output_dir** to **rewrite_base_model(...)** to save the rewritten model(s) to disk. You need a place to save: either **experiment_dir** in `TrainingArguments` (then the path is derived from the run and target class) or **output_dir** for a single target class.
+Decoder evaluation selects candidate rewrite settings (learning rate / feature factor) per target class and direction.  
+Applying and saving rewritten checkpoints is covered in [Tutorial: Model Rewrite](model-rewrite.md).
 
 ---
 
@@ -160,10 +157,9 @@ enc_eval = trainer.evaluate_encoder(max_size=100, return_df=True, plot=True)
 dec_results = trainer.evaluate_decoder()
 # Optional: dec_results = trainer.evaluate_decoder(use_cache=True) when re-running
 
-changed_model = trainer.rewrite_base_model(decoder_results=dec_results, target_class="masc_nom")
-# Strengthen (default): higher probability for target class
-# Weaken: trainer.rewrite_base_model(..., target_class="masc_nom", increase_target_probabilities=False)
-# Or save: trainer.rewrite_base_model(decoder_results=dec_results, target_class="masc_nom", output_dir="./output")
+# Next step:
+# changed_model = trainer.rewrite_base_model(decoder_results=dec_results, target_class="masc_nom")
+# See Tutorial: Model Rewrite for strengthen/weaken and saving behavior.
 ```
 
 ---
@@ -171,5 +167,6 @@ changed_model = trainer.rewrite_base_model(decoder_results=dec_results, target_c
 ## See also
 
 - [Tutorial: Evaluation (inter-model)](evaluation-inter-model.md) — Top-k overlap and heatmaps for comparing multiple runs.
+- [Tutorial: Model Rewrite](model-rewrite.md) — Apply decoder-selected rewrites and save changed checkpoints.
 - [Evaluation & visualization](../guides/evaluation-visualization.md) — Plot customization (convergence, encoder, heatmap, Venn).
 - [API reference](../api/index.md) — `Evaluator`, `EncoderEvaluator`, `DecoderEvaluator`.

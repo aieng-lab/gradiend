@@ -362,7 +362,7 @@ def resolve_device_config_for_model(
             device_base_model = _to_device(device_base_model) if device_base_model is not None else cuda1
             logger.debug(
                 f"{cuda_count} GPUs (encoder+decoder same): encoder+decoder on {device_encoder}, "
-                f"base on {device_base_model} (device_map can use cuda:1,2,...)"
+                f"base on {device_base_model}"
             )
         else:
             device_encoder = _to_device(device_encoder) if device_encoder is not None else cuda0
@@ -374,108 +374,3 @@ def resolve_device_config_for_model(
     return device_encoder, device_decoder, device_base_model, True
 
 
-def infer_device_map_for_gradiend(
-    name_or_path: str,
-    device_encoder: torch.device,
-    device_decoder: torch.device,
-    device_base_model: torch.device,
-    torch_dtype: torch.dtype = torch.float32,
-    trust_remote_code: bool = False,
-    *,
-    warn_if_unavailable: bool = True,
-) -> Optional[Dict[str, Union[int, str]]]:
-    """
-    Infer a device_map for the base model that restricts placement to GPUs not used by GRADIEND.
-
-    Only needed when multiple GPUs are available for the base (e.g. 3+ GPUs with split
-    encoder/decoder, or 2+ GPUs with encoder_decoder_same_device). When only one GPU is
-    available for the base, the caller should use .to(device) instead; accelerate is not required.
-
-    Returns None if device_map cannot be computed. Caller should fall back to single-device loading.
-    """
-    try:
-        from accelerate import infer_auto_device_map
-        from transformers import AutoConfig, AutoModelForCausalLM, AutoModelForMaskedLM
-    except ImportError:
-        if warn_if_unavailable:
-            logger.warning(
-                "device_map requested but accelerate is not installed. "
-                "Install with: pip install accelerate. Falling back to single-device loading."
-            )
-        else:
-            logger.debug("accelerate or transformers not available for device_map inference")
-        return None
-
-    # Build max_memory: 0 for encoder/decoder GPUs, full for the rest
-    cuda_count = torch.cuda.device_count()
-    if cuda_count == 0:
-        return None
-
-    def _gpu_index(dev: Any) -> Optional[int]:
-        if dev.type != "cuda":
-            return None
-        return dev.index if dev.index is not None else 0
-
-    reserved_indices = set()
-    for d in (device_encoder, device_decoder):
-        idx = _gpu_index(d)
-        if idx is not None:
-            reserved_indices.add(idx)
-
-    base_gpu_count = sum(1 for i in range(cuda_count) if i not in reserved_indices)
-    if base_gpu_count <= 1:
-        # Only one GPU for base: use .to(device) instead; accelerate not needed
-        return None
-
-    base_idx = _gpu_index(device_base_model)
-    if base_idx is not None and base_idx in reserved_indices:
-        if warn_if_unavailable:
-            logger.warning(
-                "device_map requested but base model shares GPU with encoder/decoder. "
-                "Using single-device loading."
-            )
-        return None
-
-    max_memory: Dict[Union[int, str], Union[int, str]] = {}
-    for i in range(cuda_count):
-        if i in reserved_indices:
-            max_memory[i] = "0MiB"
-        else:
-            try:
-                total = torch.cuda.get_device_properties(i).total_memory
-                max_memory[i] = f"{int(total * 0.95 / 1e9)}GiB"
-            except Exception:
-                logger.warning(f"Could not get total memory for cuda:{i}; Falling back to single-device loading.")
-                return None
-
-    config = AutoConfig.from_pretrained(name_or_path, trust_remote_code=trust_remote_code)
-    if hasattr(config, "init_device"):
-        config.init_device = "meta"
-    model_type = getattr(config, "model_type", "").lower()
-
-    # Create minimal model for infer_auto_device_map (meta device to avoid loading weights)
-    try:
-        if "llama" in model_type or "mistral" in model_type or "qwen" in model_type or "gpt" in model_type:
-            model = AutoModelForCausalLM.from_config(config, torch_dtype=torch_dtype)
-        else:
-            try:
-                model = AutoModelForCausalLM.from_config(config, torch_dtype=torch_dtype)
-            except Exception:
-                model = AutoModelForMaskedLM.from_config(config, torch_dtype=torch_dtype)
-    except Exception as e:
-        if warn_if_unavailable:
-            logger.warning("device_map requested but could not create model from config: %s. Using single-device loading.", e)
-        else:
-            logger.debug("Could not create model from config for device_map: %s", e)
-        return None
-
-    try:
-        device_map = infer_auto_device_map(model, max_memory=max_memory)
-    except Exception as e:
-        if warn_if_unavailable:
-            logger.warning("device_map requested but infer_auto_device_map failed: %s. Using single-device loading.", e)
-        else:
-            logger.debug("infer_auto_device_map failed: %s", e)
-        return None
-
-    return device_map

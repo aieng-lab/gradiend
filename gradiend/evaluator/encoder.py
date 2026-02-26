@@ -17,7 +17,7 @@ import pandas as pd
 
 from gradiend.evaluator.encoder_metrics import get_encoder_metrics_from_dataframe
 from gradiend.trainer.core.dataset import GradientTrainingDataset
-from gradiend.util.paths import resolve_encoder_eval_result_path
+from gradiend.util.paths import resolve_encoder_eval_result_path, resolve_encoder_eval_result_path_legacy
 from gradiend.util.logging import get_logger
 
 logger = get_logger(__name__)
@@ -124,7 +124,9 @@ class EncoderEvaluator:
 
         Uses get_encoder_metrics_from_dataframe as single source of truth for all metrics.
         When encoder_df is provided, skips encoding and computes metrics directly from it.
-        When use_cache=True and experiment_dir is set, loads/saves result JSON under experiment_dir.
+        When experiment_dir is set, encoder metrics are written to the same path as the encoder
+        analysis CSV but with .json extension (e.g. encoded_values_max_size_500_split_test.json).
+        When use_cache=True and experiment_dir is set, loads from that path when the file exists.
 
         Args:
             trainer: Trainer (or protocol) with get_model() and create_eval_data().
@@ -153,34 +155,48 @@ class EncoderEvaluator:
         if max_size is not None:
             create_kwargs["max_size"] = max_size
         create_kwargs = {k: v for k, v in create_kwargs.items() if k not in skip}
-        cache_path: Optional[str] = None
-        if use_cache:
-            experiment_dir = trainer.experiment_dir
-            if not experiment_dir or not str(experiment_dir).strip():
-                raise ValueError(
-                    "evaluate_encoder(use_cache=True) requires experiment_dir to be set on the trainer. "
-                    "Set experiment_dir on TrainingArguments or pass encoder_df to compute from data."
-                )
-            cache_path = resolve_encoder_eval_result_path(
-                experiment_dir, **_cache_key_kwargs(create_kwargs)
+        experiment_dir = getattr(trainer, "experiment_dir", None)
+        if callable(experiment_dir):
+            experiment_dir = experiment_dir()
+        # Same key as encoder CSV (split, max_size) so JSON path = CSV path with .json
+        metrics_path: Optional[str] = None
+        if experiment_dir and str(experiment_dir).strip():
+            key_kwargs = {k: create_kwargs.get(k) for k in ("split", "max_size") if create_kwargs.get(k) is not None}
+            metrics_path = resolve_encoder_eval_result_path(experiment_dir, None, **key_kwargs)
+        if use_cache and not metrics_path:
+            raise ValueError(
+                "evaluate_encoder(use_cache=True) requires experiment_dir to be set on the trainer. "
+                "Set experiment_dir on TrainingArguments or pass encoder_df to compute from data."
             )
-        if use_cache and cache_path and os.path.isfile(cache_path):
+        def _load_metrics(path: str) -> Optional[Dict[str, Any]]:
             try:
-                with open(cache_path, "r") as f:
+                with open(path, "r") as f:
                     raw = json.load(f)
-                # Restore float keys for mean_by_class / label_value_to_class_name (JSON keys are strings)
-                for key in ("mean_by_class", "label_value_to_class_name"):
-                    if key in raw and isinstance(raw[key], dict) and raw[key]:
+                for k in ("mean_by_class", "label_value_to_class_name"):
+                    if k in raw and isinstance(raw[k], dict) and raw[k]:
                         try:
-                            raw[key] = {float(k): v for k, v in raw[key].items()}
+                            raw[k] = {float(x): v for x, v in raw[k].items()}
                         except (ValueError, TypeError):
                             pass
-                logger.info("Loaded cached encoder evaluation from %s", cache_path)
                 return raw
             except Exception as e:
-                logger.warning("Failed to load encoder eval cache %s: %s", cache_path, e)
-        elif use_cache and cache_path:
-            logger.info("No encoder eval cache found at %s; computing fresh results.", cache_path)
+                logger.warning("Failed to load encoder eval cache %s: %s", path, e)
+                return None
+
+        if use_cache and metrics_path and os.path.isfile(metrics_path):
+            raw = _load_metrics(metrics_path)
+            if raw is not None:
+                logger.info("Loaded cached encoder evaluation from %s", metrics_path)
+                return raw
+        if use_cache and experiment_dir and str(experiment_dir).strip():
+            legacy_path = resolve_encoder_eval_result_path_legacy(experiment_dir, **key_kwargs)
+            if legacy_path and legacy_path != metrics_path and os.path.isfile(legacy_path):
+                raw = _load_metrics(legacy_path)
+                if raw is not None:
+                    logger.info("Loaded cached encoder evaluation from legacy path %s", legacy_path)
+                    return raw
+        if use_cache and metrics_path:
+            logger.info("No encoder eval cache found at %s; computing fresh results.", metrics_path)
 
         model_with_gradiend = trainer.get_model()
 
@@ -215,13 +231,13 @@ class EncoderEvaluator:
             df = _rows_to_encoder_df(training_rows)
             result = get_encoder_metrics_from_dataframe(df)
 
-        if cache_path:
+        if metrics_path:
             try:
-                os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-                with open(cache_path, "w") as f:
+                os.makedirs(os.path.dirname(metrics_path), exist_ok=True)
+                with open(metrics_path, "w") as f:
                     json.dump(result, f, indent=2)
-                logger.info("Saved encoder evaluation cache to %s", cache_path)
+                logger.info("Saved encoder metrics to %s", metrics_path)
             except Exception as e:
-                logger.warning("Failed to save encoder eval cache %s: %s", cache_path, e)
+                logger.warning("Failed to save encoder metrics to %s: %s", metrics_path, e)
 
         return result

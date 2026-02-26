@@ -147,6 +147,45 @@ class TestGetModelDuringTraining:
             assert load_dir_arg is not None, f"load_directory should be passed: call_args={mock_create.call_args}"
             assert load_path in str(load_dir_arg) or os.path.normpath(load_path) in str(load_dir_arg)
 
+    def test_train_keeps_selected_model_in_memory_for_immediate_use(self, temp_dir):
+        """
+        After train(), trainer should keep the selected checkpoint model in memory so
+        immediate evaluation/get_model() uses it (not a stale final-step instance).
+        """
+        args = TrainingArguments(
+            experiment_dir=None,
+            max_seeds=1,
+            save_only_best=False,
+        )
+        trainer = MockTrainerForTest(model="mock-base", args=args)
+
+        output_dir = os.path.join(temp_dir, "model_out")
+        selected_best_path = os.path.join(temp_dir, "model_out_best")
+        selected_model = MagicMock()
+        selected_model.name_or_path = selected_best_path
+
+        with patch.object(MockTrainerForTest, "_train", return_value=selected_best_path) as mock_train:
+            with patch(
+                "gradiend.trainer.trainer.FeatureLearningDefinition.create_model_with_gradiend",
+                return_value=selected_model,
+            ) as mock_create:
+                res = trainer.train(output_dir=output_dir, use_cache=False)
+
+        assert res is trainer
+        assert mock_train.called
+        assert trainer._model_arg == selected_best_path
+        assert trainer._model_instance is selected_model
+
+        got = trainer.get_model()
+        assert got is selected_model
+
+        assert mock_create.called
+        pos = mock_create.call_args[0]
+        kw = mock_create.call_args[1]
+        load_dir_arg = (pos[0] if len(pos) > 0 else None) or (pos[1] if len(pos) > 1 else None) or kw.get("load_directory")
+        assert load_dir_arg is not None
+        assert selected_best_path in str(load_dir_arg) or os.path.normpath(selected_best_path) in str(load_dir_arg)
+
 
 class TestBaseModelPathVsModelPath:
     """Test base_model_path and model_path naming."""
@@ -186,12 +225,10 @@ class TestSelectAndSaveChangedModel:
     """Test rewrite_base_model behavior."""
 
     def _decoder_results_with_class_keys(self):
-        """Decoder results in typical evaluate_decoder format (<class_id> keys)."""
+        """Decoder results in typical evaluate_decoder format (flat: class ids at top level + grid)."""
         return {
-            "summary": {
-                "masc_nom": {"feature_factor": 1.0, "learning_rate": 1e-4, "value": 0.8},
-                "fem_nom": {"feature_factor": -1.0, "learning_rate": 1e-4, "value": 0.7},
-            },
+            "masc_nom": {"feature_factor": 1.0, "learning_rate": 1e-4, "value": 0.8},
+            "fem_nom": {"feature_factor": -1.0, "learning_rate": 1e-4, "value": 0.7},
             "grid": {},
         }
 
@@ -218,7 +255,7 @@ class TestSelectAndSaveChangedModel:
         )
 
     def test_rewrite_base_model_accepts_target_class_as_class_id_for_fem_nom(self):
-        """target_class 'fem_nom' should match summary key directly."""
+        """target_class 'fem_nom' should match decoder result key directly."""
         args = TrainingArguments(experiment_dir=None)
         trainer = MockTrainerForTest(model="mock-base", args=args)
         mock_model = MagicMock()
@@ -270,11 +307,9 @@ class TestSelectAndSaveChangedModel:
         trainer._model_instance = mock_model
         trainer._model_arg = "mock-base"
 
-        # Write decoder_stats cache (as evaluate_decoder with use_cache=True would populate)
+        # Write decoder_stats cache (flat format: as evaluate_decoder would populate)
         stats_content = {
-            "summary": {
-                "masc_nom": {"feature_factor": 1.0, "learning_rate": 1e-4, "value": 0.8},
-            },
+            "masc_nom": {"feature_factor": 1.0, "learning_rate": 1e-4, "value": 0.8},
             "grid": [],
         }
         stats_path = resolve_decoder_stats_path(
@@ -319,9 +354,8 @@ class TestSelectAndSaveChangedModel:
         trainer._model_instance = MagicMock()
 
         decoder_results = {
-            "summary": {
-                "x": {"feature_factor": 0.5, "learning_rate": 1e-4},
-            }
+            "x": {"feature_factor": 0.5, "learning_rate": 1e-4},
+            "grid": {},
         }
 
         with pytest.raises(ValueError) as exc_info:
@@ -347,9 +381,7 @@ class TestSelectAndSaveChangedModel:
         trainer._model_arg = "mock-base"
 
         decoder_results = {
-            "summary": {
-                "masc_nom": {"feature_factor": 1.0, "learning_rate": 1e-4, "value": 0.8},
-            },
+            "masc_nom": {"feature_factor": 1.0, "learning_rate": 1e-4, "value": 0.8},
             "grid": {},
         }
 
@@ -383,9 +415,7 @@ class TestSelectAndSaveChangedModel:
         trainer._model_arg = "mock-base"
 
         decoder_results = {
-            "summary": {
-                "masc_nom": {"feature_factor": 1.0, "learning_rate": 1e-4, "value": 0.8},
-            },
+            "masc_nom": {"feature_factor": 1.0, "learning_rate": 1e-4, "value": 0.8},
             "grid": {},
         }
 
@@ -462,9 +492,7 @@ class TestSelectAndSaveChangedModel:
         trainer._model_arg = "mock-base"
 
         decoder_results = {
-            "summary": {
-                "masc_nom": {"feature_factor": 1.0, "learning_rate": 1e-4, "value": 0.8},
-            },
+            "masc_nom": {"feature_factor": 1.0, "learning_rate": 1e-4, "value": 0.8},
             "grid": {},
         }
 

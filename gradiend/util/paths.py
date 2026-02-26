@@ -113,9 +113,22 @@ def resolve_encoder_plot_path(
 
 def resolve_encoder_eval_result_path(
     experiment_dir: Optional[str],
+    explicit_path: Optional[str] = None,
     **key_kwargs: Any,
 ) -> Optional[str]:
-    """Path for encoder evaluation result JSON (correlation, mean_by_class, etc.). None if no experiment_dir."""
+    """Path for encoder evaluation result JSON: same as encoder analysis CSV path but with .json extension.
+    Use the same key_kwargs as for the CSV (e.g. split, max_size) so load/save matches the CSV cache."""
+    csv_path = resolve_encoder_analysis_path(experiment_dir, explicit_path, **key_kwargs)
+    if csv_path is None:
+        return None
+    return os.path.splitext(csv_path)[0] + ".json"
+
+
+def resolve_encoder_eval_result_path_legacy(
+    experiment_dir: Optional[str],
+    **key_kwargs: Any,
+) -> Optional[str]:
+    """Legacy path: encoder_eval_result.json or encoder_eval_result_{key}.json. Used only as fallback when loading."""
     if experiment_dir is None or not str(experiment_dir).strip():
         return None
     base = os.path.normpath(str(experiment_dir).strip())

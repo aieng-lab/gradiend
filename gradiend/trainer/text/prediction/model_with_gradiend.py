@@ -4,10 +4,24 @@ TextPredictionModelWithGradiend: MLM/CLM implementation of TextModelWithGradiend
 
 import torch
 
-from gradiend.util.logging import get_logger
+from gradiend.util.logging import get_logger, suppress_tokenizer_length_warning
 from gradiend.trainer.text.common.model_base import TextModelWithGradiend
 
 logger = get_logger(__name__)
+
+
+def _effective_max_length(tokenizer, base_model, default: int = 512) -> int:
+    """Max length for tokenization: min of tokenizer max and model's actual max to avoid length warnings."""
+    tokenizer_max = getattr(tokenizer, "model_max_length", default)
+    if tokenizer_max is None or (isinstance(tokenizer_max, int) and tokenizer_max > 10**9):
+        tokenizer_max = default
+    config = getattr(base_model, "config", None)
+    model_max = None
+    if config is not None:
+        model_max = getattr(config, "max_position_embeddings", None) or getattr(config, "n_positions", None)
+    if model_max is not None and model_max > 0:
+        return min(tokenizer_max, model_max)
+    return tokenizer_max if tokenizer_max != default else default
 
 
 class TextPredictionModelWithGradiend(TextModelWithGradiend):
@@ -44,7 +58,9 @@ class TextPredictionModelWithGradiend(TextModelWithGradiend):
         return gradients
 
     def create_inputs(self, masked_text, label):
-        item = self.tokenizer(masked_text, return_tensors="pt", max_length=self.tokenizer.model_max_length, truncation=True)
+        max_len = _effective_max_length(self.tokenizer, self.base_model)
+        with suppress_tokenizer_length_warning():
+            item = self.tokenizer(masked_text, return_tensors="pt", max_length=max_len, truncation=True)
         item = {k: v.to(self.base_model_device) for k, v in item.items()}
         if self.is_instruction_model:
             label_token_id = self.tokenizer.tokenizer(f'{label}', add_special_tokens=False)['input_ids']
@@ -103,7 +119,9 @@ class TextPredictionModelWithGradiend(TextModelWithGradiend):
         )
 
     def mask_and_encode(self, text, ignore_tokens=False, return_masked_text=False, single_mask=True, topk=None, topk_part=None):
-        item = self.tokenizer(text, return_tensors="pt", max_length=512, truncation=True)
+        max_len = _effective_max_length(self.tokenizer, self.base_model)
+        with suppress_tokenizer_length_warning():
+            item = self.tokenizer(text, return_tensors="pt", max_length=max_len, truncation=True)
         item = {k: v.to(self.base_model_device) for k, v in item.items()}
         labels = item['input_ids'].clone()
         if self.is_decoder_only_model:

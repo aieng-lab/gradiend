@@ -102,6 +102,12 @@ class FeatureLearningDefinition(DataProvider, ABC):
         self.version_map = {}
         self._model_with_gradiend_cls: Optional[Type[ModelWithGradiend]] = None
 
+    def __str__(self) -> str:
+        return (
+            f"FeatureLearningDefinition(target_classes={self._target_classes!r}, "
+            f"run_id={self.run_id!r}, n_features={self.n_features})"
+        )
+
     def resolve_custom_prediction_head_dir(self) -> Optional[str]:
         """
         Return the directory path for a custom prediction head if one exists for this definition.
@@ -118,24 +124,30 @@ class FeatureLearningDefinition(DataProvider, ABC):
     def resolve_model_path(self, model: str) -> str:
         """
         Resolve a model name/path to the path to use for loading/training.
-        
-        This method checks if a custom prediction head exists (via resolve_custom_prediction_head_dir)
-        and uses it if available. Otherwise, returns the original model path.
-        
-        The logic prioritizes custom prediction heads:
-        1. Check if a custom prediction head exists for this definition (using self.experiment_dir)
-        2. If custom head exists and is a valid directory, use it (preferred!)
-        3. Otherwise, return the original model path
-        
+
+        When the given path is already a GRADIEND checkpoint (contains gradiend_context.json),
+        it is returned as-is so that encoder evaluation and get_model() load the full
+        ModelWithGradiend, not the custom prediction head (e.g. decoder_mlm_head) which only
+        replaces the base model and has no encoder.
+
+        Otherwise, if a custom prediction head exists (e.g. decoder_mlm_head), that path
+        is returned so that training/decoder evaluation use it as the base model.
+
         Args:
             model: Model name or path string
-            
+
         Returns:
-            Resolved model path (custom prediction head if available, otherwise original model)
+            Resolved model path (GRADIEND checkpoint unchanged; base model → custom head when available)
         """
         path = str(model).strip()
-        
-        # Always check for custom prediction head first (preferred when available)
+
+        # Do not substitute when path is already a GRADIEND checkpoint (encoder needs full model)
+        if path and os.path.isdir(path):
+            context_file = os.path.join(path, "gradiend_context.json")
+            if os.path.isfile(context_file):
+                return path
+
+        # For base model id/path: use custom prediction head when available
         custom_head_dir = self.resolve_custom_prediction_head_dir()
         if custom_head_dir and os.path.isdir(custom_head_dir):
             logger.info(

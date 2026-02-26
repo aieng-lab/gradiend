@@ -8,9 +8,9 @@ import json
 import os
 from typing import Any, Dict, Optional
 
+import numpy as np
 import pandas as pd
-from scipy import stats
-from sklearn.metrics import accuracy_score
+from gradiend.util.metrics import accuracy_score
 
 from gradiend.util import json_loads
 from gradiend.util.logging import get_logger
@@ -38,7 +38,11 @@ def get_correlation(
 		return 0.0
 	if df[label_col].std() == 0 or df[encoded_col].std() == 0:
 		return 0.0
-	corr, _ = stats.pearsonr(df[label_col], df[encoded_col])
+	x = np.asarray(df[label_col], dtype=float)
+	y = np.asarray(df[encoded_col], dtype=float)
+	corr = np.corrcoef(x, y)[0, 1]
+	if np.isnan(corr):
+		return 0.0
 	return float(corr)
 
 
@@ -225,9 +229,12 @@ def _compute_metrics_from_df(
 				mean_by_class[float(lbl)] = float(grp["encoded"].astype(float).mean())
 
 	mean_by_type: Dict[str, float] = {}
+	abs_mean_by_type: Dict[str, float] = {}
 	for t, grp in df_dim0.groupby("type"):
 		if len(grp) > 0:
 			mean_by_type[str(t)] = float(grp["encoded"].astype(float).mean())
+			abs_mean_by_type[str(t)] = float(grp["encoded"].astype(float).abs().mean())
+
 
 	neutral_mean_by_type: Dict[str, float] = {nt: mean_by_type[nt] for nt in neutral_types if nt in mean_by_type}
 
@@ -265,6 +272,7 @@ def _compute_metrics_from_df(
 		"correlation": corr_training,
 		"mean_by_class": mean_by_class,
 		"mean_by_type": mean_by_type,
+		"abs_mean_by_type": abs_mean_by_type,
 	}
 	if neutral_mean_by_type:
 		result["neutral_mean_by_type"] = neutral_mean_by_type

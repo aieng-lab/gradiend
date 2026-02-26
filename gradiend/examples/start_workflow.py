@@ -4,6 +4,12 @@ Minimal start-to-end GRADIEND workflow with TextPredictionDataCreator.
 Uses 75+ artificial sentences (3SG: he/she/it, 3PL: they, neutral).
 Matches docs/start.md. Run: python -m gradiend.examples.start_workflow
 """
+# Reproducibility: set before importing torch (must be before gradiend/torch use CUDA)
+import os
+os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+
+import pandas as pd
 
 from gradiend import (
     TextFilterConfig,
@@ -137,8 +143,9 @@ def train_and_evaluate(training, neutral):
     trainer.plot_training_convergence()
 
     enc_result = trainer.evaluate_encoder(plot=True)
-    print("Correlation:", enc_result.get("correlation"))
+    print("Correlation:", enc_result["correlation"])
     dec = trainer.evaluate_decoder(plot=True, target_class="3SG")
+    print(dec["3SG"])
     changed_base_model = trainer.rewrite_base_model(decoder_results=dec, target_class="3SG")
 
     return trainer, enc_result, dec, changed_base_model

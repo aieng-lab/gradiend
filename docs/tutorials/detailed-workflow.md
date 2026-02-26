@@ -1,13 +1,20 @@
 # Tutorial: Detailed workflow (overview)
 
-This page is the **map** of the detailed workflow. After [Start here](../start.md), the full pipeline has three main parts: **data**, **training**, and **evaluation**. Each part has its own tutorial where the real detail lives.
+This page is the **map** of the detailed workflow. After [Start here](../start.md), the full pipeline has five steps: **data**, **training**, **intra-model evaluation**, **model rewrite**, and **inter-model evaluation**. Each step has its own tutorial where the real detail lives.
 
-- **[Tutorial: Data generation](data-generation.md)** — Build training and neutral data (e.g. with spaCy and morphology). Output feeds into the trainer.
-- **[Tutorial: Training](training.md)** — Experiment layout, pruning, multi-seed, convergence plot, and how to configure a real run.
-- **[Tutorial: Evaluation (intra-model)](evaluation-intra-model.md)** — Encoder and decoder evaluation, selecting/saving the changed model.
-- **[Tutorial: Evaluation (inter-model)](evaluation-inter-model.md)** — Comparing multiple runs (top-k overlap, heatmap).
+![GRADIEND overview](img/workflow-diagram.png)
+
+- **[Tutorial: Feature Selection and Data Generation](data-generation.md)** — Build training and neutral data (e.g. with spaCy and morphology). Output feeds into the trainer.
+- **[Tutorial: GRADIEND Training](training.md)** — Experiment layout, pruning, multi-seed, convergence plot, and how to configure a real run.
+- **[Tutorial: Intra-Model Evaluation](evaluation-intra-model.md)** — Encoder and decoder evaluation, including decoder config selection under LMS constraints.
+- **[Tutorial: Model Rewrite](model-rewrite.md)** — Apply decoder-selected rewrites to produce changed checkpoints.
+- **[Tutorial: Inter-Model Evaluation](evaluation-inter-model.md)** — Comparing multiple runs (top-k overlap, heatmap).
 
 Use this page to see how the pieces connect in one run; use the part tutorials when you need to understand or customize a step.
+
+!!! tip "Optional dependencies by step"
+    - **Data generation:** spaCy-based filtering requires `pip install gradiend[data]` — see [Data generation](data-generation.md).
+    - **Training & evaluation plots:** Convergence plots, encoder/decoder plots, heatmaps and Venn diagrams require `pip install gradiend[plot]` — see [Training](training.md), [Evaluation (intra-model)](evaluation-intra-model.md), [Evaluation (inter-model)](evaluation-inter-model.md).
 
 ---
 
@@ -48,7 +55,10 @@ feature_targets = [
     # ... e.g. masc_dat, masc_gen, fem_acc, fem_gen, neut_nom, neut_acc, neut_dat for all 12
 ]
 creator = TextPredictionDataCreator(
-    base_data="path/to/texts.csv",
+    base_data="wikipedia", # load data from HuggingFace (requires datasets library)
+    hf_config="20231101.de", # German wikipedia
+    #base_data="path/to/texts.csv", # instead of HF data, use local csv file with 'text' column
+    #base_data=["Sentence 1", "Sentence 2"], # or provide a Python list of strings
     text_column="text",
     preprocess=TextPreprocessConfig(split_to_sentences=True, min_chars=50, max_chars=500),
     spacy_model="de_core_news_sm",
@@ -77,7 +87,6 @@ eval_neutral_data = "aieng-lab/wortschatz-leipzig-de-grammar-neutral"  # Option 
 # --- Training args and trainer (see Tutorial: Training) ---
 args = TrainingArguments(
     experiment_dir="runs/gender_de_detailed",
-    run_id="masc_nom_fem_nom",
     train_batch_size=8,
     max_steps=500,
     eval_steps=100,
@@ -89,6 +98,7 @@ args = TrainingArguments(
 )
 trainer = TextPredictionTrainer(
     model="bert-base-german-cased",
+    run_id="masc_nom_fem_nom",
     data=data,  # or training from Option B
     eval_neutral_data=eval_neutral_data,  # or neutral from Option B
     target_classes=["masc_nom", "fem_nom"],
@@ -102,10 +112,11 @@ trainer.train()
 trainer.plot_training_convergence()
 enc_eval = trainer.evaluate_encoder(max_size=100, return_df=True, plot=True)
 dec_results = trainer.evaluate_decoder()
+# --- Rewrite (see Tutorial: Model rewrite) ---
 changed_model = trainer.rewrite_base_model(decoder_results=dec_results, target_class="masc_nom")
 ```
 
-For **why** each option matters and what to change when, follow the part tutorials: [Data generation](data-generation.md) → [Training](training.md) → [Evaluation (intra-model)](evaluation-intra-model.md) and [Evaluation (inter-model)](evaluation-inter-model.md).
+For **why** each option matters and what to change when, follow the part tutorials: [Data generation](data-generation.md) → [Training](training.md) → [Evaluation (intra-model)](evaluation-intra-model.md) → [Model rewrite](model-rewrite.md) → [Evaluation (inter-model)](evaluation-inter-model.md).
 
 ---
 
@@ -113,7 +124,8 @@ For **why** each option matters and what to change when, follow the part tutoria
 
 - **[Data generation](data-generation.md)** — Syncretism, spaCy tags, one filter per gender–case cell.
 - **[Training](training.md)** — `experiment_dir` and `run_id`, source/target, pre- and post-pruning, multi-seed, convergence plot.
-- **[Evaluation (intra-model)](evaluation-intra-model.md)** — Encoder vs decoder, caching, `target_class`, saving changed models.
+- **[Evaluation (intra-model)](evaluation-intra-model.md)** — Encoder vs decoder, selection policies, caching.
+- **[Model rewrite](model-rewrite.md)** — `rewrite_base_model`, strengthen/weaken, and saving changed models.
 - **[Evaluation (inter-model)](evaluation-inter-model.md)** — Top-k overlap and heatmap for comparing runs.
 - **[Data handling](../guides/data-handling.md)** — All supported data formats and column names.
 - **[Decoder-only models](../guides/decoder-only.md)** — Causal LMs and optional MLM head.

@@ -11,6 +11,14 @@ Run the test suite in `tests/` (excludes slow and integration tests by default i
 python -m pytest tests/ -v --tb=long
 ```
 
+**Examples-are-running (smoke) tests:** Check that all `gradiend.examples` scripts run to completion (no metric checks). From the project root:
+
+```bash
+pytest test_bench/examples/ -v -s
+```
+
+These tests are marked `slow` and `integration`; they run each example as a subprocess and assert exit code 0. On failure, full logs are written to `test_bench/results/last_failure_<module>.log`. See [test_bench/README.md](../../test_bench/README.md) for smoke-only options (e.g. `-m integration`) and details.
+
 Exclude slow/integration tests explicitly:
 
 ```bash

@@ -107,12 +107,56 @@ This report helps debug why a particular seed was chosen and how training-time m
 
 ---
 
+## Model parameters (which layers to use)
+
+By default, GRADIEND is trained over **all backbone parameters** of the base model (everything except prediction heads, e.g. MLM head). You can restrict which parameters (layers) are included in two ways.
+
+### `params` (TrainingArguments)
+
+When using the **Trainer with a model path string**, set **`params`** to a list of parameter names or wildcards. Only backbone parameters whose names match are included in the GRADIEND param map.
+
+- **Exact names:** e.g. `["bert.encoder.layer.0.attention.self.query.weight"]`
+- **Wildcards:** `*` matches any substring; `.` in the pattern is literal. Examples:
+  - `["bert.encoder.layer.0.*"]` — only the first encoder layer
+  - `["*.encoder.layer.0.*", "*.encoder.layer.1.*"]` — first two layers
+  - `["*.encoder.layer.*"]` — all encoder layers
+
+```python
+args = TrainingArguments(
+    experiment_dir="./out",
+    params=["bert.encoder.layer.0.*", "bert.encoder.layer.1.*"],  # first two layers only
+)
+trainer = TextPredictionTrainer("bert-base-cased", data=..., training_args=args)
+trainer.train()
+```
+
+### `param_map` (when creating the model)
+
+When you **create the model yourself** and pass it to the Trainer, use **`param_map`** in `create_model_with_gradiend()`. Same name/wildcard rules as `params`. This is the only way to restrict layers when you pass a pre-built model.
+
+```python
+from gradiend import create_model_with_gradiend, TextPredictionTrainer, TrainingArguments
+from gradiend.trainer.text.prediction.model_with_gradiend import TextPredictionModelWithGradiend
+
+model = create_model_with_gradiend(
+    "bert-base-cased",
+    model_class=TextPredictionModelWithGradiend,
+    param_map=["bert.encoder.layer.0.*", "bert.encoder.layer.1.*"],
+)
+trainer = TextPredictionTrainer(model, data=..., training_args=TrainingArguments(experiment_dir="./out"))
+trainer.train()
+```
+
+**Backbone vs head:** The code uses Hugging Face convention (`base_model_prefix` or `base_model`) to define the backbone. Prediction heads (e.g. MLM head) are always excluded; only backbone parameters are considered for `params` / `param_map`.
+
+---
+
 ## Advanced
 
 | Argument | Default | Description |
 |----------|---------|-------------|
 | **trust_remote_code** | `False` | Pass to Hugging Face when loading models. |
-| **params** | `None` | If set, only these parameter names/wildcards in the GRADIEND param map. |
+| **params** | `None` | If set, only these parameter names or wildcards are included in the GRADIEND param map (backbone only). See [Model parameters (which layers to use)](#model-parameters-which-layers-to-use) above. |
 | **normalize_gradiend** | `True` | Normalize encodings (first target class → +1, second → -1). |
 | **torch_dtype** | `torch.float32` | Model dtype. |
 | **supervised_encoder** | `False` | If `True`, train only the encoder (baseline mode). |
@@ -121,4 +165,17 @@ This report helps debug why a particular seed was chosen and how training-time m
 | **class_merge_map** | `None` | Optional mapping from base feature classes to merged classes (e.g. `{"singular": ["1SG","3SG"], "plural": ["1PL","3PL"]}`). When set, training and evaluation use the merged ids; with exactly two merged keys, `target_classes` can be omitted. |
 | **class_merge_transition_groups** | `None` | Optional list of base‑class clusters that limit which raw transitions are created before merging. Only transitions where both raw classes lie in the same cluster (and differ) are kept (e.g. `[["1SG","1PL"], ["3SG","3PL"]]` keeps 1SG↔1PL and 3SG↔3PL, but drops 1SG→3PL). |
 
-Device placement is automatic from GPU count (1 GPU → all on cuda:0; 2 GPUs → encoder+base on cuda:0, decoder on cuda:1; ≥3 GPUs → each on its own). To force CPU, pass `device="cpu"` when loading the model. See [FAQ: Device placement](../faq.md#device-placement).
+---
+
+## Device placement
+
+Device placement is **automatic** based on GPU count (no model-size heuristic):
+
+| GPUs | Placement |
+|------|-----------|
+| 1 | encoder, decoder, base model all on `cuda:0` |
+| 2 | encoder + base model on `cuda:0`, decoder on `cuda:1` |
+| ≥3 | encoder on `cuda:0`, decoder on `cuda:1`, base model on `cuda:2` |
+| 0 | all on CPU (automatic when no GPUs) |
+
+**CPU mode:** To force CPU when GPUs are available, pass `device="cpu"` when creating the model (e.g. via `ModelWithGradiend.from_pretrained(..., device="cpu")` or the trainer's model-loading kwargs).**Override individual devices:** Use `device_encoder`, `device_decoder`, `device_base_model` to override specific components.

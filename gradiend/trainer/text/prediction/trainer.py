@@ -15,6 +15,8 @@ from dataclasses import dataclass
 from dataclasses import fields as dc_fields
 from typing import Dict, List, Optional, Union, Any, Tuple, Type
 
+from tqdm import tqdm
+
 from gradiend.trainer import Trainer
 from gradiend.trainer.config import TrainerConfig
 from gradiend.trainer.core.arguments import TrainingArguments
@@ -160,6 +162,12 @@ class TextPredictionConfig(TrainerConfig):
 
     eval_neutral_max_rows: Optional[int] = None
     # Optional cap on number of rows loaded from neutral HF datasets.
+
+    def __str__(self) -> str:
+        return (
+            f"TextPredictionConfig(img_format={self.img_format!r}, target_classes={self.target_classes!r}, "
+            f"masked_col={self.masked_col!r}, n_features={self.n_features})"
+        )
 
 
 class TextPredictionTrainer(Trainer):
@@ -319,6 +327,46 @@ class TextPredictionTrainer(Trainer):
             img_format: Image format for plots (e.g. 'pdf', 'png'). Default 'pdf'.
             img_dpi: DPI for saved plots (e.g. 600 for publication). None = use visualizer default.
         """
+        # Type checks for key scalar parameters (optional params may be None)
+        if run_id is not None and not isinstance(run_id, str):
+            raise TypeError(f"run_id must be str or None, got {type(run_id).__name__}")
+        if hf_dataset is not None and not isinstance(hf_dataset, str):
+            raise TypeError(f"hf_dataset must be str or None, got {type(hf_dataset).__name__}")
+        if hf_subset is not None and not isinstance(hf_subset, (str, list)):
+            raise TypeError(f"hf_subset must be str, list, or None, got {type(hf_subset).__name__}")
+        if masked_col is not None and not isinstance(masked_col, str):
+            raise TypeError(f"masked_col must be str or None, got {type(masked_col).__name__}")
+        if label_col is not None and not isinstance(label_col, str):
+            raise TypeError(f"label_col must be str or None, got {type(label_col).__name__}")
+        if label_class_col is not None and not isinstance(label_class_col, str):
+            raise TypeError(f"label_class_col must be str or None, got {type(label_class_col).__name__}")
+        if split_col is not None and not isinstance(split_col, str):
+            raise TypeError(f"split_col must be str or None, got {type(split_col).__name__}")
+        if alternative_col is not None and not isinstance(alternative_col, str):
+            raise TypeError(f"alternative_col must be str or None, got {type(alternative_col).__name__}")
+        if alternative_class_col is not None and not isinstance(alternative_class_col, str):
+            raise TypeError(f"alternative_class_col must be str or None, got {type(alternative_class_col).__name__}")
+        if use_class_names_as_columns is not None and not isinstance(use_class_names_as_columns, bool):
+            raise TypeError(f"use_class_names_as_columns must be bool or None, got {type(use_class_names_as_columns).__name__}")
+        if max_counterfactuals_per_sentence is not None and not isinstance(max_counterfactuals_per_sentence, int):
+            raise TypeError(f"max_counterfactuals_per_sentence must be int or None, got {type(max_counterfactuals_per_sentence).__name__}")
+        if random_state is not None and not isinstance(random_state, int):
+            raise TypeError(f"random_state must be int or None, got {type(random_state).__name__}")
+        if n_features is not None and not isinstance(n_features, int):
+            raise TypeError(f"n_features must be int or None, got {type(n_features).__name__}")
+        if decoder_eval_restrict_to_target_classes is not None and not isinstance(decoder_eval_restrict_to_target_classes, bool):
+            raise TypeError(f"decoder_eval_restrict_to_target_classes must be bool or None, got {type(decoder_eval_restrict_to_target_classes).__name__}")
+        if decoder_eval_prob_on_other_class is not None and not isinstance(decoder_eval_prob_on_other_class, bool):
+            raise TypeError(f"decoder_eval_prob_on_other_class must be bool or None, got {type(decoder_eval_prob_on_other_class).__name__}")
+        if decoder_eval_lms_max_samples is not None and not isinstance(decoder_eval_lms_max_samples, int):
+            raise TypeError(f"decoder_eval_lms_max_samples must be int or None, got {type(decoder_eval_lms_max_samples).__name__}")
+        if eval_neutral_max_rows is not None and not isinstance(eval_neutral_max_rows, int):
+            raise TypeError(f"eval_neutral_max_rows must be int or None, got {type(eval_neutral_max_rows).__name__}")
+        if img_format is not None and not isinstance(img_format, str):
+            raise TypeError(f"img_format must be str or None, got {type(img_format).__name__}")
+        if img_dpi is not None and not isinstance(img_dpi, int):
+            raise TypeError(f"img_dpi must be int or None, got {type(img_dpi).__name__}")
+
         args_for_super = training_args or args
         if config is None:
             cfg_kwargs: Dict[str, Any] = {
@@ -395,6 +443,22 @@ class TextPredictionTrainer(Trainer):
             return
         self._all_classes = classes
 
+    @staticmethod
+    def _validate_classes_in_data(
+        class_dfs: Dict[str, pd.DataFrame],
+        classes: List[str],
+        param_name: str = "target_classes",
+    ) -> None:
+        """Raise ValueError if any class in classes is not present in class_dfs (data)."""
+        available = set(class_dfs.keys())
+        missing = [c for c in classes if c not in available]
+        if missing:
+            raise ValueError(
+                f"{param_name} {missing} are not present in the data. "
+                f"Available classes: {sorted(available)}. "
+                "Ensure target_classes (or the classes used for training) match the keys of your per-class data."
+            )
+
     def _ensure_data_for_training(self) -> None:
         """Ensure data is loaded before creating the model for training (so pair is set and from_pretrained can set feature_class_encoding_direction)."""
         self._ensure_data()
@@ -411,6 +475,11 @@ class TextPredictionTrainer(Trainer):
         if self._data_loaded:
             return
         config = self.config
+        # Apply seed from training_args so data build (unified, sampling) is deterministic
+        _seed = getattr(config, "seed", None) or (getattr(self, "training_args", None) and getattr(self.training_args, "seed", None))
+        if _seed is not None:
+            from gradiend.trainer.trainer import _apply_seed
+            _apply_seed(int(_seed))
         # Single HuggingFace gate: hf_dataset => merged-style load; data=str (not a path) => per-class load
         is_hf_id = isinstance(config.data, str) and not Path(config.data).is_file()
         if config.hf_dataset is not None:
@@ -469,6 +538,8 @@ class TextPredictionTrainer(Trainer):
                 inferred_classes = list(class_dfs.keys())
                 pair = tuple(config.target_classes) if config.target_classes and len(config.target_classes) == 2 else None
             self.class_datasets = class_dfs
+            if config.target_classes is not None:
+                self._validate_classes_in_data(class_dfs, config.target_classes, param_name="target_classes")
             if config.all_classes is not None:
                 self._set_all_classes(config.all_classes)
             else:
@@ -482,7 +553,7 @@ class TextPredictionTrainer(Trainer):
                 pair=pair,
                 include_identity_rows=False,
                 max_counterfactuals_per_sentence=getattr(config, "max_counterfactuals_per_sentence", 1),
-                random_state=getattr(config, "random_state", None),
+                random_state=getattr(config, "random_state", getattr(config, "seed", None)),
             )
             self._combined_data = unified
         elif config.data is not None:
@@ -503,6 +574,7 @@ class TextPredictionTrainer(Trainer):
                 else:
                     pair = tuple(config.target_classes) if config.target_classes and len(config.target_classes) == 2 else tuple(self._target_classes) if self._target_classes and len(self._target_classes) == 2 else None
                 self.class_datasets = class_dfs
+                self._validate_classes_in_data(class_dfs, classes_for_transitions, param_name="target_classes")
                 unified = per_class_dict_to_unified(
                     class_dfs,
                     classes=classes_for_transitions,
@@ -512,7 +584,7 @@ class TextPredictionTrainer(Trainer):
                     pair=pair,
                     include_identity_rows=False,
                     max_counterfactuals_per_sentence=getattr(config, "max_counterfactuals_per_sentence", 1),
-                    random_state=getattr(config, "random_state", None),
+                    random_state=getattr(config, "random_state", getattr(config, "seed", None)),
                 )
                 self._combined_data = unified
             elif isinstance(config.data, (Path, str)) and Path(config.data).is_file():
@@ -932,11 +1004,15 @@ class TextPredictionTrainer(Trainer):
         # representation via oversampling. This downsampling reduces total dataset size but is
         # not strictly necessary for balancing (the scheduler handles that). It's kept for
         # memory/performance when train_max_size is set.
+        args = getattr(self, "training_args", None)
+        seed = getattr(args, "seed", 0) if args is not None else 0
+        if seed is None:
+            seed = 42
         if max_size is not None and len(training_df) > max_size:
             training_df = training_df.groupby("feature_class_id").apply(
                 lambda x: x.sample(
                     min(len(x), max_size),
-                    random_state=42,
+                    random_state=seed,
                 )
             ).reset_index(drop=True)
 
@@ -949,8 +1025,7 @@ class TextPredictionTrainer(Trainer):
         if batch_size is None:
             batch_size = kwargs.get("batch_size", 1)
 
-        # Create text-specific training dataset
-        # Note: balance_column enables oversampling via cycling through groups in __getitem__
+        # Create text-specific training dataset (seed for deterministic batch ordering)
         return TextTrainingDataset(
             training_df,
             tokenizer,
@@ -958,6 +1033,7 @@ class TextPredictionTrainer(Trainer):
             is_decoder_only_model=is_decoder_only_model,
             target_key="label",
             balance_column=balance_column,
+            seed=seed,
         )
 
     def create_gradient_training_dataset(
@@ -1147,14 +1223,14 @@ class TextPredictionTrainer(Trainer):
             counterfactual_probs = {}
             for class_name in targets.keys():
                 other_classes = [c for c in targets.keys() if c != class_name]
-                # Strengthen metric: P(class_name) on datasets of other classes
-                if other_classes:
-                    vals: List[float] = []
-                    for other in other_classes:
-                        if other in probs_by_dataset:
-                            probs_for_other = probs_by_dataset[other]
-                            if class_name in probs_for_other:
-                                vals.append(float(probs_for_other[class_name]))
+                # Strengthen metric: P(other_class) on this class's dataset (counterfactual for selection)
+                if other_classes and class_name in probs_by_dataset:
+                    probs_on_this = probs_by_dataset[class_name]
+                    vals = [
+                        float(probs_on_this[other])
+                        for other in other_classes
+                        if other in probs_on_this
+                    ]
                     if vals:
                         counterfactual_probs[class_name] = float(np.mean(vals))
                 # Factual metric: P(class_name) on its own dataset (for weaken)
@@ -1277,7 +1353,8 @@ class TextPredictionTrainer(Trainer):
                 # Infer tokens for this class
                 # For now, try to infer from data - this is a placeholder
                 # TODO: implement _infer_tokens_for_class helper
-                logger.warning(f"Class {cls} not in decoder_eval_targets, skipping token inference for now")
+                # ignore it for now
+                #logger.warning(f"Class {cls} not in decoder_eval_targets, skipping token inference for now")
                 continue
         
         if not extended_targets:
@@ -1352,7 +1429,7 @@ class TextPredictionTrainer(Trainer):
             encoder_kwargs: Dict[str, Any],
     ) -> List[Dict[str, Any]]:
         """Encode training data via gradients and return rows with text, encoded, label, type='training'."""
-        logger.info("Encoding training data (max_size=%s, source=%s)", max_size, source_type)
+        logger.info("Encoding training data (max_size=%s, source=%s, size=%s)", max_size, source_type, len(train_eval_data) if train_eval_data is not None else 0)
         eval_result = self.evaluator.evaluate_encoder(
             eval_data=train_eval_data,
             use_cache=False,
@@ -1411,7 +1488,7 @@ class TextPredictionTrainer(Trainer):
         base_excluded = list(excluded_tokens) if excluded_tokens else []
         excluded_for_masked = list(set(base_excluded) | target_tokens_from_data)
 
-        logger.info("Encoding neutral training masked data (max_size=%s)", max_size)
+        logger.info("Encoding neutral training masked data (max_size=%s, size=%s)", max_size, len(train_eval_data) if train_eval_data is not None else 0)
         if excluded_for_masked:
             logger.debug(f"Excluded tokens: {excluded_for_masked[:10]}..." if len(
                 excluded_for_masked) > 10 else f"Excluded tokens: {excluded_for_masked}")
@@ -1423,7 +1500,8 @@ class TextPredictionTrainer(Trainer):
 
         # Collect training data entries and re-mask non-target tokens
         neutral_training_masked_pairs = []
-        random.seed(42)  # For reproducibility
+        _seed = getattr(getattr(self, "training_args", None), "seed", 0) or 0
+        random.seed(_seed)
         neutral_training_masked_count = 0
         for i, entry in enumerate(train_eval_data):
             if max_size and i >= max_size:
@@ -1552,7 +1630,7 @@ class TextPredictionTrainer(Trainer):
         if neutral_data_df is None or len(neutral_data_df) == 0:
             return []
 
-        logger.info("Encoding neutral dataset data (%s samples)", len(neutral_data_df))
+        logger.info("Encoding neutral dataset data (size=%s)", len(neutral_data_df))
         logger.debug(f"neutral_data_df columns: {list(neutral_data_df.columns)}")
 
         tokenizer = model_with_gradiend.tokenizer
@@ -1581,11 +1659,12 @@ class TextPredictionTrainer(Trainer):
 
         # Create neutral eval pairs with one mask per entry
         neutral_pairs = []
-        random.seed(42)  # For reproducibility
+        _seed = getattr(getattr(self, "training_args", None), "seed", 0) or 0
+        random.seed(_seed)
         neutral_dataset_count = 0
         if max_size:
-            neutral_data_df = neutral_data_df.sample(n=max_size, random_state=42).reset_index(drop=True)
-        for idx, row in neutral_data_df.iterrows():
+            neutral_data_df = neutral_data_df.sample(n=max_size, random_state=_seed).reset_index(drop=True)
+        for idx, row in tqdm(neutral_data_df.iterrows(), total=len(neutral_data_df), desc="Processing neutral dataset", leave=False):
             text = str(row[neutral_text_col])
             if idx == 0:
                 logger.debug(f"Sample neutral dataset entry: text={text[:50] if text else 'None'}...")
@@ -1711,10 +1790,11 @@ class TextPredictionTrainer(Trainer):
             out = split_data[[UNIFIED_MASKED, UNIFIED_FACTUAL]].copy()
             out = out.rename(columns={UNIFIED_MASKED: "masked", UNIFIED_FACTUAL: "label"})
         if max_size is not None:
+            _seed = getattr(getattr(self, "training_args", None), "seed", 0) or 0
             out = out.groupby('label').apply(
                 lambda x: x.sample(
                     min(len(x), max_size),
-                    random_state=42,
+                    random_state=_seed,
                 )
             ).reset_index(drop=True)
         return out
@@ -1859,8 +1939,9 @@ class TextPredictionTrainer(Trainer):
             if resolved_neutral_df is not None and len(resolved_neutral_df) > 0:
                 neutral_df = resolved_neutral_df.copy()
                 if max_size_neutral:
+                    _seed = getattr(getattr(self, "config", None), "seed", None) or getattr(getattr(self, "training_args", None), "seed", 0) or 0
                     neutral_df = neutral_df.sample(
-                        n=min(len(neutral_df), max_size_neutral), random_state=42
+                        n=min(len(neutral_df), max_size_neutral), random_state=_seed
                     ).reset_index(drop=True)
             else:
                 neutral_df = training_like_df.copy()

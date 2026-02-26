@@ -34,11 +34,13 @@ def plot_encoder_distributions(
     legend_fontsize: Optional[float] = None,
     colors: Optional[Dict[str, str]] = None,
     legend_loc: str = "best",
-    legend_ncol: int = 2,
+    legend_ncol: Optional[int] = None,
+    legend_bbox_to_anchor: Optional[Tuple[float, float]] = None,
     cmap: str = "tab20",
     img_format: str = "pdf",
     dpi: Optional[int] = None,
     figsize: Optional[Tuple[float, float]] = None,
+    target_and_neutral_only: bool = True,
     **kwargs: Any,
 ) -> str:
     """
@@ -55,6 +57,10 @@ def plot_encoder_distributions(
         output_dir: Directory for saved PDF when output and experiment_dir are not set.
         show: If True, call plt.show() to display the plot.
         title: True (default run_id), False, or custom string for the plot title.
+        target_and_neutral_only: If True (default), restrict the plot to the target (training)
+                    transition(s) and neutral data only; other transitions are excluded. Uses
+                    trainer.pair to determine the target transition(s). Set to False to show
+                    all transitions.
         violin_order: Optional ordering of violin groups on the x-axis.
         paired_legend_labels: Optional explicit ordering of raw legend labels to plot. If set,
                     the labels are paired consecutively into split violins: (0,1) -> violin 1,
@@ -71,7 +77,11 @@ def plot_encoder_distributions(
         legend_fontsize: Font size for legend text.
         colors: Optional dict mapping legend labels to hex colors.
         legend_loc: Matplotlib legend location (default "best").
-        legend_ncol: Number of columns for the legend (default 2).
+        legend_ncol: Number of columns for the legend. If None (default), a
+            sensible value is chosen based on the number of legend entries
+            (aiming for at most ~4 rows and up to 5 columns when many
+            transitions are shown).
+        legend_bbox_to_anchor: (x, y) for legend when placed outside (e.g. below when >6 entries). If None and >6 entries, legend is placed below the plot.
         cmap: Matplotlib colormap name for palette (default "tab20").
         figsize: Figure size (width, height) in inches. If None, uses (max(6, 1.5 * n_groups), 3).
 
@@ -168,6 +178,12 @@ def plot_encoder_distributions(
     df_plot["legend_label"] = df_plot.apply(
         lambda r: _legend_label(r["violin_group"], r["hue_label"]), axis=1
     )
+    if target_and_neutral_only and training_transitions:
+        keep_labels = set(training_transitions) | {
+            lbl for lbl in df_plot["legend_label"].dropna().unique().tolist()
+            if isinstance(lbl, str) and lbl.startswith("Neutral:")
+        }
+        df_plot = df_plot[df_plot["legend_label"].isin(keep_labels)].copy()
     if legend_group_mapping:
         flat_labels = [lbl for labels in legend_group_mapping.values() for lbl in labels]
         present_labels = set(df_plot["legend_label"].dropna().unique().tolist())
@@ -213,6 +229,13 @@ def plot_encoder_distributions(
         raise ValueError("Encoder plot has no data to plot (no legend labels).")
 
     df_plot = df_plot[df_plot["legend_label"].isin(order)].copy()
+    has_identity_transitions = False
+    if {"source_id", "target_id", "type"}.issubset(df_plot.columns):
+        identity_mask = (
+            (df_plot["type"] == "training")
+            & (df_plot["source_id"].astype(str) == df_plot["target_id"].astype(str))
+        )
+        has_identity_transitions = bool(identity_mask.any())
     label_to_pair: Dict[str, Tuple[str, str]] = {}
     for i, raw_label in enumerate(order):
         pair_id = str(i // 2)
@@ -269,6 +292,7 @@ def plot_encoder_distributions(
     x_id_order = list(range(len(group_order)))
     df_plot["x_cat"] = pd.Categorical(df_plot["x_id"], categories=x_id_order, ordered=True)
 
+    _use_default_figsize = figsize is None
     _figsize = figsize if figsize is not None else (max(6, 1.5 * len(group_order)), 3)
     plt.figure(figsize=_figsize)
     ax = sns.violinplot(
@@ -296,9 +320,30 @@ def plot_encoder_distributions(
             for lbl in labels:
                 legend_label_to_group[lbl] = new_label
 
+    # Only collapse to source class when the plot has exactly two violin groups
+    # (one target pair). With 3+ groups, each violin gets its own color and
+    # the legend shows full transitions. Decision is based on encoder_df so
+    # it respects excluded classes when analysis was restricted.
+    n_plot_groups = len([g for g in group_order if g != "Neutral"])
+
     def _legend_group_for_half(g: str, side: str) -> str:
         label = group_side_to_label.get((g, side), "")
         raw = _legend_label(g, label)
+        # When there are no identity transitions, no explicit grouping/ordering,
+        # and only two violin groups in the plot, collapse transition labels
+        # to the factual class (left-hand side of "source -> target").
+        if (
+            not has_identity_transitions
+            and legend_group_mapping is None
+            and paired_legend_labels is None
+            and n_plot_groups == 2
+            and isinstance(raw, str)
+        ):
+            if raw.startswith("Neutral:"):
+                # Keep neutral legend entries as-is.
+                pass
+            elif " -> " in raw:
+                raw = raw.split("->", 1)[0].strip()
         return legend_label_to_group.get(raw, raw)
 
     display_to_idx: Dict[str, int] = {}
@@ -322,6 +367,17 @@ def plot_encoder_distributions(
         half_to_display_idx[(g, side)] = display_to_idx[display]
 
     n_legend_entries = len(unique_displays)
+    # Derive a good default for legend_ncol when not explicitly provided.
+    # For many entries (e.g. ~20 transitions), aim for up to ~4 rows and at
+    # most 5 columns (so ~5x4 layout for 20 entries).
+    _legend_ncol = legend_ncol
+    if _legend_ncol is None:
+        if n_legend_entries <= 6:
+            _legend_ncol = 1
+        else:
+            # At most 4 rows: columns ~= ceil(n / 4), capped at 5 to avoid
+            # overly wide legends.
+            _legend_ncol = min(5, max(1, (n_legend_entries + 3) // 4))
     try:
         cmap_obj = plt.get_cmap(cmap)
         n_cmap = getattr(cmap_obj, "N", None)
@@ -410,7 +466,26 @@ def plot_encoder_distributions(
         color = (colors or {}).get(display) or (colors or {}).get(raw_label) or palette[i % len(palette)]
         legend_handles.append(mpatches.Patch(facecolor=color, edgecolor="black", label=display))
         legend_labels.append(display)
-    legend = ax.legend(legend_handles, legend_labels, loc=legend_loc, ncol=legend_ncol, fontsize=legend_fontsize)
+    # When many legend entries, place legend below the plot so it does not shrink the axes
+    legend_below = n_legend_entries > 6
+    if legend_below:
+        leg_loc = legend_loc if legend_bbox_to_anchor is not None else "upper center"
+        leg_bbox = legend_bbox_to_anchor if legend_bbox_to_anchor is not None else (0.5, -0.06)
+        legend = ax.legend(
+            legend_handles, legend_labels, loc=leg_loc, ncol=_legend_ncol, fontsize=legend_fontsize,
+            bbox_to_anchor=leg_bbox,
+        )
+        if legend_bbox_to_anchor is None:
+            fig = ax.get_figure()
+            fig.subplots_adjust(bottom=0.22)
+    else:
+        legend = ax.legend(
+            legend_handles,
+            legend_labels,
+            loc=legend_loc,
+            ncol=_legend_ncol,
+            fontsize=legend_fontsize,
+        )
     for i in bold_legend_idxs:
         try:
             legend.get_texts()[i].set_fontweight("bold")
@@ -431,7 +506,15 @@ def plot_encoder_distributions(
     if out_path and img_format:
         ext = img_format if img_format.startswith(".") else f".{img_format}"
         out_path = os.path.splitext(out_path)[0] + ext
-    plt.tight_layout()
+    if legend_below and legend_bbox_to_anchor is None:
+        # When using default figsize, add vertical space so the plot area is not shrunk by the legend
+        if _use_default_figsize:
+            fig = ax.get_figure()
+            w, h = fig.get_size_inches()
+            fig.set_size_inches(w, h + 2.0)
+        plt.tight_layout(rect=[0, 0.2, 1, 1])
+    else:
+        plt.tight_layout()
     plt.grid(axis="y", alpha=0.3, zorder=0)
     if out_path:
         os.makedirs(os.path.dirname(out_path), exist_ok=True)

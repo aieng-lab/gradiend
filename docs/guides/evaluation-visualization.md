@@ -54,6 +54,7 @@ plot_training_convergence(training_stats=stats_dict, output="convergence.pdf")
 ### Use cases
 
 - **Human-readable class labels** (e.g. German article paradigm): pass `label_name_mapping` so legend shows "Masc. Nom." instead of `masc_nom`. See [gender_de_detailed.py](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/gender_de_detailed.py).
+- **Many classes** (e.g. identity transitions): with ≥6 series a single figure-level legend is drawn to the right of the plot (independent of subplot height). Use `legend_ncol`, `legend_bbox_to_anchor`, and `legend_loc` to adjust placement.
 - **Publication-ready figure**: set `output`, `figsize`, and `img_format="png"` or `"pdf"`.
 - **Minimal plot** (only correlation): set `plot_mean_by_class=False`, `plot_mean_by_feature_class=False`.
 
@@ -61,12 +62,12 @@ plot_training_convergence(training_stats=stats_dict, output="convergence.pdf")
 
 ## 2. Encoder distribution plot
 
-Grouped split violins showing the distribution of encoded values by transition/class. Each group has left and right halves, such that, for instance the two sides of the target transitions are shown in a split violin (e.g. masc→fem vs fem→masc is shown ).
+Grouped split violins showing the distribution of encoded values by transition/class. By default the plot shows only the **target (training) transition(s)** and **neutral** data; use `target_and_neutral_only=False` to include all transitions. Each group has left and right halves (e.g. masc→fem vs fem→masc in one split violin). When using `evaluate_encoder(..., plot=True)`, any plot option can be forwarded via `plot_kwargs` (e.g. `plot_kwargs=dict(target_and_neutral_only=False, show=False)`).
 
 ### Entry points
 
 ```python
-# Via trainer (requires encoder_df from evaluate_encoder)
+# Via trainer (requires encoder_df from evaluate_encoder; plot options via plot_kwargs)
 enc_eval = trainer.evaluate_encoder(max_size=100, return_df=True, plot=True, plot_kwargs={...})
 
 # Direct call with pre-computed encoder_df
@@ -79,14 +80,16 @@ trainer.plot_encoder_distributions(encoder_df=enc_df, legend_name_mapping={...})
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
+| `target_and_neutral_only` | `bool` | `True` | Restrict the plot to the target (training) transition(s) and neutral data only. Set to `False` to show all transitions. Uses `trainer.pair` to determine the target transition(s). |
 | `legend_name_mapping` | `Dict[str, str]` | `None` | Map raw legend labels to display names (e.g. `"masc_nom -> fem_nom"` → `"M→F"`). |
 | `legend_group_mapping` | `Dict[str, List[str]]` | `None` | Group multiple transitions into one legend entry. Keys = display label; values = list of raw labels to merge. Groups are downsampled to balance counts. Example: `{"der": ["masc_nom -> masc_nom", "fem_dat -> fem_dat"], "die": ["fem_nom -> fem_nom", "fem_acc -> fem_acc"]}`. |
 | `paired_legend_labels` | `List[str]` | `None` | Explicit order of legend labels. Consecutive pairs (0,1), (2,3), … form split violins. |
 | `violin_order` | `List[str]` | `None` | Order of violin groups on the x-axis (by legend label name). |
 | `colors` | `Dict[str, str]` | `None` | Map legend labels to hex colors. |
 | `cmap` | `str` | `"tab20"` | Matplotlib colormap for palette. |
-| `legend_loc` | `str` | `"best"` | Matplotlib legend location. |
+| `legend_loc` | `str` | `"best"` | Matplotlib legend location. When >6 entries and `legend_bbox_to_anchor` is not set, legend is placed below the plot. |
 | `legend_ncol` | `int` | `2` | Number of columns in the legend. |
+| `legend_bbox_to_anchor` | `Tuple[float, float]` or `None` | `None` | (x, y) for legend. When >6 entries and `None`, legend is placed below (0.5, -0.06). |
 | `title` | `str` or `bool` | `True` | `True` = use `run_id`, `False` = no title, string = custom title. |
 | `title_fontsize` | `float` | `None` | Title font size. |
 | `label_fontsize` | `float` | `None` | Axis tick label font size. |
@@ -99,8 +102,10 @@ trainer.plot_encoder_distributions(encoder_df=enc_df, legend_name_mapping={...})
 
 ### Use cases
 
+- **Show all transitions** (e.g. multi-class pronoun setup): pass `target_and_neutral_only=False` so the plot includes every transition, not only the target pair and neutral.
 - **Renaming labels** for readability: `legend_name_mapping={"masc_nom -> fem_nom": "M→F", "fem_nom -> masc_nom": "F→M"}`. See [gender_de_detailed.py](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/gender_de_detailed.py).
 - **Grouping by surface form** (e.g. all “der” transitions together): `legend_group_mapping={"der": ["masc_nom -> masc_nom", "fem_dat -> fem_dat", ...], "die": [...], "das": [...]}`. See [gender_de_detailed.py](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/gender_de_detailed.py).
+- **Many legend entries** (>6): the legend is placed below the plot by default so the axes stay large. Override with `legend_bbox_to_anchor=(x, y)` and `legend_loc` if needed.
 - **Custom colors** for specific classes: `colors={"M→F": "#1f77b4", "F→M": "#ff7f0e"}`.
 - **Paper-style plot**: set `legend_fontsize`, `axis_label_fontsize`, `output`, `img_format="png"`.
 
@@ -147,7 +152,7 @@ trainer.plot_encoder_scatter(encoder_df=enc_df)
 
 ## 4. Top-k overlap heatmap
 
-Heatmap of pairwise overlap between top-k weight index sets across multiple GRADIEND models. Rows and columns are model ids; cell value is overlap (raw count or normalized fraction for easier compatibility).
+Heatmap of pairwise overlap between top-k weight index sets across multiple GRADIEND models. Rows and columns are the **dict keys** of `models`; use display labels (e.g. run_id or ``"3SG ↔ 3PL"``) as keys for readable axis labels. Cell value is overlap (raw count or normalized fraction).
 
 ### Entry point
 
@@ -168,7 +173,7 @@ plot_topk_overlap_heatmap(
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `models` | `Dict[str, ModelWithGradiend]` | required | Mapping from model id (used as axis label) to model. |
+| `models` | `Dict[str, ModelWithGradiend]` | required | Mapping from label to model. **Keys are used as axis labels**; use display labels (e.g. run_id or ``"3SG ↔ 3PL"``) as keys. |
 | `topk` | `int` | `1000` | Number of top weights per model. |
 | `part` | `str` | `"decoder-weight"` | Weight part for importance ranking: `encoder-weight`, `decoder-weight`, `decoder-bias`, or `decoder-sum`. |
 | `value` | `str` | `"intersection"` | Cell value: `"intersection"` (raw \|A ∩ B\|) or `"intersection_frac"` (\|A ∩ B\| / k). Use `"intersection_frac"` for cross-experiment comparison. |
@@ -181,9 +186,7 @@ plot_topk_overlap_heatmap(
 | `vmin`, `vmax` | `float` | `None` | Colormap bounds. Default: [0, k] for intersection, [0, 1] for fraction. |
 | `scale` | `str` | `"linear"` | Color scale: `"linear"`, `"log"`, `"sqrt"`, or `"power"`. |
 | `scale_gamma` | `float` | `None` | Gamma for `scale="power"` (e.g. 0.5 for sqrt-like). |
-| `pretty_labels` | `Dict[str, str]` | `None` | Map model id → display label. |
-| `pretty_groups` | `Dict[str, List[str]]` | `None` | Map group name → list of model ids. Groups are shown on top/right; ids must be disjoint. Uncovered ids go to `"Other"`. |
-| `show_values` | `bool` | `None` | Override `annot` for cell annotations. |
+| `pretty_groups` | `Dict[str, List[str]]` | `None` | Map group name → list of labels (dict keys). Groups are shown on top/right; keys must be disjoint. Uncovered keys go to `"Other"`. |
 | `annot_fontsize` | `float` | `None` | Font size for cell annotations. |
 | `tick_label_fontsize` | `float` | `None` | Font size for axis tick labels. |
 | `group_label_fontsize` | `float` | `None` | Font size for group labels (when `pretty_groups` is set). |
@@ -195,7 +198,7 @@ plot_topk_overlap_heatmap(
 
 ### Use cases
 
-- **Compare many runs** (e.g. German article paradigm): use `pretty_labels` to shorten run ids and `pretty_groups` to group by transition (e.g. "der ↔ die"). See [gender_de_detailed.py](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/gender_de_detailed.py).
+- **Compare many runs** (e.g. German article paradigm): pass a `models` dict whose **keys** are the display labels (e.g. "der ↔ die", "3SG ↔ 3PL") and use `pretty_groups` to group by transition. See [gender_de_detailed.py](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/gender_de_detailed.py) and [multilingual_gradiend_demo.py](https://github.com/aieng-lab/gradiend/blob/main/experiments/multilingual_gradiend_demo.py).
 - **Normalized comparison across experiments**: `value="intersection_frac"`.
 - **Clustered layout**: `cluster=True` to order models by similarity.
 - **Publication**: set `output_path`, `figsize`, `tick_label_fontsize`, `annot_fontsize`.
@@ -204,7 +207,7 @@ plot_topk_overlap_heatmap(
 
 ## 5. Top-k overlap Venn diagram
 
-Venn diagram showing the intersection of top-k weight sets across 2–6 models. For 2–3 models uses `matplotlib-venn`; for 4–6 uses the `venn` package.
+Venn diagram showing the intersection of top-k weight sets across 2–6 models. **Dict keys of `models` are used as set labels**; use the same display labels as keys as for the heatmap for consistent labeling. For 2–3 models uses `matplotlib-venn`; for 4–6 uses the `venn` package.
 
 ### Entry point
 
@@ -225,7 +228,7 @@ plot_topk_overlap_venn(
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `models` | `Dict[str, ModelWithGradiend]` | required | Mapping from model id to model. Must have 2–6 entries. |
+| `models` | `Dict[str, ModelWithGradiend]` | required | Mapping from label to model (2–6 entries). **Keys are used as set labels**; use display labels as keys for consistency with the heatmap. |
 | `topk` | `int` | `1000` | Number of top weights per model. |
 | `part` | `str` | `"decoder-weight"` | Weight part: `encoder-weight`, `decoder-weight`, `decoder-bias`, or `decoder-sum`. |
 | `output_path` | `str` | `None` | Path to save the figure. |
@@ -233,7 +236,7 @@ plot_topk_overlap_venn(
 
 ### Return value
 
-Dict with `per_model` (model_id → list of weight indices), `intersection`, `union`, `topk`, `part`. Useful for downstream analysis.
+Dict with `per_model` (label → list of weight indices; keys match input `models`), `intersection`, `union`, `topk`, `part`. Useful for downstream analysis.
 
 ### Dependencies
 
@@ -250,9 +253,10 @@ Plots that save to disk use `img_format` (e.g. `"pdf"`, `"png"`) when available.
 
 ## Example references
 
-| Script | Plots demonstrated |
-|--------|--------------------|
+| Script / notebook | Plots demonstrated |
+|-------------------|--------------------|
 | [gender_de_detailed.py](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/gender_de_detailed.py) | Training convergence with `label_name_mapping`; encoder distributions with `legend_group_mapping`; top-k heatmap with `value="intersection_frac"`; top-k Venn per transition. |
+| [english_pronouns.ipynb](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/english_pronouns.ipynb) | Full workflow: data creation → training (3SG vs 3PL) → encoder/decoder evaluation and probability-shifts plot. |
 | [gender_de.py](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/gender_de.py) | Basic training convergence, encoder distributions, decoder evaluation. |
 | [race_religion.py](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/race_religion.py) | Encoder distributions via `evaluate_encoder(..., plot=True)`. |
 | [evaluation-inter-model](../tutorials/evaluation-inter-model.md) | Top-k overlap concepts, heatmap and Venn usage. |

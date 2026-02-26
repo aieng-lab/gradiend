@@ -49,16 +49,23 @@ def _is_gradiend_checkpoint(load_directory: str) -> bool:
         return False
 
 
+# Paths we have already logged a non-convergent warning for (avoid duplicate logs when same model is loaded multiple times)
+_convergence_warning_logged: set = set()
+
+
 def _check_convergence_warning(model_path: str) -> None:
     """
     Check if a model did not converge during training and log a warning.
     
     First checks training.json for convergence_info. If not found, falls back to
-    checking seed_report.json for multi-seed runs.
+    checking seed_report.json for multi-seed runs. Warns at most once per path per process.
     
     Args:
         model_path: Path to the model directory being loaded.
     """
+    norm_path = os.path.normpath(os.path.abspath(model_path))
+    if norm_path in _convergence_warning_logged:
+        return
     # First, try to load convergence info from training.json
     training_json_path = os.path.join(model_path, "training.json")
     if os.path.isfile(training_json_path):
@@ -78,6 +85,7 @@ def _check_convergence_warning(model_path: str) -> None:
                 # Only warn if convergent_count is 0 (or None) and min_convergent_seeds requires convergence
                 actual_count = convergent_count if convergent_count is not None else 0
                 if actual_count == 0 and min_convergent_seeds is not None and min_convergent_seeds > 0:
+                    _convergence_warning_logged.add(norm_path)
                     logger.warning(
                         "Loading model from non-convergent training: "
                         "converged=False (convergent_count=%s, required: %s) for metric=%s threshold=%.4f. "
@@ -132,6 +140,7 @@ def _check_convergence_warning(model_path: str) -> None:
         min_convergent_seeds = report.get("min_convergent_seeds")
         
         if convergent_count == 0 and min_convergent_seeds is not None and min_convergent_seeds > 0:
+            _convergence_warning_logged.add(norm_path)
             logger.warning(
                 "Loading model from non-convergent multi-seed training: "
                 "convergent_count=0 (required: %s) for metric=%s threshold=%.4f. "
@@ -179,6 +188,15 @@ class ModelWithGradiend(nn.Module, ABC):
         source: str = "factual",
         target: str = "diff",
     ):
+        if not isinstance(source, str):
+            raise TypeError(f"source must be str, got {type(source).__name__}")
+        if source not in ("factual", "alternative", "diff"):
+            raise ValueError(f"source must be one of 'factual', 'alternative', 'diff', got {source!r}")
+        if not isinstance(target, str):
+            raise TypeError(f"target must be str, got {type(target).__name__}")
+        if target not in ("factual", "alternative", "diff"):
+            raise ValueError(f"target must be one of 'factual', 'alternative', 'diff', got {target!r}")
+
         super().__init__()
         self.base_model = base_model
         self.gradiend = gradiend
@@ -187,15 +205,11 @@ class ModelWithGradiend(nn.Module, ABC):
 
         self._gradient_creator = gradient_creator or self
 
-        has_device_map = getattr(self.base_model, "hf_device_map", None) is not None
-        if has_device_map:
-            self.base_model_device = next(self.base_model.parameters()).device
+        if gradiend.encoder is not None:
+            self.base_model_device = base_model_device or gradiend.encoder[0].linear.weight.device
         else:
-            if gradiend.encoder is not None:
-                self.base_model_device = base_model_device or gradiend.encoder[0].linear.weight.device
-            else:
-                self.base_model_device = base_model_device or gradiend.device_encoder
-            self.base_model.to(self.base_model_device)
+            self.base_model_device = base_model_device or gradiend.device_encoder
+        self.base_model.to(self.base_model_device)
         self.gradiend.to(device_encoder=device_encoder, device_decoder=device_decoder)
 
         # Stable parameter map for shapes + updates
@@ -210,8 +224,7 @@ class ModelWithGradiend(nn.Module, ABC):
     def to(self, device: object) -> "ModelWithGradiend":
         """Move base_model and gradiend to the given device. Accepts str or torch.device."""
         dev = torch.device(device) if isinstance(device, str) else device
-        if getattr(self.base_model, "hf_device_map", None) is None:
-            self.base_model.to(dev)
+        self.base_model.to(dev)
         self.gradiend.to(dev)
         return self
 
@@ -256,6 +269,11 @@ class ModelWithGradiend(nn.Module, ABC):
             return
 
         raise TypeError(f"gradiend.param_map must be dict-spec, got {type(param_map)}")
+
+    def __str__(self) -> str:
+        g = self.gradiend
+        g_summary = f"input_dim={g.input_dim}, latent_dim={g.latent_dim}" if g else "gradiend=None"
+        return f"ModelWithGradiend(source={self._source!r}, target={self._target!r}, gradiend({g_summary}))"
 
     # ----------------------------
     # Metadata helpers
@@ -711,7 +729,7 @@ class ModelWithGradiend(nn.Module, ABC):
             gradiend_keys = (
                 "params", "param_map", "trust_remote_code", "torch_dtype",
                 "activation_encoder", "activation_decoder", "bias_decoder", "latent_dim",
-                "device_map", "encoder_decoder_same_device", "pre_prune_config",
+                "encoder_decoder_same_device", "pre_prune_config",
             )
             for key in gradiend_keys:
                 if hasattr(training_args, key) and key not in kwargs:

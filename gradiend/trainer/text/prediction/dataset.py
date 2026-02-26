@@ -8,6 +8,7 @@ from typing import Any, List, Optional, Tuple
 import pandas as pd
 import torch
 
+from gradiend.util.logging import suppress_tokenizer_length_warning
 from gradiend.trainer.text.common.dataset_base import TextBatchedDatasetBase
 from gradiend.trainer.text.prediction.unified_data import (
     UNIFIED_ALTERNATIVE,
@@ -132,7 +133,8 @@ class TextBatchedDataset(TextBatchedDatasetBase):
             expanded_text = text.split("[MASK]")[0] if "[MASK]" in text else text
         else:
             expanded_text = text.replace(self.mask_token, " ".join([self.mask_token] * num_target_tokens), 1) if mask_count == 1 and self.mask_token else text
-        encoded = self.tokenizer(expanded_text, return_tensors="pt", add_special_tokens=True, truncation=True, max_length=self.max_length, padding="max_length")
+        with suppress_tokenizer_length_warning():
+            encoded = self.tokenizer(expanded_text, return_tensors="pt", add_special_tokens=True, truncation=True, max_length=self.max_length, padding="max_length")
         input_ids = encoded["input_ids"]
         attention_mask = encoded["attention_mask"]
         labels = torch.full_like(input_ids, -100)
@@ -171,6 +173,7 @@ class TextTrainingDataset(TextBatchedDataset):
         target_key: str = "label",
         balance_column: str = "feature_class_id",
         max_length: int = 256,
+        seed: Optional[int] = None,
     ):
         """Initialize the training dataset.
 
@@ -183,6 +186,7 @@ class TextTrainingDataset(TextBatchedDataset):
             target_key: Key for label/target in data.
             balance_column: Column for balancing (e.g., feature_class_id).
             max_length: Maximum sequence length.
+            seed: Random seed for batch ordering (default 42). Use training_args.seed for reproducibility.
         """
         super().__init__(
             data=data,
@@ -192,6 +196,7 @@ class TextTrainingDataset(TextBatchedDataset):
             max_size=max_size,
             balance_column=balance_column,
             max_length=max_length,
+            seed=seed if seed is not None else 42,
         )
         self.target_key = target_key
         self.is_decoder_only_model = is_decoder_only_model

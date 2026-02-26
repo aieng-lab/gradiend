@@ -252,17 +252,16 @@ class TestCheckpointCallback:
         )
         
         model = MagicMock()
-        model.gradiend = MagicMock()
-        model.gradiend.save_pretrained = MagicMock()
+        model.save_pretrained = MagicMock()
         
         config = {}
         training_stats = {}
         losses = [0.5, 0.4, 0.3]
         
-        # Should save at epoch end
+        # Should save at epoch end (callback calls model.save_pretrained, not model.gradiend)
         callback.on_epoch_end(epoch=0, model=model, config=config, training_stats=training_stats, losses=losses)
         
-        assert model.gradiend.save_pretrained.call_count == 1
+        assert model.save_pretrained.call_count == 1
 
 
 class TestLoggingCallback:

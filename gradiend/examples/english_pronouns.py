@@ -7,7 +7,9 @@ To learn number (singular vs plural) from all pronouns, use class_merge_map:
     class_merge_map={"singular": ["1SG", "3SG"], "plural": ["1PL", "3PL"]}
 With exactly two merged classes, target_classes can be omitted.
 
-Requires: pip install gradiend[data] transformers torch datasets
+Requires: pip install gradiend[data]
+
+You need to run data_creation_pronouns before this to create the data it needs (or create your own data in the same format). The data should be in runs/examples/data/english_pronouns/ (or change DATA_DIR to point to it). The training data should be in training.csv and the neutral eval data in neutral.csv. The training data should have a "text" column and a "label" column with values "3SG" or "3PL". The neutral data should have a "text" column and no labels, and should not contain any of the target pronouns.
 """
 
 from pathlib import Path
@@ -32,19 +34,20 @@ def main():
         data=training_path,
         target_classes=["3SG", "3PL"],
         eval_neutral_data=neutral_path,
-        # class_merge_map={"singular": ["1SG", "3SG"], "plural": ["1PL", "3PL"]},
+
     )
 
     args = TrainingArguments(
         experiment_dir="runs/english_pronouns",
-        train_batch_size=8,
-        eval_steps=100,
-        num_train_epochs=2,
+        train_batch_size=4,
+        eval_steps=25,
+        num_train_epochs=5,
         max_steps=500,
-        source="factual",
+        source="alternative",
         target="diff",
         eval_batch_size=4,
-        learning_rate=1e-4,
+        learning_rate=1e-3,
+
     )
 
     print("\n=== Training ===")
@@ -62,17 +65,13 @@ def main():
 
     print("\n=== Encoder evaluation ===")
     trainer.evaluate_encoder(plot=True)
-    enc_metrics = trainer.get_encoder_metrics(split="train")
-    if enc_metrics:
-        print(f"  {enc_metrics}")
+    enc_metrics = trainer.get_encoder_metrics(use_cache=True)
+    print(f"  {enc_metrics}")
 
     print("\n=== Decoder evaluation ===")
-    dec = trainer.evaluate_decoder()
-    summary = dec.get("summary", {})
-    if summary:
-        for k, v in summary.items():
-            if isinstance(v, dict) and "value" in v:
-                print(f"  {k}: {v.get('value')}")
+    dec = trainer.evaluate_decoder(plot=True)
+    stats = dec["3SG"]
+    print(stats)
     print("\n=== Done ===")
 
 

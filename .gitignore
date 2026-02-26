@@ -4,7 +4,8 @@
 /__pycache__
 
 logs/
-/data
+experiments/
+site/
 
 *.pdf
 *.png
@@ -13,18 +14,9 @@ logs/
 !docs/img/*.pdf
 
 
-gradiend/trainer/decoder_only_mlm/decoder_mlm_model/
-
 # Test bench run artifacts
 test_bench/results/
 
-# Setup script
-gradiend/trainer/__pycache__/
-
 *.pyc
-
-
-
-site/
 
 gradiend.egg-info/

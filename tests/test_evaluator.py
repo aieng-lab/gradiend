@@ -364,8 +364,8 @@ class TestDecoderEvaluator:
             lrs=[1e-2]
         )
         
-        # Should return summary or grid
-        assert "summary" in result or "grid" in result
+        # Decoder result is flat: "grid" plus summary entries at top level
+        assert "grid" in result
     
     def test_evaluate_decoder_uses_training_args_when_not_overridden(self):
         """Test that TrainingArguments values are used when not overridden."""
@@ -383,8 +383,8 @@ class TestDecoderEvaluator:
             lrs=[1e-2]
         )
         
-        # Should return summary or grid
-        assert "summary" in result or "grid" in result
+        # Decoder result is flat: "grid" plus summary entries at top level
+        assert "grid" in result
     
     def test_evaluate_decoder_use_cache_overwriting(self):
         """Test that use_cache parameter can override TrainingArguments."""
@@ -403,8 +403,8 @@ class TestDecoderEvaluator:
             lrs=[1e-2]
         )
         
-        # Should return summary or grid
-        assert "summary" in result or "grid" in result
+        # Decoder result is flat: "grid" plus summary entries at top level
+        assert "grid" in result
     
     def test_evaluate_decoder_feature_factors_default(self):
         """Test that default feature factors are derived from model."""
@@ -437,7 +437,7 @@ class TestDecoderEvaluator:
         )
         
         # Should use custom feature factors
-        assert "summary" in result or "grid" in result
+        assert "grid" in result
     
     def test_evaluate_decoder_lrs_default(self):
         """Test that default learning rates are used when not provided."""
@@ -452,8 +452,8 @@ class TestDecoderEvaluator:
             feature_factors=[-1.0]
         )
         
-        # Should return summary or grid
-        assert "summary" in result or "grid" in result
+        # Decoder result is flat: "grid" plus summary entries at top level
+        assert "grid" in result
     
     def test_evaluate_decoder_lrs_custom(self):
         """Test that custom learning rates can be provided."""
@@ -470,7 +470,7 @@ class TestDecoderEvaluator:
         )
         
         # Should use custom learning rates
-        assert "summary" in result or "grid" in result
+        assert "grid" in result
     
     def test_evaluate_decoder_part_parameter(self):
         """Test that part parameter is passed correctly."""
@@ -486,7 +486,7 @@ class TestDecoderEvaluator:
         )
         
         # Should accept part parameter
-        assert "summary" in result or "grid" in result
+        assert "grid" in result
     
     def test_evaluate_decoder_eval_batch_size(self):
         """Test that eval_batch_size parameter is passed correctly."""
@@ -502,7 +502,7 @@ class TestDecoderEvaluator:
         )
         
         # Should accept eval_batch_size parameter
-        assert "summary" in result or "grid" in result
+        assert "grid" in result
 
     def test_default_decoder_feature_factors_fallback_to_config(self):
         """default_decoder_feature_factors uses config.target_classes when trainer.target_classes is None."""

@@ -38,12 +38,10 @@ def _make_plotting_data(lrs=(1e-5, 0.001, 0.1, 1.0, 10.0, 100.0, 1000.0), ff=-1.
 
 
 def _make_decoder_results(selected_lr=0.1, selected_ff=-1.0):
-    """Build decoder_results with summary for target_class 3PL."""
+    """Build decoder_results in flat format (class keys at top level) for target_class 3PL."""
     return {
-        "summary": {
-            "3SG": {"learning_rate": selected_lr, "feature_factor": selected_ff, "value": 0.5},
-            "3PL": {"learning_rate": selected_lr, "feature_factor": selected_ff, "value": 0.5},
-        },
+        "3SG": {"learning_rate": selected_lr, "feature_factor": selected_ff, "value": 0.5},
+        "3PL": {"learning_rate": selected_lr, "feature_factor": selected_ff, "value": 0.5},
         "grid": {},
     }
 

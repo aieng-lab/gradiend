@@ -7,7 +7,7 @@ tells the user how to install (e.g. pip install matplotlib-venn).
 matplotlib is also optional; if missing, plotting raises ImportError with install instructions.
 """
 
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 
 from gradiend.visualizer.plot_optional import _require_matplotlib
 
@@ -79,6 +79,12 @@ def plot_topk_venn(
     part: str = "decoder-weight",
     output_path: Optional[str] = None,
     show: bool = False,
+    figsize: Optional[Tuple[float, float]] = None,
+    circle_names_fontsize: Optional[Union[int, float]] = None,
+    region_counts_fontsize: Optional[Union[int, float]] = None,
+    patch_linewidth: Optional[float] = None,
+    alpha: float = 0.5,
+    title: Optional[str] = None,
 ) -> None:
     """
     Plot a Venn diagram for top-k weight index sets (2–6 models).
@@ -90,11 +96,18 @@ def plot_topk_venn(
     No fallback to other plot types.
 
     Args:
-        models: Mapping from model identifier to ModelWithGradiend instance.
+        models: Mapping from model identifier (or display label) to ModelWithGradiend instance.
+            Dict keys are used as set labels; use pretty labels as keys for consistent display.
         topk: Number of top weights per model (base-model weight indices).
         part: ``'encoder-weight'`` or ``'decoder-weight'``.
         output_path: Optional path to save the figure.
         show: If True, call ``plt.show()`` so the plot is displayed.
+        figsize: (width, height) in inches. Default (6, 6) for 2–3 models, (8, 8) for 4–6.
+        circle_names_fontsize: Font size for the name of each circle (e.g. model label). Default 12 (2–3 sets) or 13 (4–6 sets).
+        region_counts_fontsize: Font size for the numbers inside each region (overlap counts). Default 10 (2–3 sets) or 11 (4–6 sets).
+        patch_linewidth: Line width of Venn patches. Default 3.0.
+        alpha: Patch transparency in [0, 1]. Default 0.5.
+        title: Optional figure title.
     """
     model_ids = list(models.keys())
     n_models = len(model_ids)
@@ -108,6 +121,14 @@ def plot_topk_venn(
     per_model, _, _ = compute_topk_sets(models, topk=topk, part=part)
     sets_dict = {mid: set(per_model[mid]) for mid in model_ids}
 
+    if figsize is None:
+        figsize = (8, 8) if n_models >= 4 else (6, 6)
+    # Default font sizes scaled to figsize so circles stay visually dominant (not huge text)
+    if circle_names_fontsize is None:
+        circle_names_fontsize = 20 if figsize[0] >= 8 else 18
+    if region_counts_fontsize is None:
+        region_counts_fontsize = 18 if figsize[0] >= 8 else 16
+
     if n_models == 2:
         _require_matplotlib_venn()
         from matplotlib_venn import venn2
@@ -118,13 +139,18 @@ def plot_topk_venn(
         only_b = len(set_b - set_a)
         ab = len(set_a & set_b)
 
-        plt.figure(figsize=(6, 6))
+        plt.figure(figsize=figsize)
         v = venn2(
             subsets=(only_a, only_b, ab),
-            set_labels=(A, B),
-            alpha=0.5,
+            set_labels=(model_ids[0], model_ids[1]),
+            alpha=alpha,
         )
-        _style_venn2_venn3(v, topk)
+        _style_venn2_venn3(
+            v, topk,
+            circle_names_fontsize=circle_names_fontsize,
+            region_counts_fontsize=region_counts_fontsize,
+            patch_linewidth=patch_linewidth,
+        )
 
     elif n_models == 3:
         _require_matplotlib_venn()
@@ -140,26 +166,36 @@ def plot_topk_venn(
         bc = len((set_b & set_c) - set_a)
         abc = len(set_a & set_b & set_c)
 
-        plt.figure(figsize=(6, 6))
+        plt.figure(figsize=figsize)
         v = venn3(
             subsets=(only_a, only_b, ab, only_c, ac, bc, abc),
-            set_labels=(A, B, C),
-            alpha=0.5,
+            set_labels=(model_ids[0], model_ids[1], model_ids[2]),
+            alpha=alpha,
         )
-        _style_venn2_venn3(v, topk)
+        _style_venn2_venn3(
+            v, topk,
+            circle_names_fontsize=circle_names_fontsize,
+            region_counts_fontsize=region_counts_fontsize,
+            patch_linewidth=patch_linewidth,
+        )
 
     else:
         _require_venn()
         from venn import venn
 
-        plt.figure(figsize=(8, 8))
+        plt.figure(figsize=figsize)
         ax = plt.gca()
         venn(sets_dict, ax=ax, legend_loc="upper center")
         for txt in ax.texts:
             if txt:
-                txt.set_fontweight("bold")
                 txt.set_color("black")
+        if circle_names_fontsize is not None:
+            for txt in ax.texts:
+                if txt:
+                    txt.set_fontsize(circle_names_fontsize)
 
+    if title:
+        plt.title(title)
     plt.tight_layout()
     if output_path:
         plt.savefig(output_path, bbox_inches="tight")
@@ -167,24 +203,32 @@ def plot_topk_venn(
         plt.show()
 
 
-def _style_venn2_venn3(v: object, topk: int) -> None:
-    """Apply subset/set label font sizes and patch linewidth (matches gradiend xai style)."""
-    subset_label_fontsize = 30 if topk < 5000 else 25
-    label_fontsize = 40 if topk < 5000 else 30
+def _style_venn2_venn3(
+    v: object,
+    topk: int,
+    circle_names_fontsize: Optional[Union[int, float]] = None,
+    region_counts_fontsize: Optional[Union[int, float]] = None,
+    patch_linewidth: Optional[float] = None,
+) -> None:
+    """Apply circle names and region counts font sizes and patch linewidth."""
+    if region_counts_fontsize is None:
+        region_counts_fontsize = 10
+    if circle_names_fontsize is None:
+        circle_names_fontsize = 12
+    if patch_linewidth is None:
+        patch_linewidth = 3.0
     if hasattr(v, "subset_labels"):
         for txt in v.subset_labels:
             if txt:
-                txt.set_fontsize(subset_label_fontsize)
-                txt.set_fontweight("bold")
+                txt.set_fontsize(region_counts_fontsize)
     if hasattr(v, "set_labels"):
         for txt in v.set_labels:
             if txt:
-                txt.set_fontsize(label_fontsize)
-                txt.set_fontweight("bold")
+                txt.set_fontsize(circle_names_fontsize)
     if hasattr(v, "patches"):
         for patch in v.patches:
             if patch:
-                patch.set_linewidth(3.0)
+                patch.set_linewidth(patch_linewidth)
 
 
 def plot_topk_overlap_venn(
@@ -193,20 +237,33 @@ def plot_topk_overlap_venn(
     part: str = "decoder-weight",
     output_path: Optional[str] = None,
     show: bool = True,
+    figsize: Optional[Tuple[float, float]] = None,
+    circle_names_fontsize: Optional[Union[int, float]] = None,
+    region_counts_fontsize: Optional[Union[int, float]] = None,
+    patch_linewidth: Optional[float] = None,
+    alpha: float = 0.5,
+    title: Optional[str] = None,
 ) -> Dict[str, object]:
     """
     Plot top-k weight index set intersection across multiple GRADIEND models and return overlap stats.
 
-    This is a standalone function: pass a dict of model_id -> ModelWithGradiend; no trainer
-    or adapter is required. Uses Venn diagrams: matplotlib_venn for 2–3 models, venn
+    This is a standalone function: pass a dict of label -> ModelWithGradiend. Dict keys are used
+    as set labels; use pretty labels (e.g. ``"3SG $\\longleftrightarrow$ 3PL"``) as keys for
+    consistent display with the heatmap. Uses Venn diagrams: matplotlib_venn for 2–3 models, venn
     package for 4–6 models. Missing packages raise ImportError with install instructions.
 
     Args:
-        models: Mapping from model identifier (e.g. "N_MF", "N_D_fem") to ModelWithGradiend instance.
+        models: Mapping from display label (or model id) to ModelWithGradiend instance.
         topk: Number of top weights to consider per model (base-model weight indices).
         part: ``'encoder-weight'`` or ``'decoder-weight'``.
         output_path: Optional path to save the figure.
         show: If True, display the plot (default True so something is shown when running).
+        figsize: (width, height) in inches. Default (6, 6) for 2–3 models, (8, 8) for 4–6.
+        circle_names_fontsize: Font size for the name of each circle (e.g. model label). Default scales with figsize.
+        region_counts_fontsize: Font size for the numbers inside each region (overlap counts). Default scales with figsize.
+        patch_linewidth: Line width of Venn patch borders. Default 3.0.
+        alpha: Patch transparency in [0, 1].
+        title: Optional figure title.
 
     Returns:
         Dict with keys: ``per_model`` (model_id -> list of weight indices), ``intersection``,
@@ -218,7 +275,19 @@ def plot_topk_overlap_venn(
         models = {"model": models}
 
     per_model, intersection, union = compute_topk_sets(models, topk=topk, part=part)
-    plot_topk_venn(models, topk=topk, part=part, output_path=output_path, show=show)
+    plot_topk_venn(
+        models,
+        topk=topk,
+        part=part,
+        output_path=output_path,
+        show=show,
+        figsize=figsize,
+        circle_names_fontsize=circle_names_fontsize,
+        region_counts_fontsize=region_counts_fontsize,
+        patch_linewidth=patch_linewidth,
+        alpha=alpha,
+        title=title,
+    )
 
     return {
         "per_model": per_model,

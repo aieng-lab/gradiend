@@ -87,6 +87,19 @@ class GradiendModel(nn.Module):
             **kwargs: Additional metadata stored in `self.kwargs` and serialized into config.json metadata
                 on save. Non-JSONable values are stringified in a safe way.
         """
+        if not isinstance(input_dim, int):
+            raise TypeError(f"input_dim must be int, got {type(input_dim).__name__}")
+        if not isinstance(latent_dim, int):
+            raise TypeError(f"latent_dim must be int, got {type(latent_dim).__name__}")
+        if not isinstance(activation_encoder, str):
+            raise TypeError(f"activation_encoder must be str, got {type(activation_encoder).__name__}")
+        if not isinstance(activation_decoder, str):
+            raise TypeError(f"activation_decoder must be str, got {type(activation_decoder).__name__}")
+        if not isinstance(bias_decoder, bool):
+            raise TypeError(f"bias_decoder must be bool, got {type(bias_decoder).__name__}")
+        if not isinstance(lazy_init, bool):
+            raise TypeError(f"lazy_init must be bool, got {type(lazy_init).__name__}")
+
         super().__init__()
         default_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.device_encoder = device_encoder or device or default_device
@@ -137,7 +150,12 @@ class GradiendModel(nn.Module):
             if self.bias_decoder:
                 nn.init.uniform_(self.decoder[0].bias, -x, x)
 
-        self.ctr = 0
+    def __str__(self) -> str:
+        return (
+            f"GradiendModel(input_dim={self.input_dim}, latent_dim={self.latent_dim}, "
+            f"activation_encoder={self.activation!r}, activation_decoder={getattr(self, 'activation_decoder', self.activation)!r}, "
+            f"bias_decoder={self.bias_decoder})"
+        )
 
     def _build_encoder_decoder(self, input_dim: int) -> None:
         """
@@ -346,10 +364,19 @@ class GradiendModel(nn.Module):
         Returns:
             List of input indices (length k) sorted by descending importance.
         """
-        imp = self.get_weight_importance(part=part)
+        if isinstance(topk, bool):
+            raise TypeError("topk must be int or float, not bool")
         if isinstance(topk, float):
             if not (0.0 < topk <= 1.0):
-                raise ValueError("topk float must be in (0, 1]")
+                raise ValueError("topk as float must be in (0, 1.0]")
+        elif isinstance(topk, int):
+            if topk < 0:
+                raise ValueError("topk as int must be >= 0")
+        else:
+            raise TypeError(f"topk must be int or float, got {type(topk).__name__}")
+
+        imp = self.get_weight_importance(part=part)
+        if isinstance(topk, float):
             k = int(math.ceil(topk * imp.numel()))
         else:
             k = int(topk)
@@ -400,7 +427,6 @@ class GradiendModel(nn.Module):
         if encoded.device != self.device_decoder:
             encoded = encoded.to(self.device_decoder)
         decoded = self.decoder(encoded)
-        self.ctr += 1
 
         return (decoded, encoded) if return_encoded else decoded
 
@@ -440,6 +466,8 @@ class GradiendModel(nn.Module):
         if keep_idx.dtype not in (torch.int64, torch.long, torch.int32):
             raise TypeError(f"keep_idx must be integer dtype, got {keep_idx.dtype}")
 
+        keep_idx = torch.unique(keep_idx.detach().to(torch.long), sorted=True)
+
         m = self if inplace else copy.deepcopy(self)
 
         enc_ll = m.encoder[0].linear
@@ -471,6 +499,8 @@ class GradiendModel(nn.Module):
 
         m.encoder[0] = new_enc
         m.decoder[0] = new_dec
+        m.encoder[0].train(m.training)
+        m.decoder[0].train(m.training)
         m.input_dim = new_in
 
         return (m, keep_idx.detach().to("cpu").long()) if return_index_map else m
@@ -509,6 +539,20 @@ class GradiendModel(nn.Module):
         """
         if topk is None and threshold is None and mask is None:
             raise ValueError("At least one of topk, threshold, mask must be provided.")
+        if topk is not None:
+            if isinstance(topk, bool):
+                raise TypeError("topk must be int or float, not bool")
+            if isinstance(topk, int) and topk < 0:
+                raise ValueError("topk as int must be >= 0")
+            if isinstance(topk, float) and not (0.0 < topk <= 1.0):
+                raise ValueError("topk as float must be in (0, 1.0]")
+            if not isinstance(topk, (int, float)):
+                raise TypeError(f"topk must be int or float, got {type(topk).__name__}")
+        if threshold is not None:
+            if not isinstance(threshold, (int, float)):
+                raise TypeError(f"threshold must be float or None, got {type(threshold).__name__}")
+            if threshold < 0:
+                raise ValueError("threshold must be >= 0")
 
         # topk=1.0 (float) means no pruning (return self); topk int 1 means keep top-1 dimension
         if topk is not None and isinstance(topk, float) and topk == 1.0:

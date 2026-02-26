@@ -4,8 +4,8 @@ This guide explains pruned GRADIEND models, manual masks, and automated pre-/pos
 
 ## What is a pruned GRADIEND model?
 
-A pruned GRADIEND model has a reduced input dimension. Pruning selects a subset of input dimensions (typically the most important dimensions wrt. feature importance) and physically shrinks the encoder/decoder weights. This is done via `ModelWithGradiend.prune_gradiend()`, which delegates to `ParamMappedGradiendModel.prune()`.
-A pruned model has fewer parameters and lower memory usage, but *may* lose some performance (typically, a few magnitudes of pruning can be done with minimal loss).
+A pruned GRADIEND model has a reduced input dimension. Pruning selects a subset of input dimensions (typically the most important dimensions w.r.t. feature importance) and physically shrinks the encoder/decoder weights. This is done via `ModelWithGradiend.prune_gradiend()`, which delegates to `ParamMappedGradiendModel.prune()`.
+A pruned model has fewer parameters and lower memory usage, but *may* lose some performance (typically, pruning by a few orders of magnitudes can be done with minimal loss).
 
 Pruning is optional and can be done at different stages:
 
@@ -31,6 +31,7 @@ Notes:
 
 - `part` must be one of: `encoder-weight`, `decoder-weight`, `decoder-bias`, `decoder-sum` (use `decoder-weight` for decoder weight–based importance). Importance is determined by the absolute value of the weights or gradients in that part.
 - `mask` must be `torch.bool` with length equal to the current `input_dim`.
+- `inplace` determines whether to modify the model in place or return a new pruned model. If `inplace=True`, the original model is modified and returned. If `inplace=False`, a new pruned model is returned and the original model remains unchanged.
 - If `return_mask=True`, you can inspect the combined mask.
 
 ## Pre-pruning (before training)

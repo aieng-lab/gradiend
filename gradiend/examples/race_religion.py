@@ -1,4 +1,4 @@
-from gradiend import TextPredictionTrainer, TrainingArguments
+from gradiend import TextPredictionTrainer, TrainingArguments, PrePruneConfig, PostPruneConfig
 
 model_name = "distilbert-base-cased"
 
@@ -12,6 +12,8 @@ args = TrainingArguments(
     source="alternative",
     target="diff",
     learning_rate=1e-4,
+    pre_prune_config=PrePruneConfig(n_samples=16, topk=0.01),
+    post_prune_config=PostPruneConfig(topk=0.1),
 )
 
 race_white_black_config = ("race", ("white", "black"), ["asian"])

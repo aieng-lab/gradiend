@@ -20,12 +20,12 @@ from pathlib import Path
 
 from gradiend import TextPredictionTrainer, TrainingArguments
 from gradiend.trainer import PrePruneConfig, PostPruneConfig
-from gradiend.visualizer.topk.pairwise_heatmap import plot_topk_overlap_heatmap
+from gradiend import plot_topk_overlap_heatmap, plot_topk_overlap_venn
 
 
 model_name = "google-bert/bert-base-multilingual-cased"
 args = TrainingArguments(
-    experiment_dir=f"runs/multilingual_gradiend_demo_{model_name.split('/')[-1]}",
+    experiment_dir=f"runs/multilingual_gradiend_demo_{model_name.split('/')[-1]}_v2",
     train_batch_size=16,
     train_max_size=20000,
     eval_steps=250,
@@ -256,8 +256,8 @@ def train_pronoun_merged():
 def main():
     os.makedirs(args.experiment_dir, exist_ok=True)
 
-    train_pronoun_merged()
     train_pronoun()
+    train_pronoun_merged()
     train_race_religion()
     train_gender_en()
     train_gender_de()
@@ -301,8 +301,9 @@ def main():
         "fem_gen": "der",
         "neut_gen": "des",
     }
+    ARR = r"$\longleftrightarrow$"
     gender_de_ids_to_articles = {
-        id: r"DE $\longleftrightarrow$".join(
+        id: ARR.join(
             sorted(
                 ARTICLE_MAPPING["_".join(pair)]
                 for pair in zip(*[iter(id.removeprefix("gender_de_").split("_"))] * 2)
@@ -317,71 +318,90 @@ def main():
 
     def _pretty_label(mid: str) -> str:
         if mid == "gender_en":
-            return "M$\longleftrightarrow$F"
+            return f"he{ARR}she"
         if mid.startswith("gender_de_"):
             rest = mid.replace("gender_de_", "")  # e.g. fem_acc_neut_acc
             parts = rest.split("_")
             if len(parts) >= 4:  # two case names (gender_case)
                 a, b = "_".join(parts[:2]), "_".join(parts[2:])
-                return f"{CASE_PRETTY.get(a, a)}$\longleftrightarrow${CASE_PRETTY.get(b, b)}"
+                return f"{CASE_PRETTY.get(a, a)}{ARR}{CASE_PRETTY.get(b, b)}"
         if mid.startswith("pronoun_number_"):
-            return "SG$\longleftrightarrow$PL"
+            return f"SG{ARR}PL"
         if mid.startswith("pronoun_person_"):
             rest = mid.replace("pronoun_person_", "")
-            person_pretty = {"1vs2": r"1st$\longleftrightarrow$2nd", "1vs3": r"1st$\longleftrightarrow$3rd", "2vs3": r"2nd$\longleftrightarrow$3rd"}
-            return person_pretty.get(rest, rest.replace("vs", r"$\longleftrightarrow$"))
+            person_pretty = {"1vs2": f"1st{ARR}2nd", "1vs3": f"1st{ARR}3rd", "2vs3": f"2nd{ARR}3rd"}
+            return person_pretty.get(rest, rest.replace("vs", ARR))
         if mid.startswith("pronoun_"):
+            # Use class IDs like 1SG, 1PL, 2, 3SG, 3PL for heatmap consistency
             c1, c2 = mid.replace("pronoun_", "").split("_")
-            pretty = {'2': '2SGPL'}
-            c1, c2 = pretty.get(c1, c1), pretty.get(c2, c2)
-            return f"{c1}$\longleftrightarrow${c2}"
+            return f"{c1}{ARR}{c2}"
         if mid.startswith("race_"):
             w1, w2 = mid.replace("race_", "").split("_")
-            return f"{w1.capitalize()}$\longleftrightarrow${w2.capitalize()}"
+            return f"{w1.capitalize()}{ARR}{w2.capitalize()}"
         if mid.startswith("religion_"):
             w1, w2 = mid.replace("religion_", "").split("_")
-            return f"{w1.capitalize()}$\longleftrightarrow${w2.capitalize()}"
+            return f"{w1.capitalize()}{ARR}{w2.capitalize()}"
         return mid
 
     # Pretty groups: partition of all model ids (disjoint, cover all)
     remaining = [m for m in all_ids if m not in ordered]
     pretty_groups = {
         **gender_de_transitions_to_ids,
-        "EN Race": race_ids,
-        "EN Religion": religion_ids,
-        "EN Gender": gender_en_ids,
-        "EN Pronouns": pronoun_ids,
-        "EN Number": pronoun_number_ids,
-        "EN Person": pronoun_person_ids,
+        "Race": race_ids,
+        "Religion": religion_ids,
+        "English Gender": gender_en_ids,
+        "English Pronouns": pronoun_ids,
+        "English Number": pronoun_number_ids,
+        "English Person": pronoun_person_ids,
     }
-    if remaining:
-        pretty_groups["Other"] = remaining
 
-    # order for pretty_labels: match heatmap's order (from pretty_groups)
+    # order and labels: use pretty labels as dict keys so heatmap and Venn show them consistently
     order = [mid for gids in pretty_groups.values() for mid in gids]
     pretty_labels = {mid: _pretty_label(mid) for mid in order}
+    models_display = {pretty_labels[mid]: models_for_heatmap[mid] for mid in order}
+    order_display = [pretty_labels[mid] for mid in order]
+    pretty_groups_display = {k: [pretty_labels[mid] for mid in gids] for k, gids in pretty_groups.items()}
 
     topk = 1000
     output_path = os.path.join(args.experiment_dir, f"topk_overlap_heatmap_all_{topk}.pdf")
     plot_topk_overlap_heatmap(
-        models_for_heatmap,
+        models_display,
         topk=topk,
         part="decoder-weight",
         value="intersection_frac",
+        order=order_display,
         annot="auto",
         output_path=output_path,
         show=True,
-        pretty_labels=pretty_labels,
-        pretty_groups=pretty_groups,
-        show_values=True,
+        pretty_groups=pretty_groups_display,
         scale="linear",
         group_label_fontsize=16,
         scale_gamma=0.5,
         tick_label_fontsize=11,
-        annot_fontsize=6,
+        annot_fontsize=9,
+        percentages=True,
         cbar_pad=0.1,
+        cbar_fontsize=18,
     )
     print(f"Heatmap saved to {output_path}")
+
+    # Venn diagram: three English pronoun GRADIENDs (same labels as heatmap)
+    venn_pronoun_ids = [mid for mid in pronoun_ids if mid in ("pronoun_1SG_3PL", "pronoun_1SG_3SG", "pronoun_3SG_3PL")]
+    if len(venn_pronoun_ids) < 3:
+        venn_pronoun_ids = pronoun_ids[:3]
+    if len(venn_pronoun_ids) >= 3:
+        venn_models = {pretty_labels[mid]: models_for_heatmap[mid] for mid in venn_pronoun_ids}
+        venn_output = os.path.join(args.experiment_dir, "topk_overlap_venn_three_english_pronouns.pdf")
+        plot_topk_overlap_venn(
+            venn_models,
+            topk=topk,
+            part="decoder-weight",
+            output_path=venn_output,
+            show=True,
+        )
+        print(f"Venn plot (3 English pronouns) saved to {venn_output}")
+    else:
+        print("Skipping Venn plot: fewer than 3 pronoun GRADIENDs available.")
 
 
 if __name__ == "__main__":

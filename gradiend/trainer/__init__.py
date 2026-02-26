@@ -14,8 +14,8 @@ Core components:
     - create_model_with_gradiend: Factory for model creation
 """
 
-# Trainer
-from .trainer import Trainer
+# Trainer and reproducibility
+from .trainer import Trainer, set_seed
 
 # Load training stats from saved model directory
 from .core.stats import load_training_stats
@@ -49,6 +49,7 @@ from .factory import create_model_with_gradiend
 
 __all__ = [
     "Trainer",
+    "set_seed",
     "TrainerConfig",
     "load_training_stats",
     "train_core",

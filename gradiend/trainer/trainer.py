@@ -42,6 +42,29 @@ from gradiend.trainer.core.pruning import pre_prune as _pre_prune
 logger = get_logger(__name__)
 
 
+def set_seed(seed: int) -> None:
+    """
+    Set all RNG seeds and env vars for reproducible runs. Call at the very start of your
+    script (before creating the trainer or loading data) for best reproducibility.
+    The Trainer also calls this when TrainingArguments.seed is set.
+
+    Sets: Python random, numpy, PyTorch (CPU + CUDA), cuDNN deterministic, and
+    CUBLAS_WORKSPACE_CONFIG / OMP_NUM_THREADS / MKL_NUM_THREADS.
+    """
+    if not isinstance(seed, int):
+        raise TypeError(f"seed must be int, got {type(seed).__name__}")
+    _apply_seed(seed)
+
+
+def _apply_seed(seed_value: int) -> None:
+    """Set global RNG seeds and CUDA determinism for reproducible runs. Used by Trainer when TrainingArguments.seed is set."""
+    random.seed(seed_value)
+    np.random.seed(seed_value)
+    torch.manual_seed(seed_value)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed_value)
+
+
 class Trainer(FeatureLearningDefinition):
     """
     Abstract base trainer for GRADIEND models with HuggingFace-like API.
@@ -245,6 +268,13 @@ class Trainer(FeatureLearningDefinition):
         n_features: int = 1,
         evaluator_class: Optional[Type] = None,
     ):
+        if run_id is not None and not isinstance(run_id, str):
+            raise TypeError(f"run_id must be str or None, got {type(run_id).__name__}")
+        if not isinstance(n_features, int):
+            raise TypeError(f"n_features must be int, got {type(n_features).__name__}")
+        if n_features < 1:
+            raise ValueError(f"n_features must be >= 1, got {n_features}")
+
         super().__init__(target_classes, run_id, n_features)
         self._model_arg = model
         self._base_model_arg = model  # Original model; never changes (model_path does after train)
@@ -279,6 +309,13 @@ class Trainer(FeatureLearningDefinition):
 
         """
         return self._experiment_dir()
+
+    def __str__(self) -> str:
+        return (
+            f"Trainer(model={self._model_arg!r}, run_id={self.run_id!r}, "
+            f"pair={self.pair}, target_classes={self._target_classes}, "
+            f"experiment_dir={self.experiment_dir!r})"
+        )
 
     def to(self, device: Any) -> "Trainer":
         """Move loaded model to the given device (str or torch.device). No-op if model not loaded."""
@@ -344,6 +381,9 @@ class Trainer(FeatureLearningDefinition):
         Returns:
             ModelWithGradiend instance loaded from the specified directory.
         """
+        if not isinstance(load_directory, str):
+            raise TypeError(f"load_directory must be str, got {type(load_directory).__name__}")
+
         # Pass feature_definition so text models get pair/classes when loading
         kwargs.setdefault("feature_definition", self)
         kwargs.setdefault("require_gradiend_model", True)  # load_model expects GRADIEND checkpoint
@@ -364,13 +404,17 @@ class Trainer(FeatureLearningDefinition):
         Get the trainer's ModelWithGradiend instance.
 
         Returns the in-memory model when set (e.g. during training), otherwise loads from
-        load_directory or model_path. When use_cache=True (default), caches the loaded
-        instance for subsequent calls.
+        load_directory or model_path. The loaded instance is always cached in memory for
+        subsequent calls. After multi-seed training the cache is cleared so the next
+        get_model() loads from the selected best-seed directory and then caches that instance.
 
         To load a model from a different directory, use load_model() or pass load_directory=.
 
+        Note: use_cache (e.g. TrainingArguments.use_cache) applies only to disk/output
+        caches (skip when files exist); the in-memory model from get_model() is always cached.
+
         Args:
-            use_cache: If True, cache and reuse the instance after first load.
+            use_cache: Ignored; kept for API compatibility. Disk cache is controlled elsewhere.
             load_directory: If provided, load from this path (GRADIEND checkpoint expected).
             **kwargs: Passed to model_with_gradiend_cls.from_pretrained.
 
@@ -381,7 +425,6 @@ class Trainer(FeatureLearningDefinition):
         # Return in-memory model when set (e.g. during training), unless loading from a specific path
         if load_directory is None and self._model_instance is not None:
             return self._model_instance
-        use_cache = self._default_from_training_args(use_cache, "use_cache", fallback=False)
         # Pass definition so models get pair/classes when loading
         kwargs.setdefault("definition", self)
         if self._training_args is not None:
@@ -390,8 +433,8 @@ class Trainer(FeatureLearningDefinition):
                 kwargs.setdefault("trust_remote_code", getattr(self._training_args, "trust_remote_code", False))
         load_directory = load_directory if load_directory is not None else self.model_path
         model = super().create_model_with_gradiend(load_directory, **kwargs)
-        if use_cache:
-            self._model_instance = model
+        # Always cache in memory; use_cache elsewhere is for disk/output only
+        self._model_instance = model
         return model
 
     def pre_prune(
@@ -544,7 +587,12 @@ class Trainer(FeatureLearningDefinition):
             dtype=model_with_gradiend.gradiend.torch_dtype,
             device=model_with_gradiend.gradiend.device_encoder,
         )
-        dataloader = DataLoader(gradient_dataset, batch_size=1, shuffle=False)
+        dl_kwargs = {"batch_size": 1, "shuffle": False}
+        if getattr(config, "seed", None) is not None:
+            g = torch.Generator()
+            g.manual_seed(int(config.seed))
+            dl_kwargs["generator"] = g
+        dataloader = DataLoader(gradient_dataset, **dl_kwargs)
 
         eval_dataset = None
         if config.do_eval and config.eval_steps > 0:
@@ -581,7 +629,7 @@ class Trainer(FeatureLearningDefinition):
                     use_cache=False,
                 )
             config.evaluate_fn = _default_evaluate
-            logger.info(
+            logger.debug(
                 "Using default in-training evaluation (evaluator.evaluate_encoder on val data); "
                 "correlation and mean_by_class will be tracked."
             )
@@ -592,8 +640,22 @@ class Trainer(FeatureLearningDefinition):
             training_args=config,
             callbacks=callbacks,
         )
-        model_with_gradiend.save_pretrained(output_dir)
-        logger.info(f"Saved trained model to {output_dir}")
+        # core_train handles best-checkpoint selection. Do not overwrite with the
+        # in-memory final-step model when a selected model already exists at output_dir.
+        if getattr(config, "save_only_best", False) and has_saved_model(output_dir):
+            logger.info("Using best checkpoint selected during training at %s", output_dir)
+        else:
+            model_with_gradiend.save_pretrained(output_dir)
+            logger.info(f"Saved trained model to {output_dir}")
+
+        # Select model path for post-training usage:
+        # - save_only_best=True: best has been moved to output_dir by core_train
+        # - save_only_best=False: keep output_dir as final, but use output_dir_best when available
+        selected_output_dir = output_dir
+        best_output_dir = f"{output_dir}_best"
+        if not getattr(config, "save_only_best", False) and has_saved_model(best_output_dir):
+            selected_output_dir = best_output_dir
+            logger.info("Selected best checkpoint for post-training model state: %s", selected_output_dir)
         # Release GPU memory before next seed in multi-seed training
         if getattr(config, "max_seeds", 1) > 1:
             self._model_instance = None
@@ -601,7 +663,7 @@ class Trainer(FeatureLearningDefinition):
             gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
-        return output_dir
+        return selected_output_dir
 
     def train(
         self,
@@ -653,6 +715,13 @@ class Trainer(FeatureLearningDefinition):
         - a per-seed breakdown with training_score, eval_correlation, selection_score,
           convergence_metric_value, and convergence flags.
         """
+        if output_dir is not None and not isinstance(output_dir, str):
+            raise TypeError(f"output_dir must be str or None, got {type(output_dir).__name__}")
+
+        # Set env vars for reproducibility before any CUDA/BLAS use (PyTorch docs: set early)
+        os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+        os.environ.setdefault("OMP_NUM_THREADS", "1")
+        os.environ.setdefault("MKL_NUM_THREADS", "1")
         # Resolve model: use provided model or fall back to initialization model
         model = model or self._model_arg
         
@@ -669,6 +738,10 @@ class Trainer(FeatureLearningDefinition):
         else:
             args = TrainingArguments()
         args.__post_init__()  # validate e.g. not both supervised_encoder and supervised_decoder
+
+        # Apply seed early so data loading, model init, and training are deterministic when seed is set
+        if getattr(args, "seed", None) is not None:
+            _apply_seed(int(args.seed))
         
         # Support output_dir in training_args_overrides
         if output_dir is None and "output_dir" in training_args_overrides:
@@ -703,9 +776,7 @@ class Trainer(FeatureLearningDefinition):
 
         self._last_train_used_cache = False
         def _set_seed(seed_value: int) -> None:
-            torch.manual_seed(seed_value)
-            random.seed(seed_value)
-            np.random.seed(seed_value)
+            _apply_seed(seed_value)
 
         def _cleanup_seed_model_files(seed_model_dir: str) -> None:
             if not os.path.isdir(seed_model_dir):
@@ -860,6 +931,7 @@ class Trainer(FeatureLearningDefinition):
                 # Optionally skip expensive full validation eval:
                 # - never needed for loss-based convergence (convergent_metric == "loss")
                 # - can be skipped when training_score (score) is clearly below threshold
+                # - skip when we already have a convergent seed (no need to recompute encoder analysis)
                 run_full_eval = convergent_metric != "loss"
                 if (
                     run_full_eval
@@ -867,6 +939,8 @@ class Trainer(FeatureLearningDefinition):
                     and isinstance(score, (int, float))
                     and score < threshold
                 ):
+                    run_full_eval = False
+                if run_full_eval and seed_value != seeds[0] and convergent_count >= 1:
                     run_full_eval = False
                 try:
                     self._model_arg = out_path
@@ -915,7 +989,15 @@ class Trainer(FeatureLearningDefinition):
                             convergent_count += 1
                             converged = True
                     else:
-                        if metric_val >= threshold:
+                        # When convergent_mean_by_class_threshold is set, require abs_mean_by_type['training'] >= that value.
+                        # When it is None, or when the metric was not recorded (abs_training_mean is None), use only correlation.
+                        abs_training_mean = (stats.get("abs_mean_by_type") or {}).get("training")
+                        mean_ok = (
+                            args.convergent_mean_by_class_threshold is None
+                            or abs_training_mean is None
+                            or (isinstance(abs_training_mean, (int, float)) and abs_training_mean >= args.convergent_mean_by_class_threshold)
+                        )
+                        if metric_val >= threshold and mean_ok:
                             convergent_count += 1
                             converged = True
 
@@ -933,6 +1015,29 @@ class Trainer(FeatureLearningDefinition):
                         "threshold": threshold,
                         "converged": converged,
                     }
+                )
+                # Per-seed summary: path, converged, reason, convergent count / min required, max seeds
+                conv_status = "Yes" if converged else "No"
+                reason = ""
+                if convergent_metric == "loss":
+                    reason = f"loss={metric_val}" if isinstance(metric_val, (int, float)) else "no metric"
+                else:
+                    reason = f"{convergent_metric}={metric_val:.4f}" if isinstance(metric_val, (int, float)) else "no metric"
+                    if not converged and isinstance(metric_val, (int, float)) and threshold is not None:
+                        if metric_val < threshold:
+                            reason += f" (below threshold {threshold:.4f})"
+                        else:
+                            reason += " (mean-by-class criterion not met)"
+                min_req = min_convergent if min_convergent is not None else "—"
+                logger.info(
+                    "Finished seed %s (%s). Converged: %s (%s). Convergent: %s / min_required: %s, max_seeds: %s.",
+                    seed_value,
+                    out_path,
+                    conv_status,
+                    reason,
+                    convergent_count,
+                    min_req,
+                    args.max_seeds,
                 )
 
                 if min_convergent is not None and convergent_count >= min_convergent:
@@ -982,7 +1087,12 @@ class Trainer(FeatureLearningDefinition):
             shutil.copytree(best_path, output_dir)
             if not is_under_temp_dir(output_dir):
                 logger.info("Selected best seed=%s -> %s", best_seed, output_dir)
-            
+
+            # Clear cached model so the next get_model() loads from output_dir (the selected best seed).
+            # That first load is then cached; subsequent get_model() calls reuse the same instance.
+            self._model_arg = output_dir
+            self._model_instance = None
+
             # Check convergence and warn if non-convergent
             if convergent_count == 0 and min_convergent is not None and min_convergent > 0:
                 logger.warning(
@@ -993,7 +1103,7 @@ class Trainer(FeatureLearningDefinition):
                     convergent_metric,
                     threshold if threshold is not None else 0.0,
                 )
-            
+
             # Update training.json in output_dir with convergence info
             convergence_info = {
                 "converged": convergent_count > 0 if min_convergent is not None and min_convergent > 0 else True,
@@ -1021,9 +1131,6 @@ class Trainer(FeatureLearningDefinition):
             if not args.keep_seed_runs:
                 for seed_value, seed_path in seed_results.items():
                     _cleanup_seed_model_files(seed_path)
-
-            self._model_arg = output_dir
-            self._model_instance = None
 
             # Auto-save convergence plot when experiment_dir is set
             if exp_dir:
@@ -1068,7 +1175,12 @@ class Trainer(FeatureLearningDefinition):
             callbacks=callbacks,
         )
         self._model_arg = out_path
-        self._model_instance = None  # invalidate so get_model() loads from new path
+        # Keep selected model in memory so immediate evaluation uses the chosen checkpoint.
+        try:
+            self._model_instance = self.get_model(load_directory=out_path, use_cache=False)
+        except Exception as e:
+            logger.warning("Could not load selected model into memory from %s: %s", out_path, e)
+            self._model_instance = None
 
         if getattr(args, "post_prune_config", None) is not None:
             logger.info("Post-prune config set: running post-prune after training ...")
@@ -1106,6 +1218,10 @@ class Trainer(FeatureLearningDefinition):
 
     def evaluate(self, *, kwargs_encoder: dict = None, kwargs_decoder: dict = None, **kwargs: Any) -> Dict[str, Any]:
         """Run encoder and decoder evaluation; return combined dict."""
+        if kwargs_encoder is not None and not isinstance(kwargs_encoder, dict):
+            raise TypeError(f"kwargs_encoder must be dict or None, got {type(kwargs_encoder).__name__}")
+        if kwargs_decoder is not None and not isinstance(kwargs_decoder, dict):
+            raise TypeError(f"kwargs_decoder must be dict or None, got {type(kwargs_decoder).__name__}")
         return self.evaluator.evaluate(kwargs_encoder=kwargs_encoder, kwargs_decoder=kwargs_decoder, **kwargs)
 
 
@@ -1182,6 +1298,25 @@ class Trainer(FeatureLearningDefinition):
             id, strengthen, lms, base_lms. The dict always includes "grid", and when plot=True also
             "plot_paths" and/or "plot_path".
         """
+        if not isinstance(increase_target_probabilities, bool):
+            raise TypeError(f"increase_target_probabilities must be bool, got {type(increase_target_probabilities).__name__}")
+        if not isinstance(plot, bool):
+            raise TypeError(f"plot must be bool, got {type(plot).__name__}")
+        if show is not None and not isinstance(show, bool):
+            raise TypeError(f"show must be bool or None, got {type(show).__name__}")
+        if max_size_training_like is not None and not isinstance(max_size_training_like, int):
+            raise TypeError(f"max_size_training_like must be int or None, got {type(max_size_training_like).__name__}")
+        if max_size_training_like is not None and max_size_training_like < 0:
+            raise ValueError(f"max_size_training_like must be >= 0, got {max_size_training_like}")
+        if max_size_neutral is not None and not isinstance(max_size_neutral, int):
+            raise TypeError(f"max_size_neutral must be int or None, got {type(max_size_neutral).__name__}")
+        if max_size_neutral is not None and max_size_neutral < 0:
+            raise ValueError(f"max_size_neutral must be >= 0, got {max_size_neutral}")
+        if eval_batch_size is not None and not isinstance(eval_batch_size, int):
+            raise TypeError(f"eval_batch_size must be int or None, got {type(eval_batch_size).__name__}")
+        if eval_batch_size is not None and eval_batch_size < 1:
+            raise ValueError(f"eval_batch_size must be >= 1, got {eval_batch_size}")
+
         use_cache = self._default_from_training_args(use_cache, "use_cache", fallback=False)
         max_size_training_like = self._default_from_training_args(
             max_size_training_like, "decoder_eval_max_size_training_like"
@@ -1249,7 +1384,9 @@ class Trainer(FeatureLearningDefinition):
                 If None, uses use_cache from training args (default: False).
             return_df: If True, include encoder_df (full DataFrame with type column) in result.
             plot: If True, create encoder distribution plot from analyzed data.
-            plot_kwargs: Optional kwargs passed to plot_encoder_distributions when plot=True.
+            plot_kwargs: Optional dict of options forwarded to plot_encoder_distributions when
+                plot=True. E.g. plot_kwargs=dict(target_and_neutral_only=True, show=False).
+                Any argument accepted by plot_encoder_distributions can be passed here.
             is_decoder_only_model: Whether the model is decoder-only (causal LM).
                 If None, inferred from the model.
             pre_load_gradients: If True, pre-load cached gradients when available.
@@ -1262,6 +1399,19 @@ class Trainer(FeatureLearningDefinition):
             optionally neutral_mean_by_type, mean_by_feature_class, label_value_to_class_name.
             If return_df=True, includes "encoder_df" key.
         """
+        if not isinstance(split, str):
+            raise TypeError(f"split must be str, got {type(split).__name__}")
+        if max_size is not None and not isinstance(max_size, int):
+            raise TypeError(f"max_size must be int or None, got {type(max_size).__name__}")
+        if max_size is not None and max_size < 0:
+            raise ValueError(f"max_size must be >= 0, got {max_size}")
+        if not isinstance(return_df, bool):
+            raise TypeError(f"return_df must be bool, got {type(return_df).__name__}")
+        if not isinstance(plot, bool):
+            raise TypeError(f"plot must be bool, got {type(plot).__name__}")
+        if use_cache is not None and not isinstance(use_cache, bool):
+            raise TypeError(f"use_cache must be bool or None, got {type(use_cache).__name__}")
+
         resolved_encoder_df = _resolve_encoder_df(encoder_df)
         if resolved_encoder_df is not None:
             encoder_df_out = resolved_encoder_df

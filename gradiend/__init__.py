@@ -17,14 +17,19 @@ Sub-packages (use when you need modality-specific or internal APIs):
     - gradiend.trainer: Trainer, PrePruneConfig, PostPruneConfig, callbacks, etc.
     - gradiend.trainer.text: TextModelWithGradiend, TextBatchedDataset, etc.
     - gradiend.evaluator: EncoderEvaluator, DecoderEvaluator, Evaluator
-    - gradiend.visualizer: Visualizer, plot_* functions
+    - gradiend.visualizer: Visualizer, plot_encoder_distributions, plot_topk_overlap_heatmap, plot_topk_overlap_venn, etc.
     - gradiend.data: same as top-level data API (alternative import path)
 
 For experimental features (analysis, plotting, LaTeX export), install with:
     pip install gradiend[recommended]
 """
 
-__version__ = "1.0.0"
+from importlib.metadata import PackageNotFoundError, version
+
+try:
+    __version__ = version("gradiend")
+except PackageNotFoundError:
+    __version__ = "0.1.0"  # editable install before package is installed
 
 # Core model classes
 from gradiend.model import GradiendModel, ParamMappedGradiendModel, ModelWithGradiend
@@ -45,9 +50,16 @@ from gradiend.trainer.text.prediction.trainer import TextPredictionTrainer, Text
 # Logging
 from gradiend.util.logging import setup_logging, get_logger
 
+# Visualization (top-k overlap plots)
+from gradiend.visualizer import (
+    plot_topk_overlap_heatmap,
+    plot_topk_overlap_venn,
+)
+
 # Training
 from gradiend.trainer import (
     load_training_stats,
+    set_seed,
     TrainingArguments,
     TrainerConfig,
     GradientTrainingDataset,
@@ -80,8 +92,12 @@ __all__ = [
     "get_logger",
     # Training
     "load_training_stats",
+    "set_seed",
     "TrainingArguments",
     "GradientTrainingDataset",
     "TextGradientTrainingDataset",
     "create_model_with_gradiend",
+    # Visualization
+    "plot_topk_overlap_heatmap",
+    "plot_topk_overlap_venn",
 ]

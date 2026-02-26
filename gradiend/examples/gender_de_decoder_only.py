@@ -13,14 +13,14 @@ args = TrainingArguments(
     experiment_dir="runs/examples/german_de_decoder_only",
     train_batch_size=8,
     encoder_eval_max_size=10,
-    train_max_size=500,
     decoder_eval_max_size_training_like=100,
     decoder_eval_max_size_neutral=100,
+    train_max_size=500,
     eval_steps=100,
-    max_steps=1000,
+    max_steps=500,
     source="alternative",
     target="diff",
-    learning_rate=1e-3,
+    learning_rate=1e-4,
     add_identity_for_other_classes=True,
     use_cache=True,
     pre_prune_config=PrePruneConfig(n_samples=16, topk=0.01),
@@ -51,15 +51,16 @@ trainer.train()
 
 max_size = 100
 enc_eval = trainer.evaluate_encoder(max_size=max_size, return_df=True)
-enc_df = enc_eval.get("encoder_df")
-if enc_df is not None:
-    trainer.plot_encoder_distributions(encoder_df=enc_df)
+enc_df = enc_eval.pop("encoder_df")
+trainer.plot_encoder_distributions(encoder_df=enc_df)
 print(f"  encoder metrics: {enc_eval}")
 
 # 3) Decoder evaluation uses CLM (base decoder) only when base is DecoderModelWithMLMHead
 print("2) Decoder evaluation...")
 dec = trainer.evaluate_decoder()
-summary = dec.get("summary", {})
+# Decoder result is flat: class/metric keys at top level plus "grid" (and optionally plot_paths)
+_reserved = {"grid", "plot_path", "plot_paths"}
+summary = {k: v for k, v in dec.items() if k not in _reserved}
 for key in list(summary.keys())[:5]:
     if isinstance(summary[key], dict):
         b = summary[key]

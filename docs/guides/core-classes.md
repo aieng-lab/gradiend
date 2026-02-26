@@ -337,19 +337,23 @@ modified_model = model.rewrite_base_model(
 
 ### `TextPreprocessConfig`
 
-**Purpose:** Configure text preprocessing (lowercasing, tokenization, etc.).
+**Purpose:** Configure text preprocessing for data creation: split into sentences, filter by length or characters.
 
 **When to use:**
-- Normalizing text before filtering/masking
-- Handling case sensitivity
-- Configuring tokenization options
+- Splitting long texts (e.g. articles) into sentences before filtering
+- Dropping segments that are too short or too long (`min_chars`, `max_chars`)
+- Excluding segments containing certain characters (`exclude_chars`) or via a custom filter
 
 **Key attributes:**
-- `lowercase` — Whether to lowercase text
-- `remove_punctuation` — Whether to remove punctuation
-- `normalize_whitespace` — Whether to normalize whitespace
+- `split_to_sentences` — If `True`, split on sentences (regex or spaCy). Default `False`.
+- `min_chars` — Drop segments shorter than this. Default `None` (no minimum).
+- `max_chars` — Drop segments longer than this. Default `None` (no maximum).
+- `exclude_chars` — Drop segments containing any of these characters. Default `None`.
+- `custom_filter` — Optional callable `(str) -> bool`; keep only segments where it returns `True`.
 
-**See also:** [Data generation tutorial](../tutorials/data-generation.md)
+**Default:** There is no default instance. In `TextPredictionDataCreator`, `preprocess=None` (default) means no preprocessing: texts are used as-is. Pass a `TextPreprocessConfig` instance when you want sentence splitting or length/char filtering.
+
+**See also:** [Data generation tutorial](../tutorials/data-generation.md), [API: TextPreprocessConfig](../api/data/TextPreprocessConfig.md).
 
 ---
 

@@ -494,9 +494,9 @@ class TestModelWithGradiend:
         # gradient_creator is a @property that returns _gradient_creator
         # We need to set _gradient_creator to a callable that handles single-argument calls
         # Use object.__setattr__ to bypass PyTorch's nn.Module attribute registration
-        def gradient_creator_callable(text):
+        def gradient_creator_callable(text, target_device=None, **kwargs):
             """Callable wrapper for gradient_creator(text) calls from pre_prune."""
-            # Pre_prune calls with just text, so add a default label
+            # Pre_prune calls with text and target_device=..., so add a default label
             return mock_create_gradients(text, label="default_label", return_dict=False)
         
         # Set _gradient_creator (the underlying attribute) to our callable wrapper

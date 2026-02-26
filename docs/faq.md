@@ -36,26 +36,13 @@ See [TrainingArguments](api/training/TrainingArguments.md) and the [start here](
 
 The GRADIEND model itself holds 3*n+1 parameters, where n is the number of (considered) parameters of the base model. During training, due to the optimizer and the large input parameter space (n), we require a multiple of the base model's memory.
 To reduce memory usage, you can:
-- Apply pre-pruning (typically, a top-k of 0.01 (i.e, retaining 1% of the base model's parameters) still yields full GRADIEND performance and reduces GRADIEND size significantly.
+
+- Apply pre-pruning (typically, a top-k of 0.01 (i.e, retaining 1% of the base model's parameters) still yields full GRADIEND performance and reduces GRADIEND size significantly.)
 - Use a smaller base model (e.g. `bert-base-uncased` instead of `bert-large-uncased`).
 - Reduce the batch size (`train_batch_size`) and/or sequence length of your data.
 - Use mixed precision training (`TrainingArguments.torch_dtype = torch.bfloat16`), which typically reduces memory usage by about half with minimal impact on convergence. Note: this requires a compatible GPU (e.g. NVIDIA Ampere or later for bfloat16).
-- Use multiple GPUs: device placement is automatic based on GPU count. See [Device placement](#device-placement) below.
-
-## Device placement
-
-Device placement is automatic based on **GPU count** (no model-size heuristic):
-
-| GPUs | Placement |
-|------|-----------|
-| 1 | encoder, decoder, base model all on `cuda:0` |
-| 2 | encoder + base model on `cuda:0`, decoder on `cuda:1` |
-| ≥3 | encoder on `cuda:0`, decoder on `cuda:1`, base model on `cuda:2` |
-| 0 | all on CPU (automatic when no GPUs) |
-
-**CPU mode**: To force CPU when GPUs are available, pass `device="cpu"` when creating the model (e.g. via `ModelWithGradiend.from_pretrained(..., device="cpu")` or the trainer's model-loading kwargs).
-
-**Override individual devices**: Use `device_encoder`, `device_decoder`, `device_base_model` to override specific components.
+- Use multiple GPUs: device placement is automatic based on GPU count. See [Device placement](guides/training-arguments.md#device-placement) in the training arguments guide.
+- Consider fewer base model parameters for GRADIEND training (e.g., only paramerters in the last few layers) by using `TrainingArguments.params`, see [TrainingArguments](guides/training-arguments.md#model-parameters-which-layers-to-use)) for details.
 
 ## I have a different issue
 

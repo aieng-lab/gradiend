@@ -39,7 +39,8 @@ class AutoModelForLM(nn.Module):
         """
         hf_dtype = kwargs.get("torch_dtype", kwargs.get("dtype", torch_dtype))
         rest = {k: v for k, v in kwargs.items() if k not in ("torch_dtype", "dtype")}
-        load_kwargs = {"trust_remote_code": trust_remote_code, "torch_dtype": hf_dtype, **rest}
+        # Prefer dtype (HF standard); torch_dtype is deprecated in transformers
+        load_kwargs = {"trust_remote_code": trust_remote_code, "dtype": hf_dtype, **rest}
         try:
             model = AutoModelForMaskedLM.from_pretrained(name_or_path, **load_kwargs)
         except Exception:

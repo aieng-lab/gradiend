@@ -35,10 +35,15 @@ def _plot_all_target_classes(
     run_id: Optional[str] = None,
     show: Optional[bool] = None,
     increase_target_probabilities: bool = True,
+    plot_keys_override: Optional[List[str]] = None,
 ) -> List[str]:
     """Plot probability shifts once per target class for the given direction. Returns list of saved plot paths.
-    When show is None and plot was requested, defaults to True so the plot is displayed."""
-    if increase_target_probabilities:
+    When show is None and plot was requested, defaults to True so the plot is displayed.
+    When plot_keys_override is set (e.g. when user passed target_class), only those keys are plotted,
+    so we do not plot for internal result keys (e.g. 3PL when strengthening 3SG)."""
+    if plot_keys_override is not None:
+        plot_keys = [k for k in plot_keys_override if k in summary]
+    elif increase_target_probabilities:
         plot_keys = [k for k in summary.keys() if not k.endswith("_weaken")]
     else:
         plot_keys = [k for k in summary.keys() if k.endswith("_weaken")]
@@ -441,7 +446,7 @@ class DecoderEvaluator:
               - 'grid': candidate id -> full evaluation results.
               - When plot=True, also 'plot_paths' and 'plot_path'.
         """
-        logger.info(f"Starting decoder evaluation with part={part}, model={model_with_gradiend}")
+        logger.info(f"Starting decoder evaluation with part={part}")
         use_cache = trainer._default_from_training_args(use_cache, "use_cache", fallback=False)
 
         if selector is None:
@@ -466,12 +471,21 @@ class DecoderEvaluator:
         else:
             classes_to_eval = target_classes or []
 
+        tcs = set(target_classes or [])
         base_metrics = summary_metrics if summary_metrics is not None else classes_to_eval
         metrics_for_summary = list(base_metrics) if base_metrics else list(classes_to_eval or [])
+        # Strengthen: we maximize P(target_class) on the *other* class's dataset (e.g. P(3SG) on 3PL data).
+        # The trainer keys probs by dataset class (which data we ran on), so the raw result key is the
+        # other class (e.g. "3PL"). We expose the result under the target class the user asked for
+        # (e.g. "3SG") and hide the internal key so the API matches user intent.
+        summary_key_aliases: Optional[Dict[str, str]] = None
         if summary_metrics is None and classes_to_eval:
             if increase_target_probabilities:
-                # Strengthen only: keys "3SG", "3PL"
-                metrics_for_summary = list(classes_to_eval)
+                required_for_strengthen = {d for c in classes_to_eval for d in (tcs - {c})}
+                metrics_for_summary = list(required_for_strengthen)
+                summary_key_aliases = {
+                    c: (tcs - {c}).pop() for c in classes_to_eval if len(tcs - {c}) == 1
+                }
             else:
                 # Weaken only: keys "3SG_weaken", "3PL_weaken"
                 metrics_for_summary = [f"{c}_weaken" for c in classes_to_eval]
@@ -519,7 +533,7 @@ class DecoderEvaluator:
         model_id = os.path.basename(path) if path and str(path).startswith("results/models") else path
 
         if lrs is None:
-            lrs = [1e3, 1e2, 1e1, 1e0, 1e-1, 1e-2, 1e-3, 1e-4, 1e-5]
+            lrs = [1e2, 3e2, 1e1, 3e0, 1e0, 3e-1, 1e-1, 3e-2, 1e-2, 3e-3, 1e-3]
 
         experiment_dir = trainer.experiment_dir
         cache_file = resolve_decoder_grid_cache_path(experiment_dir, explicit_path=output_path)
@@ -532,7 +546,7 @@ class DecoderEvaluator:
             os.makedirs(os.path.dirname(cache_file), exist_ok=True)
 
         pairs = [(ff, lr) for ff in feature_factors for lr in lrs]
-        random.shuffle(pairs)
+        pairs = sorted(pairs)  # deterministic order for reproducible decoder evaluation
         expected_results = len(pairs) + 1
 
         relevant_results: Dict[Any, Dict[str, Any]] = {}
@@ -565,6 +579,14 @@ class DecoderEvaluator:
                             empty_default_id=summary_empty_default_id,
                             class_to_ff=class_to_ff,
                         )
+                        if summary_key_aliases:
+                            for target_key, result_key in summary_key_aliases.items():
+                                if result_key in summary:
+                                    summary[target_key] = summary[result_key]
+                            # Only remove internal result keys; keep keys that are also target class keys (multi-class case)
+                            for k in set(summary_key_aliases.values()):
+                                if k not in summary_key_aliases:
+                                    summary.pop(k, None)
                         if not plot:
                             return {**summary, "grid": relevant_results}
                         # plot=True: get full df and run fill-in + plot
@@ -639,6 +661,7 @@ class DecoderEvaluator:
                                 logger.warning("Error writing decoder cache %s: %s", cache_file, e)
                         plot_paths: List[str] = []
                         if hasattr(trainer, "plot_probability_shifts"):
+                            plot_keys_override = list(summary_key_aliases.keys()) if summary_key_aliases else None
                             plot_paths = _plot_all_target_classes(
                                 trainer,
                                 summary,
@@ -647,6 +670,7 @@ class DecoderEvaluator:
                                 run_id=run_id,
                                 show=show if show is not None else True,
                                 increase_target_probabilities=increase_target_probabilities,
+                                plot_keys_override=plot_keys_override,
                             )
                         out = {**summary, "grid": relevant_results}
                         if plot_paths:
@@ -681,16 +705,15 @@ class DecoderEvaluator:
             )
 
         # Restrict to datasets required for the requested direction (efficiency).
+        # Strengthen: maximize P(target) on *other* class's dataset → need other's data; probs key = dataset class.
+        # Weaken: maximize (1 - P(class) on class's data) → need class's data.
         full_training_like_df = training_like_df
         dataset_class_col = "label_class" if "label_class" in getattr(training_like_df, "columns", []) else "factual_id"
-        tcs = set(target_classes or [])
         if summary_metrics is not None:
             required_datasets = tcs
         elif increase_target_probabilities:
-            # Strengthen: need P(class) on *other* class datasets
             required_datasets = {d for c in classes_to_eval for d in (tcs - {c})}
         else:
-            # Weaken: need P(class) on class's own dataset
             required_datasets = set(classes_to_eval)
         if dataset_class_col in getattr(training_like_df, "columns", []) and required_datasets:
             training_like_df_selection = full_training_like_df[
@@ -771,6 +794,14 @@ class DecoderEvaluator:
             empty_default_id=summary_empty_default_id,
             class_to_ff=class_to_ff,
         )
+        if summary_key_aliases:
+            for target_key, result_key in summary_key_aliases.items():
+                if result_key in summary:
+                    summary[target_key] = summary[result_key]
+            # Only remove internal result keys; keep keys that are also target class keys (multi-class case)
+            for k in set(summary_key_aliases.values()):
+                if k not in summary_key_aliases:
+                    summary.pop(k, None)
 
         plot_paths: List[str] = []
         # If plot requested, fill missing probs_by_dataset (incremental cache) then plot.
@@ -833,6 +864,7 @@ class DecoderEvaluator:
                 except Exception as e:
                     logger.warning("Error writing decoder cache %s: %s", cache_file, e)
             if hasattr(trainer, "plot_probability_shifts"):
+                plot_keys_override = list(summary_key_aliases.keys()) if summary_key_aliases else None
                 plot_paths = _plot_all_target_classes(
                     trainer,
                     summary,
@@ -841,6 +873,7 @@ class DecoderEvaluator:
                     run_id=run_id,
                     show=show if show is not None else True,
                     increase_target_probabilities=increase_target_probabilities,
+                    plot_keys_override=plot_keys_override,
                 )
 
         if cache_file and not plot:

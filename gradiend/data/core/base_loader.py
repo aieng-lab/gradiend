@@ -46,6 +46,19 @@ def resolve_base_data(
     Returns:
         List of strings (texts).
     """
+    if not isinstance(text_column, str):
+        raise TypeError(f"text_column must be str, got {type(text_column).__name__}")
+    if max_size is not None and not isinstance(max_size, int):
+        raise TypeError(f"max_size must be int or None, got {type(max_size).__name__}")
+    if not isinstance(split, str):
+        raise TypeError(f"split must be str, got {type(split).__name__}")
+    if not isinstance(seed, int):
+        raise TypeError(f"seed must be int, got {type(seed).__name__}")
+    if hf_config is not None and not isinstance(hf_config, str):
+        raise TypeError(f"hf_config must be str or None, got {type(hf_config).__name__}")
+    if not isinstance(trust_remote_code, bool):
+        raise TypeError(f"trust_remote_code must be bool, got {type(trust_remote_code).__name__}")
+
     texts: List[str]
     if isinstance(source, list):
         if not all(isinstance(x, str) for x in source):

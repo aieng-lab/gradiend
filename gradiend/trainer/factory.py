@@ -49,6 +49,17 @@ def create_model_with_gradiend(
         from gradiend.model import TextModelWithGradiend
         model = create_model_with_gradiend("model-base-cased", model_class=TextModelWithGradiend)
     """
+    if param_map is not None and not isinstance(param_map, list):
+        raise TypeError(f"param_map must be a list or None, got {type(param_map).__name__}")
+    if not isinstance(activation_encoder, str):
+        raise TypeError(f"activation_encoder must be str, got {type(activation_encoder).__name__}")
+    if not isinstance(activation_decoder, str):
+        raise TypeError(f"activation_decoder must be str, got {type(activation_decoder).__name__}")
+    if not isinstance(bias_decoder, bool):
+        raise TypeError(f"bias_decoder must be bool, got {type(bias_decoder).__name__}")
+    if not isinstance(latent_dim, int):
+        raise TypeError(f"latent_dim must be int, got {type(latent_dim).__name__}")
+
     # If model is already a ModelWithGradiend instance, return it
     if isinstance(model, ModelWithGradiend):
         return model

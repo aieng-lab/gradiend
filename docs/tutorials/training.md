@@ -2,6 +2,13 @@
 
 This tutorial explains how to train a GRADIEND model with `TextPredictionTrainer`: the main concepts, usage, what gets saved, and how to inspect results. You should have data ready (e.g. from [Data generation](data-generation.md)) before running the trainer.
 
+!!! tip "Optional dependency: plotting"
+    The convergence plot (`plot_training_convergence()`) and other training-related plots require the **plot** extra. If you did not install it with GRADIEND, install it with:
+
+    ```bash
+    pip install gradiend[plot]
+    ```
+
 ---
 
 ## Overview
@@ -72,7 +79,7 @@ Use `use_cache=True` when iterating on analysis or plots; use `False` when you w
 
 ### Pruning
 
-By default, a GRADIEND model is trained over all core base model parameters (i.e., all model parameters except for the final prediction layers, like MLM head). 
+By default, a GRADIEND model is trained over all core base model parameters (i.e., all model parameters except for the final prediction layers, like MLM head). To use only specific layers (e.g. first two encoder layers), set **`TrainingArguments.params`** to a list of parameter names or wildcards (e.g. `params=["bert.encoder.layer.0.*", "bert.encoder.layer.1.*"]`). See [Training arguments: Model parameters (which layers to use)](../guides/training-arguments.md#model-parameters-which-layers-to-use) for details. 
 However, this means that the default GRADIEND model has about three times as many parameters as the base model. 
 This is not only computationally exhaustive (OOM GPU error), but also requires substantial disk space for checkpoints.
 At the same time, many of these parameters are not important for the feature being learnt and can be pruned away without hurting performance.
@@ -221,7 +228,8 @@ For more detail, see [Core classes](../guides/core-classes.md) and the [API refe
 ## Next steps
 
 - **[Example Code](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/gender_de_detailed.py)** — See an example of training several GRADIENDs for the German Article paradigm, and plotting venn diagrams and heatmap.
-- **[Tutorial: Evaluation (intra-model)](evaluation-intra-model.md)** — Encoder and decoder evaluation, selecting the changed model.
+- **[Tutorial: Evaluation (intra-model)](evaluation-intra-model.md)** — Encoder and decoder evaluation, decoder config selection.
+- **[Tutorial: Model Rewrite](model-rewrite.md)** — Apply decoder-selected rewrites and save changed checkpoints.
 - **[Tutorial: Evaluation (inter-model)](evaluation-inter-model.md)** — Comparing multiple runs, i.e., different target classes (top-k overlap, heatmaps).
 
 ---

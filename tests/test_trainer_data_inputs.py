@@ -107,6 +107,22 @@ class TestTrainerDataAsDict:
         assert set(trainer._all_classes) == {"3SG", "3PL"}
         assert UNIFIED_FACTUAL_CLASS in trainer._combined_data.columns
 
+    def test_target_classes_not_in_data_raises_early(self):
+        """When target_classes include a class not in the data, raise a clear ValueError before building unified data."""
+        class_dfs = _per_class_dict()
+        config = TextPredictionConfig(
+            data=class_dfs,
+            target_classes=["3SG", "NonExistent"],
+            use_class_names_as_columns=True,
+        )
+        trainer = TextPredictionTrainer(model="bert-base-uncased", config=config)
+        with pytest.raises(ValueError) as exc_info:
+            trainer._ensure_data()
+        assert "target_classes" in str(exc_info.value)
+        assert "NonExistent" in str(exc_info.value)
+        assert "not present" in str(exc_info.value).lower() or "not in" in str(exc_info.value).lower()
+        assert "3SG" in str(exc_info.value) or "3PL" in str(exc_info.value)
+
     def test_per_class_dict_without_target_classes_infers_from_data_and_run_id_none(self):
         """With data=dict and no explicit target_classes or run_id, target_classes are inferred and decoder eval targets can be inferred."""
         class_dfs = _per_class_dict()

@@ -128,6 +128,33 @@ class TextPredictionDataCreator:
             output_format: "csv" (default), "parquet", or "hf" (HuggingFace datasets; per_class saves as subsets).
                 "hf" requires the datasets library; falls back to csv with a warning if not installed.
         """
+        if not isinstance(text_column, str):
+            raise TypeError(f"text_column must be str, got {type(text_column).__name__}")
+        if base_max_size is not None and not isinstance(base_max_size, int):
+            raise TypeError(f"base_max_size must be int or None, got {type(base_max_size).__name__}")
+        if not isinstance(split, str):
+            raise TypeError(f"split must be str, got {type(split).__name__}")
+        if hf_config is not None and not isinstance(hf_config, str):
+            raise TypeError(f"hf_config must be str or None, got {type(hf_config).__name__}")
+        if not isinstance(trust_remote_code, bool):
+            raise TypeError(f"trust_remote_code must be bool, got {type(trust_remote_code).__name__}")
+        if spacy_model is not None and not isinstance(spacy_model, str):
+            raise TypeError(f"spacy_model must be str or None, got {type(spacy_model).__name__}")
+        if not isinstance(seed, int):
+            raise TypeError(f"seed must be int, got {type(seed).__name__}")
+        if not isinstance(download_if_missing, bool):
+            raise TypeError(f"download_if_missing must be bool, got {type(download_if_missing).__name__}")
+        if output_dir is not None and not isinstance(output_dir, str):
+            raise TypeError(f"output_dir must be str or None, got {type(output_dir).__name__}")
+        if not isinstance(training_basename, str):
+            raise TypeError(f"training_basename must be str, got {type(training_basename).__name__}")
+        if not isinstance(neutral_basename, str):
+            raise TypeError(f"neutral_basename must be str, got {type(neutral_basename).__name__}")
+        if not isinstance(output_format, str):
+            raise TypeError(f"output_format must be str, got {type(output_format).__name__}")
+        if output_format not in ("csv", "parquet", "hf"):
+            raise TypeError(f"output_format must be 'csv', 'parquet', or 'hf', got {output_format!r}")
+
         self.base_data = base_data
         self.text_column = text_column
         self.base_max_size = base_max_size
@@ -544,28 +571,31 @@ def _filter_neutral(
     excluded_count = 0
     total_count = 0
     it = iter(sentences)
-    pbar = tqdm(it, desc="Neutral filter", unit=" sent", leave=True, position=0, dynamic_ncols=True)
+    pbar = tqdm(
+        it, desc="Neutral filter", unit=" sent", leave=True, position=0, dynamic_ncols=True,
+        mininterval=2.0,
+    )
     for sent in pbar:
         total_count += 1
         if word_pattern and word_pattern.search(sent):
             excluded_count += 1
-            pbar.set_postfix_str(f"kept={len(out)} | excluded={excluded_count}", refresh=True)
+            pbar.set_postfix_str(f"kept={len(out)} | excluded={excluded_count}", refresh=False)
             continue
         if nlp is not None and specs:
             doc = nlp(sent)
             for token in doc:
                 if any(token_matches_tags(token, s) for s in specs):
                     excluded_count += 1
-                    pbar.set_postfix_str(f"kept={len(out)} | excluded={excluded_count}", refresh=True)
+                    pbar.set_postfix_str(f"kept={len(out)} | excluded={excluded_count}", refresh=False)
                     break
             else:
                 out.append(sent)
-                pbar.set_postfix_str(f"kept={len(out)} | excluded={excluded_count}", refresh=True)
+                pbar.set_postfix_str(f"kept={len(out)} | excluded={excluded_count}", refresh=False)
                 if max_size is not None and len(out) >= max_size:
                     break
         else:
             out.append(sent)
-            pbar.set_postfix_str(f"kept={len(out)} | excluded={excluded_count}", refresh=True)
+            pbar.set_postfix_str(f"kept={len(out)} | excluded={excluded_count}", refresh=False)
             if max_size is not None and len(out) >= max_size:
                 break
     stats = {"kept": len(out), "excluded": excluded_count, "total": total_count}

@@ -91,6 +91,19 @@ class SimpleMockModel(nn.Module):
         return type('Output', (), {'logits': logits, 'loss': loss})()
 
 
+class _TokenizedBatch(dict):
+    """Dict-like tokenizer output that supports .to(device) like HF BatchEncoding."""
+
+    def to(self, device):
+        out = _TokenizedBatch()
+        for k, v in self.items():
+            if isinstance(v, torch.Tensor):
+                out[k] = v.to(device)
+            else:
+                out[k] = v
+        return out
+
+
 class MockTokenizer:
     """Simple mock tokenizer."""
     
@@ -109,7 +122,8 @@ class MockTokenizer:
         self.vocab.update({
             '[MASK]': 103, '[PAD]': 0, '[CLS]': 101, '[SEP]': 102
         })
-        
+        self.all_special_ids = [0, 101, 102, 103]  # PAD, CLS, SEP, MASK
+
     def convert_tokens_to_ids(self, tokens):
         """Convert tokens to IDs."""
         if isinstance(tokens, str):
@@ -119,29 +133,41 @@ class MockTokenizer:
         else:
             return tokens
     
-    def __call__(self, text, return_tensors=None, padding=True, truncation=True, 
+    def __call__(self, text, return_tensors=None, padding=True, truncation=True,
                  max_length=48, add_special_tokens=True, **kwargs):
-        tokens = text.split()[:max_length-2] if truncation else text.split()
-        token_ids = [self.vocab.get(token, 1) for token in tokens]
-        
-        if add_special_tokens:
-            token_ids = [self.vocab['[CLS]']] + token_ids + [self.vocab['[SEP]']]
-        
-        if padding and len(token_ids) < max_length:
-            token_ids = token_ids + [self.vocab['[PAD]']] * (max_length - len(token_ids))
-        
-        result = {'input_ids': token_ids[:max_length]}
-        
+        is_batch = isinstance(text, list)
+        texts = text if is_batch else [text]
+        all_input_ids = []
+        for t in texts:
+            tokens = t.split()[:max_length - 2] if truncation else t.split()
+            token_ids = [self.vocab.get(token, 1) for token in tokens]
+            if add_special_tokens:
+                token_ids = [self.vocab['[CLS]']] + token_ids + [self.vocab['[SEP]']]
+            if padding and len(token_ids) < max_length:
+                token_ids = token_ids + [self.vocab['[PAD]']] * (max_length - len(token_ids))
+            all_input_ids.append(token_ids[:max_length])
+        # Single string -> flat list of ids (HF convention); list of strings -> list of lists
+        result = {'input_ids': all_input_ids[0] if not is_batch else all_input_ids}
         if return_tensors == 'pt':
-            result['input_ids'] = torch.tensor([result['input_ids']])
-            result['attention_mask'] = torch.tensor([[1 if tid != self.vocab['[PAD]'] else 0 
-                                                      for tid in result['input_ids'][0]]])
+            ids = result['input_ids']
+            result['input_ids'] = torch.tensor(ids if is_batch else [ids])
+            mask = [[1 if tid != self.vocab['[PAD]'] else 0 for tid in row] for row in all_input_ids]
+            result['attention_mask'] = torch.tensor(mask)
+            return _TokenizedBatch(result)
         return result
     
+    def tokenize(self, text, **kwargs):
+        """Return list of token strings (space-split)."""
+        return text.split()
+
+    def convert_tokens_to_string(self, tokens):
+        """Join token strings back to a single string."""
+        return " ".join(tokens) if isinstance(tokens, list) else str(tokens)
+
     def encode(self, text, add_special_tokens=False, **kwargs):
         tokens = text.split()
         return [self.vocab.get(token, 1) for token in tokens]
-    
+
     def decode(self, token_ids, skip_special_tokens=True, **kwargs):
         if isinstance(token_ids, torch.Tensor):
             token_ids = token_ids.tolist()

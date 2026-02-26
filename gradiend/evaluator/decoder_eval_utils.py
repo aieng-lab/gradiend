@@ -38,7 +38,8 @@ def read_decoder_stats_file(stats_file: str) -> Dict[str, Any]:
 
     Returns:
         Flat dict: summary entries at top level (e.g. "3SG", "3PL") plus "grid".
-        Legacy files with "summary" key are flattened so result[key] = summary[key].
+        Supports both legacy files (with "summary" key) and flat format (summary
+        entries at top level; no "summary" key).
     """
     with open(stats_file, "r") as f:
         data = json.load(f)
@@ -47,5 +48,8 @@ def read_decoder_stats_file(stats_file: str) -> Dict[str, Any]:
         grid = convert_results_to_dict(grid_list)
     else:
         grid = {}
-    summary = data.get("summary", {})
+    if "summary" in data:
+        summary = data["summary"]
+    else:
+        summary = {k: v for k, v in data.items() if k != "grid"}
     return {**summary, "grid": grid}

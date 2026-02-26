@@ -146,6 +146,9 @@ def draw_convergence_axes(
     plot_mean_by_class: bool = True,
     plot_mean_by_feature_class: Optional[bool] = None,
     plot_correlation: bool = True,
+    legend_ncol: Optional[int] = None,
+    legend_bbox_to_anchor: Optional[Tuple[float, float]] = None,
+    legend_loc: Optional[str] = None,
 ) -> None:
     """
     Draw convergence curves into existing axes (live or static).
@@ -153,6 +156,7 @@ def draw_convergence_axes(
     axes[2] = correlation (if plot_correlation). Caller must pass enough axes for the enabled options.
 
     plot_mean_by_feature_class: None = auto (False when redundant with mean_by_class, True otherwise).
+    legend_ncol, legend_bbox_to_anchor, legend_loc: used for figure-level legend when >= 6 series.
     """
     ts = training_stats
     steps, series_by_class, series_by_fc = _steps_and_values(
@@ -184,6 +188,13 @@ def draw_convergence_axes(
         return str(k)
 
     ax_idx = 0
+    n_series = len(series_by_class) if series_by_class else 0
+    n_fc = len(series_by_fc) if series_by_fc else 0
+    use_external_legend = max(n_series, n_fc) >= 6
+    legend_fontsize = 6 if use_external_legend else 8
+    leg_loc = legend_loc if legend_loc is not None else ("center left" if use_external_legend else "best")
+    leg_bbox = legend_bbox_to_anchor if legend_bbox_to_anchor is not None else ((1.02, 1.0) if use_external_legend else None)
+
     if plot_mean_by_class and series_by_class and ax_idx < len(axes):
         ax = axes[ax_idx]
         ax.clear()
@@ -197,10 +208,18 @@ def draw_convergence_axes(
             ax.axvline(x=best_step_val, color="gray", linestyle="--", alpha=0.8, label="best step")
         ax.set_ylabel("encoded value")
         ax.set_xlabel("Step" if not (plot_mean_by_feature_class or plot_correlation) else "")
-        ax.legend(loc="best", fontsize=8)
+        if not use_external_legend:
+            leg_kw = {"loc": leg_loc, "fontsize": legend_fontsize}
+            if leg_bbox is not None:
+                leg_kw["bbox_to_anchor"] = leg_bbox
+            ax.legend(**leg_kw)
         ax.grid(True, alpha=0.3)
         ax.set_title("Mean by class")
         ax_idx += 1
+
+    legend_fontsize_fc = 6 if use_external_legend else 8
+    leg_loc_fc = legend_loc if legend_loc is not None else ("center left" if use_external_legend else "best")
+    leg_bbox_fc = legend_bbox_to_anchor if legend_bbox_to_anchor is not None else ((1.02, 1.0) if use_external_legend else None)
 
     if plot_mean_by_feature_class and series_by_fc and ax_idx < len(axes):
         ax = axes[ax_idx]
@@ -215,10 +234,40 @@ def draw_convergence_axes(
             ax.axvline(x=best_step_val, color="gray", linestyle="--", alpha=0.8, label="best step")
         ax.set_ylabel("Mean encoded value")
         ax.set_xlabel("Step" if not plot_correlation else "")
-        ax.legend(loc="best", fontsize=8)
+        if not use_external_legend:
+            leg_kw_fc = {"loc": leg_loc_fc, "fontsize": legend_fontsize_fc}
+            if leg_bbox_fc is not None:
+                leg_kw_fc["bbox_to_anchor"] = leg_bbox_fc
+            ax.legend(**leg_kw_fc)
         ax.grid(True, alpha=0.3)
         ax.set_title("Mean by feature class")
         ax_idx += 1
+
+    if use_external_legend and axes:
+        legend_axes = []
+        i = 0
+        if plot_mean_by_class and series_by_class:
+            legend_axes.append(axes[i])
+            i += 1
+        if plot_mean_by_feature_class and series_by_fc:
+            legend_axes.append(axes[i])
+        all_handles, all_labels = [], []
+        for ax in legend_axes:
+            h, l = ax.get_legend_handles_labels()
+            for hi, li in zip(h, l):
+                if li == "best step" and "best step" in all_labels:
+                    continue
+                all_handles.append(hi)
+                all_labels.append(li)
+        fig = axes[0].figure
+        fig.legend(
+            all_handles,
+            all_labels,
+            loc=legend_loc or "center left",
+            bbox_to_anchor=legend_bbox_to_anchor or (1.02, 0.5),
+            ncol=legend_ncol if legend_ncol is not None else 1,
+            fontsize=6,
+        )
 
     if plot_correlation and ax_idx < len(axes):
         ax = axes[ax_idx]
@@ -254,6 +303,9 @@ def plot_training_convergence(
     figsize: Optional[Tuple[float, float]] = None,
     img_format: str = "pdf",
     dpi: Optional[int] = None,
+    legend_ncol: Optional[int] = None,
+    legend_bbox_to_anchor: Optional[Tuple[float, float]] = None,
+    legend_loc: Optional[str] = None,
     **kwargs: Any,
 ) -> str:
     """
@@ -284,6 +336,9 @@ def plot_training_convergence(
         show: Whether to call plt.show().
         title: True (default run_id), False, or custom string.
         figsize: (width, height) for figure.
+        legend_ncol: Number of columns for the external legend when there are >= 6 series (default 1).
+        legend_bbox_to_anchor: (x, y) for the external legend when >= 6 series (default (1.02, 0.5)).
+        legend_loc: Matplotlib loc for the external legend when >= 6 series (default "center left").
 
     Returns:
         Path to saved plot file, or "" if nothing to plot or no path.
@@ -342,9 +397,15 @@ def plot_training_convergence(
         return ""
 
     n_sub = (1 if has_mbc else 0) + (1 if has_mbfc else 0) + (1 if has_corr else 0)
-    fig, axes = plt.subplots(n_sub, 1, sharex=True, figsize=figsize or (6, 1.5 * n_sub))
+    n_legend_entries = max(len(series_by_class) if series_by_class else 0, len(series_by_fc) if series_by_fc else 0)
+    # When many legend entries (e.g. identity transitions), use larger height so subplots are not squashed by legend
+    height_per_sub = 2.0 if n_legend_entries >= 6 else 1.5
+    fig, axes = plt.subplots(n_sub, 1, sharex=True, figsize=figsize or (6, height_per_sub * n_sub))
     if n_sub == 1:
         axes = [axes]
+    # Leave space for figure-level legend when >= 6 series
+    if n_legend_entries >= 6:
+        fig.subplots_adjust(right=0.72)
     ax_idx = 0
 
     def _name(k: str) -> str:
@@ -369,6 +430,12 @@ def plot_training_convergence(
                     return v
         return str(k)
 
+    use_external_legend = n_legend_entries >= 6
+    n_mbc = len(series_by_class) if series_by_class else 0
+    leg_fs_mbc = 6 if use_external_legend else 8
+    leg_loc_mbc = "center left" if use_external_legend else "best"
+    leg_bbox_mbc = (1.02, 1.0) if use_external_legend else None
+
     if has_mbc:
         ax = axes[ax_idx]
         ax_idx += 1
@@ -382,9 +449,18 @@ def plot_training_convergence(
             ax.axvline(x=best_step_val, color="gray", linestyle="--", alpha=0.8, label="best step")
         ax.set_ylabel("Mean encoded value")
         ax.set_xlabel("Step" if not (has_mbfc or has_corr) else "")
-        ax.legend(loc="best", fontsize=8)
+        if not use_external_legend:
+            leg_kw = {"loc": leg_loc_mbc, "fontsize": leg_fs_mbc}
+            if leg_bbox_mbc is not None:
+                leg_kw["bbox_to_anchor"] = leg_bbox_mbc
+            ax.legend(**leg_kw)
         ax.grid(True, alpha=0.3)
         ax.set_title("Mean by class")
+
+    n_fc = len(series_by_fc) if series_by_fc else 0
+    leg_fs_fc = 6 if use_external_legend else 8
+    leg_loc_fc = "center left" if use_external_legend else "best"
+    leg_bbox_fc = (1.02, 1.0) if use_external_legend else None
 
     if has_mbfc:
         ax = axes[ax_idx]
@@ -399,9 +475,38 @@ def plot_training_convergence(
             ax.axvline(x=best_step_val, color="gray", linestyle="--", alpha=0.8, label="best step")
         ax.set_ylabel("Mean encoded value")
         ax.set_xlabel("Step" if not has_corr else "")
-        ax.legend(loc="best", fontsize=8)
+        if not use_external_legend:
+            leg_kw = {"loc": leg_loc_fc, "fontsize": leg_fs_fc}
+            if leg_bbox_fc is not None:
+                leg_kw["bbox_to_anchor"] = leg_bbox_fc
+            ax.legend(**leg_kw)
         ax.grid(True, alpha=0.3)
         ax.set_title("Mean by feature class")
+
+    if use_external_legend:
+        legend_axes = []
+        i = 0
+        if has_mbc:
+            legend_axes.append(axes[i])
+            i += 1
+        if has_mbfc:
+            legend_axes.append(axes[i])
+        all_handles, all_labels = [], []
+        for ax in legend_axes:
+            h, l = ax.get_legend_handles_labels()
+            for hi, li in zip(h, l):
+                if li == "best step" and "best step" in all_labels:
+                    continue
+                all_handles.append(hi)
+                all_labels.append(li)
+        fig.legend(
+            all_handles,
+            all_labels,
+            loc=legend_loc or "center left",
+            bbox_to_anchor=legend_bbox_to_anchor or (1.02, 0.5),
+            ncol=legend_ncol if legend_ncol is not None else 1,
+            fontsize=6,
+        )
 
     if has_corr:
         ax = axes[ax_idx]

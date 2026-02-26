@@ -155,15 +155,10 @@ class TrainingArguments:
     torch_dtype: Optional[torch.dtype] = None
     """dtype for model; None = torch.float32."""
 
-    device_map: bool = True
-    """If True (default), load base model with device_map spread across GPUs not used by GRADIEND.
-    Only applies when multiple GPUs are available for the base model (see encoder_decoder_same_device).
-    Requires accelerate when device_map would be used; falls back to single-device loading otherwise."""
-
     encoder_decoder_same_device: bool = False
     """If True, place encoder and decoder on the same GPU (cuda:0), giving the base model the rest.
     Useful for large base models with pre-pruning: encoder+decoder are small and can share GPU 0;
-    base model can use cuda:1 (2 GPUs) or cuda:1,2,3... with device_map (3+ GPUs). If False (default),
+    base model can use cuda:1 (2 GPUs) or cuda:2 (3+ GPUs). If False (default),
     encoder and decoder are split across cuda:0 and cuda:1 when 2+ GPUs are available."""
 
     # ----- Multi-seed training -----
@@ -179,8 +174,11 @@ class TrainingArguments:
     convergent_score_threshold: Optional[float] = None
     """Threshold for convergence. Defaults to 0.6 for correlation; required for loss."""
 
-    seed: Optional[int] = None
-    """Base seed for multi-seed runs (seed+i). If None, uses 0..max_seeds-1."""
+    convergent_mean_by_class_threshold: Optional[float] = None
+    """Optional additional convergence criterion: minimum absolute mean encoded value (e.g. abs_mean_by_type['training']). When None, only convergent_score_threshold is used. Set to e.g. 0.5 to require strong separation in addition to correlation."""
+
+    seed: Optional[int] = 0
+    """Random seed for reproducible runs (default 0). The Trainer sets PyTorch/numpy/Python RNG, CUDA determinism, and CUBLAS/OMP env vars; data pipelines use this as random_state. Also the base for multi-seed runs (seed+i). Pass seed=None for non-deterministic runs. If results still vary, call set_seed(42) at the very start of your script or set env CUBLAS_WORKSPACE_CONFIG=:4096:8 and OMP_NUM_THREADS=1 before starting Python."""
 
     seed_runs_dir: Optional[str] = None
     """Directory for per-seed runs. Defaults to experiment_dir/seeds when experiment_dir is set."""
@@ -210,6 +208,42 @@ class TrainingArguments:
     metadata: dict = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        # Type checks for key scalar parameters
+        if self.experiment_dir is not None and not isinstance(self.experiment_dir, str):
+            raise TypeError(f"experiment_dir must be str or None, got {type(self.experiment_dir).__name__}")
+        if self.output_dir is not None and not isinstance(self.output_dir, str):
+            raise TypeError(f"output_dir must be str or None, got {type(self.output_dir).__name__}")
+        if not isinstance(self.use_cache, bool):
+            raise TypeError(f"use_cache must be bool, got {type(self.use_cache).__name__}")
+        if not isinstance(self.source, str):
+            raise TypeError(f"source must be str, got {type(self.source).__name__}")
+        if not isinstance(self.target, str):
+            raise TypeError(f"target must be str, got {type(self.target).__name__}")
+        if not isinstance(self.train_batch_size, int):
+            raise TypeError(f"train_batch_size must be int, got {type(self.train_batch_size).__name__}")
+        if self.train_batch_size < 1:
+            raise ValueError(f"train_batch_size must be >= 1, got {self.train_batch_size}")
+        if self.train_max_size is not None and not isinstance(self.train_max_size, int):
+            raise TypeError(f"train_max_size must be int or None, got {type(self.train_max_size).__name__}")
+        if self.train_max_size is not None and self.train_max_size < 0:
+            raise ValueError(f"train_max_size must be >= 0, got {self.train_max_size}")
+        if not isinstance(self.learning_rate, (int, float)):
+            raise TypeError(f"learning_rate must be float, got {type(self.learning_rate).__name__}")
+        if not isinstance(self.num_train_epochs, int):
+            raise TypeError(f"num_train_epochs must be int, got {type(self.num_train_epochs).__name__}")
+        if not isinstance(self.max_steps, int):
+            raise TypeError(f"max_steps must be int, got {type(self.max_steps).__name__}")
+        if not isinstance(self.eval_steps, int):
+            raise TypeError(f"eval_steps must be int, got {type(self.eval_steps).__name__}")
+        if not isinstance(self.eval_batch_size, int):
+            raise TypeError(f"eval_batch_size must be int, got {type(self.eval_batch_size).__name__}")
+        if self.eval_batch_size < 1:
+            raise ValueError(f"eval_batch_size must be >= 1, got {self.eval_batch_size}")
+        if not isinstance(self.do_eval, bool):
+            raise TypeError(f"do_eval must be bool, got {type(self.do_eval).__name__}")
+        if self.seed is not None and not isinstance(self.seed, int):
+            raise TypeError(f"seed must be int or None, got {type(self.seed).__name__}")
+
         supported = {"factual", "alternative", "diff"}
         if self.source not in supported:
             raise ValueError(f"source must be one of {supported}, got {self.source!r}")
@@ -285,3 +319,17 @@ class TrainingArguments:
     def get(self, key: str, default: Any = None) -> Any:
         """Dict-like get method."""
         return getattr(self, key, default)
+
+    def __str__(self) -> str:
+        parts = [
+            f"experiment_dir={self.experiment_dir!r}",
+            f"output_dir={self.output_dir!r}",
+            f"source={self.source!r}",
+            f"target={self.target!r}",
+            f"learning_rate={self.learning_rate}",
+            f"num_train_epochs={self.num_train_epochs}",
+            f"max_steps={self.max_steps}",
+            f"seed={self.seed}",
+            f"max_seeds={self.max_seeds}",
+        ]
+        return f"TrainingArguments({', '.join(parts)})"

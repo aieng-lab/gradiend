@@ -1,19 +1,20 @@
-# Build and publish to PyPI on GitHub Release
-name: Publish to PyPI
+name: Publish to TestPyPI
 
 on:
-  release:
-    types: [published]
   workflow_dispatch:
+  push:
+    tags:
+      - "v*rc*"
+      - "v*beta*"
+      - "v*alpha*"
 
 jobs:
-  build-and-publish:
+  build:
     runs-on: ubuntu-latest
-    environment: pypi
+    environment: testpypi
     permissions:
-      id-token: write   # REQUIRED for trusted publishing (OIDC)
+      id-token: write  # für Trusted Publishing
       contents: read
-
     steps:
       - uses: actions/checkout@v4
 
@@ -28,7 +29,7 @@ jobs:
       - name: Build package
         run: python -m build
 
-      - name: Publish to PyPI
+      - name: Publish to TestPyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
-          skip-existing: true
+          repository-url: https://test.pypi.org/legacy/

@@ -21,7 +21,7 @@ from gradiend.trainer.core.callbacks import (
     LoggingCallback,
     get_default_callbacks,
 )
-from gradiend.trainer.core.stats import write_training_stats, load_training_stats
+from gradiend.trainer.core.stats import write_training_stats, load_training_stats, _best_step_abs_mean_by_type
 
 logger = get_logger(__name__)
 
@@ -65,6 +65,11 @@ def train(
                 training_args = dataclasses.replace(training_args, **updates)
 
     training_args.__post_init__()
+
+    # Re-apply seed so training loop (forward/backward, dropout, etc.) starts from a known RNG state
+    if getattr(training_args, "seed", None) is not None:
+        from gradiend.trainer.trainer import _apply_seed
+        _apply_seed(int(training_args.seed))
 
     # Log training start
     if model_with_gradiend.gradiend is not None:
@@ -425,7 +430,16 @@ def train(
             metric_val = best_score_checkpoint.get("correlation")
             if metric_val is None:
                 metric_val = training_stats.get("correlation")
-            converged = metric_val is not None and abs(metric_val) >= threshold
+            abs_training_mean = None
+            if training_args.convergent_mean_by_class_threshold is not None:
+                best_abs = _best_step_abs_mean_by_type(training_stats, best_score_checkpoint)
+                abs_training_mean = (best_abs or {}).get("training")
+            mean_ok = (
+                training_args.convergent_mean_by_class_threshold is None
+                or abs_training_mean is None
+                or (isinstance(abs_training_mean, (int, float)) and abs_training_mean >= training_args.convergent_mean_by_class_threshold)
+            )
+            converged = metric_val is not None and abs(metric_val) >= threshold and mean_ok
         
         if not converged:
             logger.warning(

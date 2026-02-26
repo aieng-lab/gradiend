@@ -66,6 +66,7 @@ nav:
     - Data generation: tutorials/data-generation.md
     - Training: tutorials/training.md
     - Evaluation (intra-model): tutorials/evaluation-intra-model.md
+    - Model rewrite: tutorials/model-rewrite.md
     - Evaluation (inter-model): tutorials/evaluation-inter-model.md
     - Detailed workflow (overview): tutorials/detailed-workflow.md
   - Guides:

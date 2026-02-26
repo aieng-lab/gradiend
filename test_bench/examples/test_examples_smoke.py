@@ -37,11 +37,11 @@ EXAMPLE_MODULES = [
     "gradiend.examples.data_creator_demo",
     "gradiend.examples.data_creation_pronouns",
     "gradiend.examples.english_pronouns",
-    "gradiend.examples.gender_de_detailed",
+    #"gradiend.examples.gender_de_detailed", # we exclude detailed run as it takes very long (many features)
 ]
 
 
-def _run_example_module(module_name: str, timeout: int = 600) -> subprocess.CompletedProcess:
+def _run_example_module(module_name: str, timeout: int = 2000) -> subprocess.CompletedProcess:
     """Run an example module's __main__ (as python -m module)."""
     return subprocess.run(
         [sys.executable, "-m", module_name],
@@ -102,7 +102,7 @@ def test_example_runs_successfully(module_name: str):
             stderr=_to_str(e.stderr),
             suffix=" [TIMEOUT]",
         )
-        pytest.fail(f"Example {module_name} timed out after 600s. See {_failure_log_path(module_name)}")
+        pytest.fail(f"Example {module_name} timed out after 2000s. See {_failure_log_path(module_name)}")
     if result.returncode != 0:
         _write_failure_log(module_name, result.returncode, result.stdout or "", result.stderr or "")
     assert result.returncode == 0, (

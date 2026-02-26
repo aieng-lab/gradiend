@@ -8,9 +8,9 @@ args = TrainingArguments(
     train_max_size=500,
     decoder_eval_max_size_training_like=100,
     decoder_eval_max_size_neutral=500,
-    eval_steps=100,
+    eval_steps=25,
     num_train_epochs=1,
-    max_steps=500,
+    max_steps=250,
     source="alternative",
     target="diff",
     eval_batch_size=8,
@@ -43,7 +43,7 @@ trainer.plot_training_convergence()
 ts = (trainer.get_training_stats() or {}).get("training_stats", {})
 print(f"  correlation={ts.get('correlation')}, mean_by_class={ts.get('mean_by_class')}")
 
-enc_results = trainer.evaluate_encoder(max_size=100, return_df=True, plot=True, use_cache=False)
+enc_results = trainer.evaluate_encoder(max_size=100, return_df=True, plot=True, plot_kwargs={"target_and_neutral_only": False})
 print(f"  encoder metrics: {enc_results}")
 
 dec_results = trainer.evaluate_decoder()

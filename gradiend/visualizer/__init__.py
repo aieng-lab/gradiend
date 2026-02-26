@@ -9,10 +9,13 @@ from gradiend.visualizer.visualizer import Visualizer
 from gradiend.visualizer.encoder_distributions import plot_encoder_distributions
 from gradiend.visualizer.convergence import plot_training_convergence
 from gradiend.visualizer.encoder_scatter import plot_encoder_scatter
+from gradiend.visualizer.topk import (
+    plot_topk_overlap_heatmap,
+    plot_topk_overlap_venn,
+)
 from gradiend.visualizer.topk.venn_ import (
     compute_topk_sets,
     plot_topk_venn,
-    plot_topk_overlap_venn,
 )
 
 __all__ = [
@@ -22,5 +25,6 @@ __all__ = [
     "plot_encoder_scatter",
     "compute_topk_sets",
     "plot_topk_venn",
+    "plot_topk_overlap_heatmap",
     "plot_topk_overlap_venn",
 ]

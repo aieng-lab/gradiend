@@ -16,7 +16,25 @@ logger = get_logger(__name__)
 
 @dataclass
 class TextPreprocessConfig:
-    """Configuration for preprocessing text."""
+    """Configuration for preprocessing text: sentence splitting and length/character filters.
+
+    Used by :class:`~gradiend.data.text.prediction.creator.TextPredictionDataCreator` and
+    :func:`preprocess_texts`. When ``preprocess`` is ``None`` (e.g. in the data creator),
+    no preprocessing is applied and texts are used as-is.
+
+    Attributes:
+        split_to_sentences: If ``True``, split input texts into sentences (via regex on
+            ``.!?`` or, when a spaCy model is provided, via spaCy sentencizer). If ``False``,
+            each input string is treated as one segment. Default ``False``.
+        min_chars: Drop segments (sentences or whole texts) with strictly fewer than this
+            many characters. ``None`` means no minimum. Default ``None``.
+        max_chars: Drop segments with strictly more than this many characters. ``None``
+            means no maximum. Default ``None``.
+        exclude_chars: Drop segments that contain any character in this string (e.g.
+            ``"\\x00"`` to drop nulls). ``None`` means no character exclusion. Default ``None``.
+        custom_filter: Optional callable ``(str) -> bool``. Only segments for which it
+            returns ``True`` are kept. ``None`` means no custom filter. Default ``None``.
+    """
 
     split_to_sentences: bool = False
     min_chars: Optional[int] = None
@@ -50,6 +68,17 @@ def preprocess_texts(
     Returns:
         List of (optionally filtered) text strings.
     """
+    if not isinstance(texts, list):
+        raise TypeError(f"texts must be a list, got {type(texts).__name__}")
+    if not all(isinstance(x, str) for x in texts):
+        raise TypeError("texts must contain only strings")
+    if config is not None and not isinstance(config, TextPreprocessConfig):
+        raise TypeError(f"config must be TextPreprocessConfig or None, got {type(config).__name__}")
+    if spacy_model is not None and not isinstance(spacy_model, str):
+        raise TypeError(f"spacy_model must be str or None, got {type(spacy_model).__name__}")
+    if not isinstance(download_if_missing, bool):
+        raise TypeError(f"download_if_missing must be bool, got {type(download_if_missing).__name__}")
+
     if config is None:
         return texts
 

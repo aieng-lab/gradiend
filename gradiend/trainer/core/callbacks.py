@@ -336,7 +336,9 @@ class CheckpointCallback(TrainingCallback):
             'training_stats': training_stats,
             'training_args': config,
         }
-        model.gradiend.save_pretrained(self.output, training=training_info)
+        # Save full model (including gradiend_context.json) so the directory is always loadable.
+        # When save_only_best is True, _handle_keep_only_best may replace this with output_best.
+        model.save_pretrained(self.output, training=training_info)
         logger.info(f'Saved model after epoch {epoch + 1} to {self.output}')
 
 
@@ -403,7 +405,7 @@ class LoggingCallback(TrainingCallback):
             corr_str = "N/A" if (self.loss_only or corr is None) else f"{corr:.4f}"
             logger.info(
                 f'Step {step}, Correlation: {corr_str}, '
-                + (f', mean: {mean_str}' if mean_str else '')
+                + (f'mean: {mean_str}' if mean_str else '')
                 + suffix
             )
     

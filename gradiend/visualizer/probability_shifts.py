@@ -72,22 +72,29 @@ def plot_probability_shifts(
     _reserved = {"grid", "plot_path", "plot_paths"}
     summary = {k: v for k, v in decoder_results.items() if k not in _reserved}
     
+    # Classes that actually have data in the grid (e.g. from decoder_eval_targets)
+    classes_in_grid = set()
+    for entry in grid.values():
+        probs_by_dataset = entry.get("probs_by_dataset", {})
+        for dataset_probs in probs_by_dataset.values():
+            if isinstance(dataset_probs, dict):
+                classes_in_grid.update(dataset_probs.keys())
+    
     # Determine classes to plot
     if class_ids is None:
         if trainer is not None:
             class_ids = trainer.all_classes if trainer.all_classes else trainer.target_classes
         else:
-            # Infer from grid data
-            class_ids = set()
-            for entry in grid.values():
-                probs_by_dataset = entry.get("probs_by_dataset", {})
-                for dataset_probs in probs_by_dataset.values():
-                    if isinstance(dataset_probs, dict):
-                        class_ids.update(dataset_probs.keys())
-            class_ids = sorted(list(class_ids))
+            class_ids = sorted(list(classes_in_grid))
+    
+    # Only show classes that have data in the grid (exclude classes not in decoder_eval_targets)
+    class_ids = [c for c in class_ids if c in classes_in_grid]
     
     if not class_ids:
-        raise ValueError("No classes to plot. Provide class_ids or ensure classes are available.")
+        raise ValueError(
+            "No classes to plot. Provide class_ids or ensure grid contains probs_by_dataset "
+            "for the requested classes (classes without decoder_eval_targets are excluded)."
+        )
     
     # Resolve target_class and summary key (strengthen vs weaken)
     if target_class is None:
@@ -286,11 +293,9 @@ def plot_probability_shifts(
                 # Use same ff as plotted curves so star lies exactly on the selection-metric curve
                 entry = lr_data[ff].get(selected_lr, {}).get(dataset_class, {})
                 sp = entry.get(selection_metric_class, 0.0) if isinstance(entry, dict) else 0.0
-                ax.scatter([selected_lr], [sp], marker="*", s=280, zorder=5, alpha=0.95, color="red", label=f"selected (lr={selected_lr:g})")
+                ax.scatter([selected_lr], [sp], marker="*", s=280, zorder=5, alpha=0.95, color="red", label="Selected")
         ax.set_ylabel("Probability")
         title = f"Dataset: {dataset_class} — P(class)"
-        if is_selection_dataset:
-            title += f"  [selection metric: {selection_metric_label}]"
         ax.set_title(title)
         ax.set_xscale("log")
         ax.grid(True, alpha=0.3)
@@ -329,7 +334,7 @@ def plot_probability_shifts(
             unique_handles,
             unique_labels,
             loc="upper center",
-            ncol=min(len(unique_labels), 5),
+            ncol=min(len(unique_labels), 6),
             fontsize=8,
         )
     

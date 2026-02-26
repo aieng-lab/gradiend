@@ -80,6 +80,7 @@ Runnable script with more data: `python -m gradiend.examples.start_workflow`
 ## Examples
 
 - [start_workflow.py](gradiend/examples/start_workflow.py) — Minimal runnable example
+- [english_pronouns.ipynb](gradiend/examples/english_pronouns.ipynb) — English pronouns (3SG vs 3PL): data creation from Wikipedia → training → evaluation ([script](gradiend/examples/english_pronouns.py))
 - [gender_de.py](gradiend/examples/gender_de.py) — German gender (masc_nom vs fem_nom)
 - [gender_en.py](gradiend/examples/gender_en.py) — English gender with name augmentation
 - [gender_de_decoder_only.py](gradiend/examples/gender_de_decoder_only.py) — Decoder-only model with optional MLM head

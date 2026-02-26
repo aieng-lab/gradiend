@@ -53,7 +53,7 @@ def main():
 
     print("=== Training data (per_class, balance='try') ===")
     training = creator.generate_training_data(
-        max_size_per_class=1000,
+        max_size_per_class=100, # limit for demo; set higher or None for full data
         format="per_class",
         balance="try",
     )

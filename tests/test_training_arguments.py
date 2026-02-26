@@ -152,14 +152,18 @@ class TestTrainingArguments:
     
     def test_training_arguments_seed_handling(self):
         """Test seed parameter handling."""
-        # Test None seed
+        # Default seed is 0 for reproducibility
         args1 = TrainingArguments()
-        assert args1.seed is None
-        
+        assert args1.seed == 0
+
+        # Explicit None for non-deterministic runs
+        args_none = TrainingArguments(seed=None)
+        assert args_none.seed is None
+
         # Test explicit seed
         args2 = TrainingArguments(seed=42)
         assert args2.seed == 42
-        
+
         # Test max_seeds
         args3 = TrainingArguments(max_seeds=5)
         assert args3.max_seeds == 5

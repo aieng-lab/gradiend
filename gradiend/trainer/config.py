@@ -20,3 +20,6 @@ class TrainerConfig:
 
     img_dpi: Optional[int] = None
     """DPI for saved plots (e.g. 600 for publication). None = use visualizer default."""
+
+    def __str__(self) -> str:
+        return f"TrainerConfig(img_format={self.img_format!r}, img_dpi={self.img_dpi})"

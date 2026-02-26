@@ -1,6 +1,13 @@
 # Tutorial: Evaluation (inter-model)
 
-This tutorial covers **inter-model** evaluation: comparing **multiple** trained runs to see whether they change the same or different parameters. You need several trained models (e.g. different class pairs or seeds, each with its own `run_id` under the same `experiment_dir`). For evaluating a **single** model (encoder, decoder, selecting the changed model), see [Tutorial: Evaluation (intra-model)](evaluation-intra-model.md).
+This tutorial covers **inter-model** evaluation: comparing **multiple** trained runs to see whether they change the same or different parameters. You need several trained models (e.g. different class pairs or seeds, each with its own `run_id` under the same `experiment_dir`). For evaluating a **single** model (encoder/decoder) and then applying rewrites, see [Tutorial: Evaluation (intra-model)](evaluation-intra-model.md) and [Tutorial: Model Rewrite](model-rewrite.md).
+
+!!! tip "Optional dependency: plotting"
+    The Venn diagrams and heatmap in this tutorial require the **plot** extra. If you did not install it with GRADIEND, install it with:
+
+    ```bash
+    pip install gradiend[plot]
+    ```
 
 ---
 
@@ -56,8 +63,8 @@ plot_topk_overlap_venn(
 )
 ```
 
-*Run the code above to generate the Venn diagram; use `output_path="topk_overlap_venn.pdf"` (or `.png`) to save.*
-
+- **models**: Dict keys are used as **set labels** on the diagram; use the same keys as for the heatmap so labels are consistent.
+- *Run the code above to generate the Venn diagram; use `output_path="topk_overlap_venn.pdf"` (or `.png`) to save.*
 
 ## Overlap Heatmap
 
@@ -74,7 +81,7 @@ plot_topk_overlap_heatmap(
 )
 ```
 
-- **models_for_heatmap**: Dict[str, ModelWithGradiend] — keys are used as labels on the heatmap axes.
+- **models**: Dict[str, ModelWithGradiend] — **dict keys are the axis labels**. Use display labels (e.g. run_id or ``"3SG ↔ 3PL"``) as keys; use the same keying for the Venn diagram so labels match.
 - **topk**: Keep this many (or this fraction of) top weights per model.
 - **part**: Which importance to use (e.g. `"decoder-weight"`).
 - **output_path**: Where to save the figure (e.g. under `experiment_dir`).
@@ -88,6 +95,7 @@ High values (e.g. bright cells) mean the two runs share many of their top-k para
 
 ## See also
 
-- [Tutorial: Evaluation (intra-model)](evaluation-intra-model.md) — Encoder/decoder evaluation and selecting the changed model.
+- [Tutorial: Evaluation (intra-model)](evaluation-intra-model.md) — Encoder/decoder evaluation and decoder config selection.
+- [Tutorial: Model Rewrite](model-rewrite.md) — Apply decoder-selected rewrites and save changed checkpoints.
 - [Evaluation & visualization](../guides/evaluation-visualization.md) — Heatmap and Venn customization options.
 - [API reference](../api/index.md) — `plot_topk_overlap_heatmap`, `plot_topk_overlap_venn`.

@@ -13,7 +13,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import pandas as pd
 import torch
 import torch.nn.functional as F
-from sklearn.metrics import f1_score, precision_score, recall_score
+from gradiend.util.metrics import f1_score, precision_score, recall_score
 
 from gradiend.trainer.text.common.loading import InstructTokenizerWrapper
 from gradiend.util.logging import get_logger

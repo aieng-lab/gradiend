@@ -13,10 +13,8 @@ import os
 
 from gradiend import TextPredictionTrainer, TrainingArguments
 from gradiend.trainer import PrePruneConfig, PostPruneConfig
-from gradiend.visualizer.topk.pairwise_heatmap import plot_topk_overlap_heatmap
-from gradiend.visualizer.topk.venn_ import plot_topk_overlap_venn
+from gradiend import plot_topk_overlap_heatmap, plot_topk_overlap_venn
 
-model_name = "EuroBERT/EuroBERT-210m"
 model_name = "bert-base-german-cased"
 args = TrainingArguments(
     experiment_dir=f"runs/german_de_detailed_{model_name.split('/')[-1]}",
@@ -152,7 +150,8 @@ for transition, pairs in configs.items():
                 legend_group_mapping[group_label] = kept
 
         plot_kwargs = {
-            'legend_group_mapping': legend_group_mapping
+            'legend_group_mapping': legend_group_mapping,
+            'target_and_neutral_only': False,
         }
         enc_eval = trainer.evaluate_encoder(max_size=max_size, return_df=True, plot=True, plot_kwargs=plot_kwargs)
         print(f"  encoder metrics: {enc_eval}")

@@ -22,6 +22,33 @@ from gradiend.trainer.core.config import (
 logger = get_logger(__name__)
 
 
+def _validate_topk(topk: Optional[Union[int, float]], param_name: str = "topk") -> None:
+    """Validate topk: int >= 0 or float in (0, 1.0]. Raises TypeError/ValueError."""
+    if topk is None:
+        return
+    if isinstance(topk, bool):
+        raise TypeError(f"{param_name} must be int or float, not bool")
+    if isinstance(topk, int):
+        if topk < 0:
+            raise ValueError(f"{param_name} as int must be >= 0, got {topk}")
+        return
+    if isinstance(topk, float):
+        if not (0.0 < topk <= 1.0):
+            raise ValueError(f"{param_name} as float must be in (0, 1.0], got {topk}")
+        return
+    raise TypeError(f"{param_name} must be int, float, or None, got {type(topk).__name__}")
+
+
+def _validate_threshold(threshold: Optional[float], param_name: str = "threshold") -> None:
+    """Validate threshold: non-negative float when provided."""
+    if threshold is None:
+        return
+    if not isinstance(threshold, (int, float)):
+        raise TypeError(f"{param_name} must be float or None, got {type(threshold).__name__}")
+    if threshold < 0:
+        raise ValueError(f"{param_name} must be >= 0, got {threshold}")
+
+
 # ---------------------------------------------------------------------------
 # PostPruneConfig (weight-based prune after training)
 # ---------------------------------------------------------------------------
@@ -56,11 +83,22 @@ class PostPruneConfig:
     def __post_init__(self) -> None:
         if self.topk is None and self.threshold is None and self.mask is None:
             raise ValueError("PostPruneConfig: at least one of topk, threshold, or mask must be set.")
+        _validate_topk(self.topk, "topk")
+        _validate_threshold(self.threshold, "threshold")
+        if not isinstance(self.part, str):
+            raise TypeError(f"part must be str, got {type(self.part).__name__}")
         if self.part not in ("encoder-weight", "decoder-weight", "decoder-bias", "decoder-sum"):
             raise ValueError(
                 "part must be encoder-weight, decoder-weight, decoder-bias, or decoder-sum; "
                 f"got {self.part!r}"
             )
+        if not isinstance(self.inplace, bool):
+            raise TypeError(f"inplace must be bool, got {type(self.inplace).__name__}")
+        if not isinstance(self.return_mask, bool):
+            raise TypeError(f"return_mask must be bool, got {type(self.return_mask).__name__}")
+
+    def __str__(self) -> str:
+        return f"PostPruneConfig(topk={self.topk!r}, threshold={self.threshold!r}, part={self.part!r}, inplace={self.inplace})"
 
 
 def post_prune(
@@ -133,8 +171,27 @@ class PrePruneConfig:
     def __post_init__(self) -> None:
         if self.topk is None and self.threshold is None:
             raise ValueError("PrePruneConfig: at least one of topk or threshold must be set.")
+        if not isinstance(self.n_samples, int):
+            raise TypeError(f"n_samples must be int, got {type(self.n_samples).__name__}")
+        if self.n_samples < 1:
+            raise ValueError(f"n_samples must be >= 1, got {self.n_samples}")
+        _validate_topk(self.topk, "topk")
+        _validate_threshold(self.threshold, "threshold")
+        if not isinstance(self.source, str):
+            raise TypeError(f"source must be str, got {type(self.source).__name__}")
         if self.source not in ("factual", "alternative", "diff"):
             raise ValueError(f"source must be one of factual, alternative, diff; got {self.source!r}")
+        if not isinstance(self.batch_size, int):
+            raise TypeError(f"batch_size must be int, got {type(self.batch_size).__name__}")
+        if self.batch_size < 1:
+            raise ValueError(f"batch_size must be >= 1, got {self.batch_size}")
+        if not isinstance(self.feature_class_key, str):
+            raise TypeError(f"feature_class_key must be str, got {type(self.feature_class_key).__name__}")
+        if not isinstance(self.use_cached_gradients, bool):
+            raise TypeError(f"use_cached_gradients must be bool, got {type(self.use_cached_gradients).__name__}")
+
+    def __str__(self) -> str:
+        return f"PrePruneConfig(n_samples={self.n_samples}, topk={self.topk!r}, threshold={self.threshold!r}, source={self.source!r})"
 
 
 def _stratified_indices(

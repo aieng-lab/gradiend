@@ -71,6 +71,7 @@ def plot_topk_overlap_heatmap(
     cluster: bool = False,
     annot: Union[bool, str] = "auto",
     fmt: Optional[str] = None,
+    annot_fmt: Optional[str] = None,
     figsize: Optional[Tuple[float, float]] = None,
     cmap: str = "viridis",
     vmin: Optional[float] = None,
@@ -79,15 +80,15 @@ def plot_topk_overlap_heatmap(
     output_path: Optional[str] = None,
     show: bool = True,
     return_data: bool = True,
-    pretty_labels: Optional[Dict[str, str]] = None,
     pretty_groups: Optional[Dict[str, List[str]]] = None,
     scale: str = "linear",
     scale_gamma: Optional[float] = None,
-    show_values: Optional[bool] = None,
     annot_fontsize: Optional[Union[int, float]] = None,
     tick_label_fontsize: Optional[Union[int, float]] = None,
     group_label_fontsize: Optional[Union[int, float]] = None,
     cbar_pad: Optional[float] = None,
+    cbar_fontsize: Optional[Union[int, float]] = None,
+    percentages: bool = False,
     row_metric: Optional[Dict[str, float]] = None,
     row_metric_label: Optional[str] = "corr",
     row_metric_cmap: str = "magma",
@@ -121,9 +122,10 @@ def plot_topk_overlap_heatmap(
 
     Args:
         models:
-            Mapping from model identifier (used as axis labels) to a model
-            instance implementing
-            ``get_topk_weights(part: str, topk: int) -> List[int]``.
+            Mapping from label (or model id) to a model instance implementing
+            ``get_topk_weights(part: str, topk: int) -> List[int]``. Dict keys are
+            used as axis labels; use pretty labels (e.g. ``"3SG $\\longleftrightarrow$ 3PL"``)
+            as keys for consistent display with Venn and other plots.
 
         topk:
             Number of top-ranked base-model weights selected per model.
@@ -161,7 +163,13 @@ def plot_topk_overlap_heatmap(
 
         fmt:
             String format used for annotations (e.g. ``"d"``, ``".2f"``).
-            If None, a sensible default is chosen based on ``value``.
+            If None, a sensible default is chosen based on ``value`` and ``percentages``.
+
+        annot_fmt:
+            Override for annotation format. If set, used instead of ``fmt`` for cell annotations
+            (e.g. ``"d"`` for integers, ``".0f"`` or ``".1f"`` for whole or one decimal). When
+            ``percentages=True`` and neither ``annot_fmt`` nor ``fmt`` is set, the default is
+            ``".0f"`` (integer-like display; values are stored as float so ``"d"`` would fail).
 
         figsize:
             Size of the matplotlib figure in inches (width, height).
@@ -190,10 +198,6 @@ def plot_topk_overlap_heatmap(
             If True, return the computed overlap matrix and auxiliary data
             for downstream analysis.
 
-        pretty_labels:
-            Optional mapping from model id (feature_class_id) to display label.
-            If provided, tick labels use these instead of raw ids.
-
         pretty_groups:
             Optional mapping from group name to list of model ids. Must be disjoint.
             If not all model ids are covered, ``"Other"`` is auto-added for the rest.
@@ -208,9 +212,6 @@ def plot_topk_overlap_heatmap(
         scale_gamma:
             Gamma for power-law scale when ``scale="power"``. E.g. 0.5 = sqrt.
 
-        show_values:
-            Whether to annotate cells with numeric values. If None, uses ``annot``.
-
         annot_fontsize:
             Font size for cell value annotations. If None, uses default.
 
@@ -223,6 +224,13 @@ def plot_topk_overlap_heatmap(
         cbar_pad:
             Padding between heatmap and colorbar (fraction of axes width).
             Larger values shift the colorbar further right. If None, uses default.
+        cbar_fontsize:
+            Font size for the colorbar (cmap legend) tick labels. If None, uses default.
+        percentages:
+            If True, scale values by 100 and show as percent (0–100). For ``value="intersection_frac"``
+            this multiplies the fraction by 100; for ``value="intersection"`` this shows overlap as
+            percent of k. Default vmin/vmax become 0 and 100 when percentages=True. When percentages
+            is True, the default annotation format is ``".0f"`` (integer-like); override with ``annot_fmt`` or ``fmt``.
 
     Returns:
         If return_data is True, a dictionary with the following keys:
@@ -280,32 +288,49 @@ def plot_topk_overlap_heatmap(
             inter = len(sets[mi] & sets[mj])
             mat[i][j] = float(inter) if value == "intersection" else (inter / topk if topk else 0.0)
 
-    # defaults
-    if fmt is None:
-        fmt = "d" if value == "intersection" else ".2f"
+    # optional scale to percent (0–100)
+    if percentages:
+        if value == "intersection_frac":
+            mat = [[x * 100.0 for x in row] for row in mat]
+        else:
+            mat = [[(x / topk * 100.0) if topk else 0.0 for x in row] for row in mat]
+
+    # default annotation format: when percentages, use integer-like display (.0f for floats)
+    # seaborn passes raw array values; with percentages they are float, so "d" would raise
+    if annot_fmt is not None:
+        fmt = annot_fmt
+    elif fmt is None:
+        if percentages:
+            fmt = ".0f"
+        else:
+            fmt = "d" if value == "intersection" else ".2f"
     if figsize is None:
         s = max(14.0, n * 0.4)
         figsize = (s, s)
-    _annot = annot if show_values is None else show_values
+    _annot = annot
     if _annot == "auto":
         _annot = n <= 25
 
-    if vmin is None and value == "intersection_frac":
-        vmin = 0.0
-    if vmax is None and value == "intersection_frac":
-        vmax = 1.0
-    if vmin is None and value == "intersection":
-        vmin = 0.0
-    if vmax is None and value == "intersection":
-        vmax = float(topk)
+    if percentages:
+        _vmin_default, _vmax_default = 0.0, 100.0
+    else:
+        _vmin_default = 0.0 if value == "intersection_frac" else 0.0
+        _vmax_default = 1.0 if value == "intersection_frac" else float(topk)
+    if vmin is None:
+        vmin = _vmin_default
+    if vmax is None:
+        vmax = _vmax_default
 
     if title in {None, True}:
-        y = "|A ∩ B|" if value == "intersection" else "|A ∩ B| / k"
+        if percentages:
+            y = "|A ∩ B| / k (%)"
+        else:
+            y = "|A ∩ B|" if value == "intersection" else "|A ∩ B| / k"
         title = f"Top-{topk} pairwise overlap ({y})"
 
-    # tick labels
-    xticklabels = [pretty_labels.get(mid, mid) if pretty_labels else mid for mid in model_ids]
-    yticklabels = xticklabels[:]
+    # tick labels: use dict keys (model_ids) directly
+    xticklabels = list(model_ids)
+    yticklabels = list(model_ids)
 
     linecolor = "white"
     boundary_lw = 2.5
@@ -317,8 +342,8 @@ def plot_topk_overlap_heatmap(
 
     mat_arr = np.array(mat)
     norm = None
-    _vmin = float(vmin) if vmin is not None else (0.0 if value == "intersection_frac" else 0.0)
-    _vmax = float(vmax) if vmax is not None else (1.0 if value == "intersection_frac" else float(topk))
+    _vmin = float(vmin) if vmin is not None else (0.0 if value == "intersection_frac" and not percentages else 0.0)
+    _vmax = float(vmax) if vmax is not None else (100.0 if percentages else (1.0 if value == "intersection_frac" else float(topk)))
     eps = max(1e-10, np.finfo(float).tiny)
     if scale == "log":
         norm = LogNorm(vmin=max(eps, _vmin), vmax=_vmax)
@@ -354,6 +379,9 @@ def plot_topk_overlap_heatmap(
         linewidths=0.5,
         linecolor=linecolor,
     )
+    # seaborn heatmap adds colorbar as second axes; capture for cbar_fontsize later
+    fig = ax.get_figure()
+    cbar_ax = fig.axes[1] if len(fig.axes) >= 2 else None
 
     # Optional side column: per-row metric (e.g. best correlation)
     if row_metric:
@@ -470,6 +498,9 @@ def plot_topk_overlap_heatmap(
                 fontsize=group_fontsize, transform=ax_right.transData,
             )
 
+    if cbar_fontsize is not None and cbar_ax is not None:
+        cbar_ax.tick_params(labelsize=cbar_fontsize)
+
     plt.xticks(rotation=45, ha="right")
     plt.yticks(rotation=0)
     plt.tight_layout()
@@ -507,15 +538,15 @@ def plot_topk_overlap_heatmap_with_correlation(
     output_path: Optional[str] = None,
     show: bool = True,
     return_data: bool = True,
-    pretty_labels: Optional[Dict[str, str]] = None,
     pretty_groups: Optional[Dict[str, List[str]]] = None,
     scale: str = "linear",
     scale_gamma: Optional[float] = None,
-    show_values: Optional[bool] = None,
     annot_fontsize: Optional[Union[int, float]] = None,
     tick_label_fontsize: Optional[Union[int, float]] = None,
     group_label_fontsize: Optional[Union[int, float]] = None,
     cbar_pad: Optional[float] = None,
+    cbar_fontsize: Optional[Union[int, float]] = None,
+    percentages: bool = False,
 ) -> Dict[str, object]:
     """
     Convenience wrapper for plot_topk_overlap_heatmap with a correlation side column.
@@ -538,6 +569,7 @@ def plot_topk_overlap_heatmap_with_correlation(
             cluster=cluster,
             annot=annot,
             fmt=fmt,
+            annot_fmt=annot_fmt,
             figsize=figsize,
             cmap=cmap,
             vmin=vmin,
@@ -546,15 +578,15 @@ def plot_topk_overlap_heatmap_with_correlation(
             output_path=output_path,
             show=show,
             return_data=return_data,
-            pretty_labels=pretty_labels,
             pretty_groups=pretty_groups,
             scale=scale,
             scale_gamma=scale_gamma,
-            show_values=show_values,
             annot_fontsize=annot_fontsize,
             tick_label_fontsize=tick_label_fontsize,
             group_label_fontsize=group_label_fontsize,
             cbar_pad=cbar_pad,
+            cbar_fontsize=cbar_fontsize,
+            percentages=percentages,
         )
 
     return plot_topk_overlap_heatmap(
@@ -566,6 +598,7 @@ def plot_topk_overlap_heatmap_with_correlation(
         cluster=cluster,
         annot=annot,
         fmt=fmt,
+        annot_fmt=annot_fmt,
         figsize=figsize,
         cmap=cmap,
         vmin=vmin,
@@ -574,15 +607,15 @@ def plot_topk_overlap_heatmap_with_correlation(
         output_path=output_path,
         show=show,
         return_data=return_data,
-        pretty_labels=pretty_labels,
         pretty_groups=pretty_groups,
         scale=scale,
         scale_gamma=scale_gamma,
-        show_values=show_values,
         annot_fontsize=annot_fontsize,
         tick_label_fontsize=tick_label_fontsize,
         group_label_fontsize=group_label_fontsize,
         cbar_pad=cbar_pad,
+        cbar_fontsize=cbar_fontsize,
+        percentages=percentages,
         row_metric=row_metric,
         row_metric_label="corr",
     )

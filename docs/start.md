@@ -191,7 +191,7 @@ The example above keeps things intentionally simple: one feature (3SG vs 3PL), t
   - **Number**: `class_merge_map={"singular": ["1SG", "3SG"], "plural": ["1PL", "3PL"]}`
   - **Person**: e.g., 1 vs 2 `class_merge_map={"1st": ["1SG", "1PL"], "2nd": ["2SGPL"]}`
 
-  With exactly two merged classes, `target_classes` is inferred automatically. See [english_pronouns.py](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/english_pronouns.py).
+  With exactly two merged classes, `target_classes` is inferred automatically. See [english_pronouns.py](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/english_pronouns.py) or the step-by-step [english_pronouns.ipynb](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/english_pronouns.ipynb) notebook (data creation from Wikipedia → training 3SG vs 3PL → evaluation).
 
 - **Control which base‑class transitions are created**: for more fine‑grained setups you can explicitly restrict which raw feature pairs are used before merging by passing `class_merge_transition_groups` alongside `class_merge_map`. For example, given raw classes `["1SG","1PL","3SG","3PL"]`, you can separate clusters by person
 
@@ -213,7 +213,8 @@ The example above keeps things intentionally simple: one feature (3SG vs 3PL), t
 
 - **[Tutorial: Data generation](tutorials/data-generation.md)** — Build training and neutral data from raw text (syncretism, spaCy, morphology).
 - **[Tutorial: Training](tutorials/training.md)** — Experiment layout, pruning, multi-seed, convergence plot, and training options in detail.
-- **[Tutorial: Evaluation (intra-model)](tutorials/evaluation-intra-model.md)** — Encoder/decoder evaluation and selecting/saving the changed model.
+- **[Tutorial: Evaluation (intra-model)](tutorials/evaluation-intra-model.md)** — Encoder/decoder evaluation and decoder config selection.
+- **[Tutorial: Model Rewrite](tutorials/model-rewrite.md)** — Apply decoder-selected rewrites and save changed checkpoints.
 - **[Tutorial: Evaluation (inter-model)](tutorials/evaluation-inter-model.md)** — Comparing multiple runs (top-k overlap, heatmap).
 - **[Detailed workflow (overview)](tutorials/detailed-workflow.md)** — Precomputed vs generated data; how the parts connect in one run.
 - **[Data handling](guides/data-handling.md)** — All formats the trainer accepts (HF id, DataFrame, per-class dict, …).

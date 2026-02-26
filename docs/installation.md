@@ -12,9 +12,9 @@ pip install gradiend
 
 This installs the core package and required dependencies. Sufficient for training with DataFrames or local data.
 
-## Recommended (plots, HuggingFace, safetensors)
+## Recommended (plots, HuggingFace, tokenizer compatibility, safetensors)
 
-For a full experience (plots, loading HuggingFace datasets, safetensors), install:
+For a full experience (plots, loading HuggingFace datasets, tokenizer compatibility, safetensors), install:
 
 ```bash
 pip install gradiend[recommended]
@@ -27,7 +27,8 @@ This adds:
 | matplotlib  | Plotting (encoder distributions, convergence plots)                     |
 | seaborn     | Visualizations (encoder scatter, heatmaps)                             |
 | safetensors | Faster, safer model serialization (preferred over `.bin`)              |
-| datasets    | Loading HuggingFace datasets by id |
+| datasets    | Loading HuggingFace datasets by id                                     |
+| sentencepiece | Tokenizer backend for some Hugging Face models (e.g. many T5/LLaMA variants); not required for all BERT/GPT tokenizers |
 
 ## Optional: data creation (spaCy)
 

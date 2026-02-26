@@ -430,7 +430,9 @@ if __name__ == "__main__":
         summary_extractor=lambda results: default_extract_candidates(compute_gender_metrics(results)),
         summary_metrics=["_bpi", "_fpi", "_mpi"],
     )
-    summary = dec.get("summary", {})
+    # Decoder result is flat: metric keys at top level plus "grid"
+    _reserved = {"grid", "plot_path", "plot_paths"}
+    summary = {k: v for k, v in dec.items() if k not in _reserved}
     for key in ("_bpi", "_fpi", "_mpi"):
         if key in summary and isinstance(summary[key], dict):
             b = summary[key]

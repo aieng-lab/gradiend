@@ -108,6 +108,7 @@ def _filter_string_only(
     pbar = tqdm(
         it, desc=desc or "Filtering", unit=" sentences",
         leave=True, total=total, position=0, dynamic_ncols=True,
+        mininterval=2.0,
     )
     for sent in pbar:
         if max_matches is not None and len(results) >= max_matches:
@@ -121,7 +122,7 @@ def _filter_string_only(
             _format_filter_postfix(
                 len(results), max_matches, total_target_overall, total_so_far_initial
             ),
-            refresh=True,
+            refresh=False,
         )
     if stats is not None:
         stats["sentences_processed"] = pbar.n
@@ -155,6 +156,7 @@ def _filter_with_spacy(
     pbar = tqdm(
         it, desc=desc or "Filtering", unit=" sent",
         leave=True, total=total, position=0, dynamic_ncols=True,
+        mininterval=2.0,
     )
     for sent in pbar:
         if max_matches is not None and len(results) >= max_matches:
@@ -164,7 +166,7 @@ def _filter_with_spacy(
                 _format_filter_postfix(
                     len(results), max_matches, total_target_overall, total_so_far_initial
                 ),
-                refresh=True,
+                refresh=False,
             )
             continue
         doc = nlp(sent)
@@ -195,7 +197,7 @@ def _filter_with_spacy(
             _format_filter_postfix(
                 len(results), max_matches, total_target_overall, total_so_far_initial
             ),
-            refresh=True,
+            refresh=False,
         )
     if stats is not None:
         stats["sentences_processed"] = pbar.n
@@ -293,7 +295,10 @@ def filter_sentences_multi(
 
     results: dict = {cid: [] for cid, _ in configs_with_ids}
     it = sentences if isinstance(sentences, list) else iter(sentences)
-    pbar = tqdm(it, desc="Filtering", unit=" sent", leave=True, position=0, dynamic_ncols=True)
+    pbar = tqdm(
+        it, desc="Filtering", unit=" sent", leave=True, position=0, dynamic_ncols=True,
+        mininterval=2.0,
+    )
     n_processed = 0
 
     for sent in pbar:
@@ -314,7 +319,7 @@ def filter_sentences_multi(
             postfix += f" | total={total_so_far}/{total_target_overall or 0}"
             if total_target_overall and total_target_overall > 0:
                 postfix += f" ({100.0 * total_so_far / total_target_overall:.1f}%)"
-        pbar.set_postfix_str(postfix, refresh=True)
+        pbar.set_postfix_str(postfix, refresh=False)
 
     if stats is not None:
         stats["sentences_processed"] = n_processed

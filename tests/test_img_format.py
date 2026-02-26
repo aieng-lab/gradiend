@@ -105,11 +105,12 @@ class TestImgFormatTrainerForwarding:
             # Avoid loading the real model (plot_encoder_distributions calls trainer.get_model())
             trainer.get_model = MagicMock(return_value=None)
             # pair is derived from config.target_classes (read-only); already ("3SG", "3PL")
+            # Use source_id/target_id that match trainer.pair (3SG, 3PL) so target_and_neutral_only keeps them
             encoder_df = pd.DataFrame({
                 "encoded": [0.1, -0.2],
                 "label": [1.0, -1.0],
-                "source_id": ["1", "2"],
-                "target_id": ["2", "1"],
+                "source_id": ["3SG", "3PL"],
+                "target_id": ["3PL", "3SG"],
                 "type": ["training", "training"],
             })
             with patch("matplotlib.pyplot.show"):

@@ -44,6 +44,10 @@ class MockModelWithGradiend:
     
     def eval(self):
         return self
+    
+    def save_pretrained(self, save_directory, **kwargs):
+        """Create output dir so training loop and tests can assume path exists."""
+        os.makedirs(save_directory, exist_ok=True)
 
 
 class MockTrainingData:
