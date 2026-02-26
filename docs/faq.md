@@ -1,14 +1,5 @@
 # FAQ / troubleshooting
 
-## Is neutral data (`eval_neutral_data`) required?
-
-No. **`eval_neutral_data` is optional.** When omitted:
-
-- **Encoder evaluation** still runs; it simply has no `neutral_dataset` variant (only training and optionally `neutral_training_masked`).
-- **Decoder evaluation** uses a fallback: training-like data (test split with masks filled by the factual token). Target tokens are automatically ignored in LMS (language modeling score) to avoid distorting perplexity.
-
-For best practice, provide true neutral data (e.g. `TextPredictionDataCreator.generate_neutral_data()` or datasets like `aieng-lab/wortschatz-leipzig-de-grammar-neutral`) when available. See [Data handling](guides/data-handling.md#optional-neutral-evaluation-data-eval_neutral_data) and [Evaluation (intra-model)](tutorials/evaluation-intra-model.md#neutral-data-for-decoder-evaluation-lms).
-
 ## Which modalities are supported?
 
 Currently **only gradients based on text prediction (MLM/CLM)** are supported. All documentation and examples use `TextPredictionTrainer`. Other modalities may be added in the future.
@@ -43,6 +34,17 @@ To reduce memory usage, you can:
 - Use mixed precision training (`TrainingArguments.torch_dtype = torch.bfloat16`), which typically reduces memory usage by about half with minimal impact on convergence. Note: this requires a compatible GPU (e.g. NVIDIA Ampere or later for bfloat16).
 - Use multiple GPUs: device placement is automatic based on GPU count. See [Device placement](guides/training-arguments.md#device-placement) in the training arguments guide.
 - Consider fewer base model parameters for GRADIEND training (e.g., only paramerters in the last few layers) by using `TrainingArguments.params`, see [TrainingArguments](guides/training-arguments.md#model-parameters-which-layers-to-use)) for details.
+
+
+## Is neutral data (`eval_neutral_data`) required?
+
+No. **`eval_neutral_data` is optional.** When omitted:
+
+- **Encoder evaluation** still runs; it simply has no `neutral_dataset` variant (only training and optionally `neutral_training_masked`).
+- **Decoder evaluation** uses a fallback: training-like data (test split with masks filled by the factual token). Target tokens are automatically ignored in LMS (language modeling score) to avoid distorting perplexity.
+
+For best practice, provide true neutral data (e.g. `TextPredictionDataCreator.generate_neutral_data()` or datasets like `aieng-lab/wortschatz-leipzig-de-grammar-neutral`) when available. See [Data handling](guides/data-handling.md#optional-neutral-evaluation-data-eval_neutral_data) and [Evaluation (intra-model)](tutorials/evaluation-intra-model.md#neutral-data-for-decoder-evaluation-lms).
+
 
 ## I have a different issue
 

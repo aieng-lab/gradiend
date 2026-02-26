@@ -61,14 +61,14 @@ nav:
   - Home: index.md
   - Get started:
     - Installation: installation.md
-    - Start here: start.md
+    - Train your first GRADIEND Model: start.md
   - Tutorials:
+    - Detailed workflow (overview): tutorials/detailed-workflow.md
     - Data generation: tutorials/data-generation.md
     - Training: tutorials/training.md
     - Evaluation (intra-model): tutorials/evaluation-intra-model.md
     - Model rewrite: tutorials/model-rewrite.md
     - Evaluation (inter-model): tutorials/evaluation-inter-model.md
-    - Detailed workflow (overview): tutorials/detailed-workflow.md
   - Guides:
     - Core classes and use cases: guides/core-classes.md
     - Data handling: guides/data-handling.md

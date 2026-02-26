@@ -60,7 +60,7 @@ German definite articles study:
 
 ```bibtex
 @misc{drechsel2026understanding,
-  title={Understanding or Memorizing? A Case Study of German Definite Articles in Language Models},
+  title={Understanding or Memorizing? {A} Case Study of German Definite Articles in Language Models},
   author={Jonathan Drechsel and Erisa Bytyqi and Steffen Herbold},
   year={2026},
   eprint={2601.09313},

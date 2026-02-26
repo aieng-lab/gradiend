@@ -1,5 +1,6 @@
 # GRADIEND
 
+[![PyPI](https://img.shields.io/pypi/v/gradiend.svg)](https://pypi.org/project/gradiend/)
 [![arXiv:2502.01406](https://img.shields.io/badge/arXiv-2502.01406-blue.svg)](https://arxiv.org/abs/2502.01406)
 [![arXiv:2601.09313](https://img.shields.io/badge/arXiv-2601.09313-blue.svg)](https://arxiv.org/abs/2601.09313)
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
@@ -167,13 +168,13 @@ base = [
 
 
 
-More examples: [gradiend/examples](https://github.com/aieng-lab/gradiend/tree/main/gradiend/examples)
+More examples: [gradiend/examples](https://github.com/aieng-lab/gradiend/tree/main/gradiend/examples), e.g., this [Jupyter Notebook](gradiend/examples/english_pronouns.ipynb)
 
 ## Documentation
 
 - [Documentation](https://aieng-lab.github.io/gradiend/)
 - [Installation details](docs/installation.md)
-- [Train Your first GRADIEND Model](docs/start.md) — minimal workflow
+- [Train Your first GRADIEND Model](docs/start.md)
 - [Tutorials](docs/index.md#tutorials)
 - [API reference](docs/api-reference.md)
 
@@ -212,7 +213,7 @@ For the German definite articles study using GRADIEND:
 
 ```bibtex
 @misc{drechsel2026understanding,
-  title={Understanding or Memorizing? A Case Study of German Definite Articles in Language Models},
+  title={Understanding or Memorizing? {A} Case Study of German Definite Articles in Language Models},
   author={Jonathan Drechsel and Erisa Bytyqi and Steffen Herbold},
   year={2026},
   eprint={2601.09313},

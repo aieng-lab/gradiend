@@ -22,6 +22,7 @@ Example use cases ([gradiend/examples](https://github.com/aieng-lab/gradiend/tre
 - **[German gender–case](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/gender_de_detailed.py)**
 - **[Race and religion](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/race_religion.py)**
 
+**Links:** [GitHub](https://github.com/aieng-lab/gradiend) · [PyPI](https://pypi.org/project/gradiend/) · [arXiv (main paper)](https://arxiv.org/abs/2502.01406) · [arXiv (German articles)](https://arxiv.org/abs/2601.09313)
 
 ---
 
