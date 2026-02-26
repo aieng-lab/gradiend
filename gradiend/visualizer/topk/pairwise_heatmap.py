@@ -88,7 +88,7 @@ def plot_topk_overlap_heatmap(
     group_label_fontsize: Optional[Union[int, float]] = None,
     cbar_pad: Optional[float] = None,
     cbar_fontsize: Optional[Union[int, float]] = None,
-    percentages: bool = False,
+    percentages: bool = True,
     row_metric: Optional[Dict[str, float]] = None,
     row_metric_label: Optional[str] = "corr",
     row_metric_cmap: str = "magma",

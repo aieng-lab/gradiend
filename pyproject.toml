@@ -4,16 +4,17 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gradiend"
-version = "0.1.1"
+version = "0.1.0"
 description = "GRADIEND: Gradient-based Targeted Feature Learning within Neural Networks"
 readme = "PYPI.md"
 requires-python = ">=3.9"
-license = {text = "See LICENSE file"}
+license = {text = "Apache-2.0"}
 authors = [
     {name = "Jonathan Drechsel", email = "jonathan.drechsel@uni-passau.de"}
 ]
 keywords = ["machine learning", "neural networks", "feature learning", "interpretability"]
 classifiers = [
+    "License :: OSI Approved :: Apache Software License",
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
