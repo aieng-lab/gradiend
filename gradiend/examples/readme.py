@@ -1,4 +1,4 @@
-"""Mirrors the README quick-start example. Run with: python -m gradiend.examples.readme"""
+"""Mirrors the README quick-start example."""
 from gradiend import TextPredictionDataCreator, TextFilterConfig, TrainingArguments, TextPredictionTrainer
 
 base = [

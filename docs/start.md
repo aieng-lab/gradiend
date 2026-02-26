@@ -2,11 +2,8 @@
 
 This page walks through a **self-contained** workflow: you train and evaluate a GRADIEND model for singular-plural feature based on English third person pronouns.
 
-**Runnable script:** [gradiend/examples/start_workflow.py](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/start_workflow.py) on GitHub. From the project root:
+**Runnable script:** [gradiend/examples/start_workflow.py](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/start_workflow.py) on GitHub.
 
-```bash
-python -m gradiend.examples.start_workflow
-```
 
 
 ## 1. Create data with `TextPredictionDataCreator`
