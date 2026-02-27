@@ -2,7 +2,7 @@
 
 This page is the **map** of the detailed workflow. After [Start here](../start.md), the full pipeline has five steps: **data**, **training**, **intra-model evaluation**, **model rewrite**, and **inter-model evaluation**. Each step has its own tutorial where the real detail lives.
 
-![GRADIEND overview](img/workflow-diagram.png)
+![GRADIEND overview](../img/workflow-diagram.png)
 
 - **[Tutorial: Feature Selection and Data Generation](data-generation.md)** — Build training and neutral data (e.g. with spaCy and morphology). Output feeds into the trainer.
 - **[Tutorial: GRADIEND Training](training.md)** — Experiment layout, pruning, multi-seed, convergence plot, and how to configure a real run.

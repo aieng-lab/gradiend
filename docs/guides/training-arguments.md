@@ -177,5 +177,4 @@ Device placement is **automatic** based on GPU count (no model-size heuristic):
 | 2 | encoder + base model on `cuda:0`, decoder on `cuda:1` |
 | ≥3 | encoder on `cuda:0`, decoder on `cuda:1`, base model on `cuda:2` |
 | 0 | all on CPU (automatic when no GPUs) |
-
 **CPU mode:** To force CPU when GPUs are available, pass `device="cpu"` when creating the model (e.g. via `ModelWithGradiend.from_pretrained(..., device="cpu")` or the trainer's model-loading kwargs).**Override individual devices:** Use `device_encoder`, `device_decoder`, `device_base_model` to override specific components.

@@ -38,7 +38,7 @@ pip install -e ".[recommended]"
 
 ## Quick start
 
-Self-contained example (runs with the few sentences below; for real use, add more base data):
+Self-contained example (see more text for meaningful training below or in the [example file](gradiend/examples/readme.py); requires `gradiend[plot]` for plotting):
 
 ```python
 from gradiend import TextPredictionDataCreator, TextFilterConfig, TrainingArguments, TextPredictionTrainer
