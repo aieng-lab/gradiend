@@ -1,6 +1,7 @@
 # GRADIEND
 
 [![PyPI](https://img.shields.io/pypi/v/gradiend.svg)](https://pypi.org/project/gradiend/)
+[![arXiv:2602.23993](https://img.shields.io/badge/arXiv-2602.23993-blue.svg)](https://arxiv.org/abs/2602.23993)
 [![arXiv:2502.01406](https://img.shields.io/badge/arXiv-2502.01406-blue.svg)](https://arxiv.org/abs/2502.01406)
 [![arXiv:2601.09313](https://img.shields.io/badge/arXiv-2601.09313-blue.svg)](https://arxiv.org/abs/2601.09313)
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
@@ -8,7 +9,7 @@
 [![Tests](https://github.com/aieng-lab/gradiend/actions/workflows/tests.yml/badge.svg)](https://github.com/aieng-lab/gradiend/actions/workflows/tests.yml)
 [![Documentation](https://img.shields.io/badge/docs-github.io-blue.svg)](https://aieng-lab.github.io/gradiend/)
 
-GRADIEND (Gradient-based targeted feature learning within neural networks) learns features inside language models by training an encoder-decoder on gradients. Find where a model encodes a feature (e.g. gender, race) and rewrite the model to strengthen or weaken it—for example debias it—while keeping other behaviour. See [GRADIEND: Feature Learning within Neural Networks Exemplified through Biases](https://arxiv.org/abs/2502.01406).
+GRADIEND (Gradient-based targeted feature learning within neural networks) learns features inside language models by training an encoder-decoder on gradients. Find where a model encodes a feature (e.g. gender, race) and rewrite the model to strengthen or weaken it—for example debias it—while keeping other behaviour. See [GRADIEND: Feature Learning within Neural Networks Exemplified through Biases](https://arxiv.org/abs/2502.01406) (introducing the GRADIEND method), and [The GRADIEND Python Package: An End-to-End System for Gradient-Based Feature Learning](https://arxiv.org/abs/2602.23993) (introducing this Python library).
 
 ![GRADIEND overview](docs/img/workflow-diagram.png)
 
@@ -197,6 +198,20 @@ Example scripts and notebooks: [gradiend/examples](https://github.com/aieng-lab/
 
 ## Citation
 
+The Python package paper:
+```bibtex
+@misc{drechsel2026gradiendpythonpackage,
+      title={The {GRADIEND} Python Package: An End-to-End System for Gradient-Based Feature Learning}, 
+      author={Jonathan Drechsel and Steffen Herbold},
+      year={2026},
+      eprint={2602.23993},
+      archivePrefix={arXiv},
+      primaryClass={cs.CL},
+      url={https://arxiv.org/abs/2602.23993}, 
+}
+```
+
+The original GRADIEND method paper:
 ```bibtex
 @misc{drechsel2025gradiend,
   title={{GRADIEND}: Feature Learning within Neural Networks Exemplified through Biases},
@@ -209,19 +224,6 @@ Example scripts and notebooks: [gradiend/examples](https://github.com/aieng-lab/
 }
 ```
 
-For the German definite articles study using GRADIEND:
-
-```bibtex
-@misc{drechsel2026understanding,
-  title={Understanding or Memorizing? {A} Case Study of German Definite Articles in Language Models},
-  author={Jonathan Drechsel and Erisa Bytyqi and Steffen Herbold},
-  year={2026},
-  eprint={2601.09313},
-  archivePrefix={arXiv},
-  primaryClass={cs.CL},
-  url={https://arxiv.org/abs/2601.09313},
-}
-```
 
 ## License
 

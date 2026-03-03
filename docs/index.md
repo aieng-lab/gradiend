@@ -30,6 +30,7 @@ Example use cases ([gradiend/examples](https://github.com/aieng-lab/gradiend/tre
 
 - **[Installation](installation.md)** — Install the package and optional dependencies.
 - **[Train your first GRADIEND model](start.md)** — A minimal runnable example to train and evaluate in a few steps.
+- **Read the Python package paper**: **[The GRADIEND Python Package: An End-to-End System for Gradient-Based Feature Learning](https://arxiv.org/abs/2602.23993)** — describes the design and implementation of the library.
 
 ---
 
