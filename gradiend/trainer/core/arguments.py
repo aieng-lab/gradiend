@@ -4,7 +4,7 @@ Training arguments for GRADIEND Trainer (HF-like API).
 
 import dataclasses
 from dataclasses import dataclass, field
-from typing import Optional, Callable, Union, Any, List, Dict
+from typing import Literal, Optional, Callable, Union, Any, List, Dict
 
 import torch
 import torch.nn as nn
@@ -28,8 +28,16 @@ class TrainingArguments:
     output_dir: Optional[str] = None
     """Directory to save the trained model. If None and experiment_dir is set, uses experiment_dir/model (or experiment_dir/run_id/model when Trainer.run_id is set). Otherwise must be set explicitly."""
 
-    use_cache: bool = False
-    """If True, skip when output path exists (training: model dir; encoder: CSV; etc.). Use False to recompute/retrain."""
+    use_cache: Union[bool, Literal["only_convergent"]] = False
+    """Training checkpoint reuse policy.
+
+    - ``False``: always retrain even when a saved model exists.
+    - ``True``: reuse any saved model at the output path.
+    - ``"only_convergent"``: reuse only when the saved run meets ``min_convergent_seeds``
+      (per-seed convergence for individual seed dirs; aggregate count for the selected model).
+
+    Evaluator/visualizer ``use_cache`` arguments remain bool-only (artifact JSON reuse).
+    """
 
     add_identity_for_other_classes: bool = False
     """If True, add identity (factual==alternative) examples for classes not in the target classes used for training."""
@@ -311,8 +319,9 @@ class TrainingArguments:
             raise TypeError(f"experiment_dir must be str or None, got {type(self.experiment_dir).__name__}")
         if self.output_dir is not None and not isinstance(self.output_dir, str):
             raise TypeError(f"output_dir must be str or None, got {type(self.output_dir).__name__}")
-        if not isinstance(self.use_cache, bool):
-            raise TypeError(f"use_cache must be bool, got {type(self.use_cache).__name__}")
+        from gradiend.trainer.core.cache_policy import normalize_use_cache
+
+        normalize_use_cache(self.use_cache)
         if not isinstance(self.reuse_pre_prune, bool):
             raise TypeError(f"reuse_pre_prune must be bool, got {type(self.reuse_pre_prune).__name__}")
         if not isinstance(self.fail_on_non_convergence, bool):

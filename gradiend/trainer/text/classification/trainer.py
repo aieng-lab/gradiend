@@ -663,7 +663,7 @@ class TextClassificationTrainer(Trainer):
         plot: bool = False,
         **kwargs: Any,
     ) -> pd.DataFrame:
-        use_cache = use_cache or getattr(self.training_args, "use_cache", False)
+        use_cache = self._resolve_artifact_use_cache(use_cache, fallback=False)
         max_size = max_size or getattr(self.training_args, "encoder_eval_max_size", None)
         cache_path = resolve_encoder_analysis_path(
             self.experiment_dir, split=split, max_size=max_size, **kwargs
@@ -778,7 +778,13 @@ class TextClassificationTrainer(Trainer):
         if out is None:
             raise ValueError("experiment_dir or output_path required for train_classification_head")
         if use_cache is None and self.training_args is not None:
-            use_cache = getattr(self.training_args, "use_cache", False)
+            from gradiend.trainer.core.cache_policy import coerce_artifact_use_cache
+
+            use_cache = coerce_artifact_use_cache(getattr(self.training_args, "use_cache", False))
+        elif use_cache is not None:
+            from gradiend.trainer.core.cache_policy import coerce_artifact_use_cache
+
+            use_cache = coerce_artifact_use_cache(use_cache)
         if train_df is None:
             head_df, label2id, id2label, num_labels, split_col = self._classification_head_data()
         else:

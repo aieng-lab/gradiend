@@ -363,7 +363,7 @@ class TrainerAnnotationMixin:
         Returns:
             Dict containing the annotated DataFrame and summary JSON payload.
         """
-        use_cache = self._default_from_training_args(use_cache, "use_cache", fallback=False)
+        use_cache = self._resolve_artifact_use_cache(use_cache, fallback=False)
         csv_path = resolve_annotated_data_csv_path(self.experiment_dir, output_csv)
         json_path = resolve_annotated_data_json_path(self.experiment_dir, output_json)
 

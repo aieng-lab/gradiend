@@ -42,6 +42,10 @@ from gradiend.trainer.core.annotation import TrainerAnnotationMixin
 from gradiend.trainer.core.training import format_non_convergence_error, train as core_train
 from gradiend.trainer.factory import create_model_with_gradiend
 from gradiend.trainer.core.arguments import TrainingArguments
+from gradiend.trainer.core.cache_policy import (
+    should_reuse_seed_training_cache,
+    should_reuse_training_cache,
+)
 from gradiend.trainer.core.multi_seed import MultiSeedTrainerView, resolve_seed_run_entries
 from gradiend.evaluator import Evaluator
 from gradiend.visualizer.plot_delegation import see_implementation
@@ -997,9 +1001,16 @@ class Trainer(TrainerAnnotationMixin, FeatureLearningDefinition):
         if getattr(config, "supervised_decoder", False):
             config.do_eval = False
 
-        if config.use_cache and has_saved_model(output_dir):
+        if should_reuse_training_cache(
+            config.use_cache,
+            output_dir,
+            min_convergent_seeds=int(getattr(config, "min_convergent_seeds", 1) or 1),
+        ):
             logger.info(
-                f"GRADIEND model already exists at {output_dir}, skipping training. Use use_cache=False to retrain."
+                "GRADIEND model already exists at %s and satisfies use_cache=%r; skipping training. "
+                "Use use_cache=False to retrain.",
+                output_dir,
+                config.use_cache,
             )
             return output_dir
         if has_saved_model(output_dir):
@@ -1271,9 +1282,16 @@ class Trainer(TrainerAnnotationMixin, FeatureLearningDefinition):
             )
 
         # Check cache before pre_prune/train/post_prune so we skip all of them when reusing
-        if getattr(args, "use_cache", True) and has_saved_model(output_dir):
+        if should_reuse_training_cache(
+            args.use_cache,
+            output_dir,
+            min_convergent_seeds=int(getattr(args, "min_convergent_seeds", 1) or 1),
+        ):
             logger.info(
-                f"GRADIEND model already exists at {output_dir}, skipping training. Use use_cache=False to retrain."
+                "GRADIEND model already exists at %s and satisfies use_cache=%r; skipping training. "
+                "Use use_cache=False to retrain.",
+                output_dir,
+                args.use_cache,
             )
             self._model_arg = output_dir
             self._model_instance = None
@@ -1497,8 +1515,12 @@ class Trainer(TrainerAnnotationMixin, FeatureLearningDefinition):
                 used_cache = False
                 trained = False
                 model_instance = None
-                if args.use_cache and has_saved_model(seed_output_dir):
-                    logger.info("Seed %s: cached model found at %s; skipping training.", seed_value, seed_output_dir)
+                if should_reuse_seed_training_cache(args.use_cache, seed_output_dir):
+                    logger.info(
+                        "Seed %s: convergent cached model found at %s; skipping training.",
+                        seed_value,
+                        seed_output_dir,
+                    )
                     out_path = seed_output_dir
                     used_cache = True
                 else:
@@ -2338,7 +2360,7 @@ class Trainer(TrainerAnnotationMixin, FeatureLearningDefinition):
         if eval_batch_size is not None and eval_batch_size < 1:
             raise ValueError(f"eval_batch_size must be >= 1, got {eval_batch_size}")
 
-        use_cache = self._default_from_training_args(use_cache, "use_cache", fallback=False)
+        use_cache = self._resolve_artifact_use_cache(use_cache, fallback=False)
         max_size_training_like = self._default_from_training_args(
             max_size_training_like, "decoder_eval_max_size_training_like"
         )
@@ -2488,6 +2510,8 @@ class Trainer(TrainerAnnotationMixin, FeatureLearningDefinition):
             raise TypeError(f"plot must be bool, got {type(plot).__name__}")
         if use_cache is not None and not isinstance(use_cache, bool):
             raise TypeError(f"use_cache must be bool or None, got {type(use_cache).__name__}")
+        if use_cache is None:
+            use_cache = self._resolve_artifact_use_cache(fallback=False)
 
         resolved_encoder_df = _resolve_encoder_df(encoder_df)
         if resolved_encoder_df is not None:

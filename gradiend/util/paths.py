@@ -464,20 +464,18 @@ def has_saved_decoder_mlm_head(output_dir: str) -> bool:
     return isinstance(meta, dict) and "target_token_ids" in meta and isinstance(cfg, dict)
 
 
-def should_use_cached(path: Optional[str], use_cache: bool) -> bool:
+def should_use_cached(path: Optional[str], use_cache: Any) -> bool:
     """
     Return whether we can skip computation and use cached output.
 
-    True only when path is set, use_cache is True, and path exists (file or dir).
+    True only when path is set, use_cache is explicitly bool True, and path exists.
 
-    Args:
-        path: Resolved output path (from resolve_output_path).
-        use_cache: Whether to use cache when path exists.
-
-    Returns:
-        True if path exists and use_cache is True; False otherwise.
+    ``"only_convergent"`` and other training policy strings are treated as False
+    so they are never accidentally enabled via Python truthiness.
     """
-    if path is None or not use_cache:
+    from gradiend.trainer.core.cache_policy import coerce_artifact_use_cache
+
+    if path is None or not coerce_artifact_use_cache(use_cache):
         return False
     return os.path.exists(path)
 

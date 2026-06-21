@@ -195,6 +195,13 @@ class FeatureLearningDefinition(DataProvider, ABC):
         arg_val = self._get_training_arg(name)
         return arg_val if arg_val is not None else fallback
 
+    def _resolve_artifact_use_cache(self, value: Optional[Any] = None, *, fallback: bool = False) -> bool:
+        """Resolve eval/annotation cache bool from an override or ``TrainingArguments.use_cache``."""
+        from gradiend.trainer.core.cache_policy import coerce_artifact_use_cache
+
+        raw = self._default_from_training_args(value, "use_cache", fallback=fallback)
+        return coerce_artifact_use_cache(raw)
+
     def _apply_training_arg_defaults(self, kwargs: Dict[str, Any], mapping: Dict[str, str]) -> Dict[str, Any]:
         for param, arg_name in mapping.items():
             if kwargs.get(param) is None:
@@ -790,7 +797,7 @@ class FeatureLearningDefinition(DataProvider, ABC):
             )
 
         encoder_kwargs.setdefault("split", "test")
-        use_cache = self._default_from_training_args(encoder_kwargs.pop("use_cache", None), "use_cache", fallback=None)
+        use_cache = self._resolve_artifact_use_cache(encoder_kwargs.pop("use_cache", None), fallback=False)
         if not use_cache:
             raise ValueError(
                 "get_encoder_metrics requires encoder_df or use_cache=True to load cached metrics"

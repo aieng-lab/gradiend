@@ -2000,7 +2000,7 @@ class TextPredictionTrainer(Trainer):
                 model = base
         objective = self._prediction_objective(model)
 
-        use_cache = self._default_from_training_args(use_cache, "use_cache", fallback=False)
+        use_cache = self._resolve_artifact_use_cache(use_cache, fallback=False)
         explicit_objective = getattr(getattr(self, "_training_args", None), "prediction_objective", "auto")
         if explicit_objective not in (None, "auto") and cache_folder:
             cache_folder = f"{cache_folder}_{objective.name}"
@@ -2804,7 +2804,7 @@ class TextPredictionTrainer(Trainer):
                 "Output path required for decoder-only MLM head. "
                 "Set experiment_dir on TrainingArguments or pass output= explicitly."
             )
-        use_cache = self._default_from_training_args(use_cache, "use_cache", fallback=False)
+        use_cache = self._resolve_artifact_use_cache(use_cache, fallback=False)
         model_use_cache = self._default_from_training_args(
             model_use_cache, "model_use_cache", fallback=False
         )
@@ -3000,7 +3000,7 @@ class TextPredictionTrainer(Trainer):
             The 'type' column indicates the variant: 'training', 'neutral_training_masked', or 'neutral_dataset'
         """
 
-        use_cache = self._default_from_training_args(use_cache, "use_cache", fallback=False)
+        use_cache = self._resolve_artifact_use_cache(use_cache, fallback=False)
         if max_size is None:
             max_size = self._default_from_training_args(max_size, "encoder_eval_max_size")
         include_other_classes = self._default_from_training_args(
