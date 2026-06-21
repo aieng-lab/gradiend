@@ -1,13 +1,21 @@
 """
 Full pre-prune grid for German der<->die GRADIENDs: pre_topk x source x n_samples.
 
-Trains all 5 der<->die pairs for every grid cell. Reference arm per pair:
-pre_topk=1.0 (no pre/post prune). Metrics vs reference top-1000 decoder weights
-(base-global indices, heatmap-compatible):
+Trains all 5 der<->die pairs for every grid cell (multi-seed, convergence enforced).
+Reference arm per pair: pre_topk=1.0 (no pre/post prune).
 
-- ref_recall: |T_final ∩ T_ref| / topk_eval
-- kept_dim: GRADIEND input size after pre-prune
-- cross_overlap: mean pairwise top-k intersection_frac across the 5 pairs
+Primary paper metric — **cross_overlap** (between GRADIENDs):
+  For a fixed pre-prune config, take each pair's top-1000 decoder weights (base-global
+  indices) and report the mean pairwise intersection fraction across the 5 der<->die
+  GRADIENDs. This measures whether different case transitions share a subspace.
+
+Secondary within-GRADIEND metric — **ref_recall**:
+  |T_config ∩ T_ref| / topk_eval for the same pair, comparing a pruned run to its own
+  no-pre reference. Useful appendix material; not the cross-GRADIEND intersection.
+
+Training uses max_seeds=5, min_convergent_seeds=2, fail_on_non_convergence=True, and
+use_cache="only_convergent" so non-converged checkpoints are automatically retrained
+on resume.
 
 Results and per-run top-k index files are saved incrementally (resume-safe).
 
@@ -26,7 +34,7 @@ import json
 import math
 import os
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 from itertools import combinations
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
@@ -197,7 +205,9 @@ DER_DIE_PAIRS: Tuple[Tuple[str, str], ...] = (
 
 PRE_SOURCES = ["alternative", "factual", "diff"]
 PRE_N_SAMPLES = [1, 2, 4, 8, 16, 32, 64]
-PRE_TOPK_VALUES = [1.0, 0.1, 0.01, 0.001]
+PRE_TOPK_VALUES = [1.0, 0.1, 0.01]
+MIN_CONVERGENT_SEEDS = 2
+DEFAULT_MAX_SEEDS = 5
 PRE_PRUNE_SEED = 42
 TOPK_EVAL = 1000
 TOPK_PART = "decoder-weight"
@@ -226,6 +236,11 @@ class GridResult:
     decoder_prob_delta: Optional[float] = None
     training_time_s: Optional[float] = None
     pre_pruning_time_s: Optional[float] = None
+    converged: Optional[bool] = None
+    n_convergent_seeds: Optional[int] = None
+    n_seeds_tried: Optional[int] = None
+    selected_seed: Optional[int] = None
+    error: Optional[str] = None
 
 
 def _load_results(path: str) -> List[GridResult]:
@@ -243,7 +258,9 @@ def _load_results(path: str) -> List[GridResult]:
                 row["error"],
             )
             continue
-        results.append(GridResult(**row))
+        allowed = {field.name for field in fields(GridResult)}
+        filtered = {key: value for key, value in row.items() if key in allowed}
+        results.append(GridResult(**filtered))
     return results
 
 
@@ -341,7 +358,20 @@ def _config_key(pre_topk: float, pre_source: Optional[str], pre_n_samples: Optio
     return f"topk_{_format_topk(pre_topk)}__src_{src}__n_{n}"
 
 
+def _resolve_max_seeds(max_seeds: int) -> int:
+    if max_seeds < MIN_CONVERGENT_SEEDS:
+        logger.warning(
+            "max_seeds=%s is below min_convergent_seeds=%s; using %s instead.",
+            max_seeds,
+            MIN_CONVERGENT_SEEDS,
+            DEFAULT_MAX_SEEDS,
+        )
+        return DEFAULT_MAX_SEEDS
+    return max_seeds
+
+
 def _base_args(output_dir: str, *, max_seeds: int) -> Dict[str, Any]:
+    max_seeds = _resolve_max_seeds(max_seeds)
     return dict(
         experiment_dir=output_dir,
         base_gradient_batch_size=4,
@@ -352,12 +382,13 @@ def _base_args(output_dir: str, *, max_seeds: int) -> Dict[str, Any]:
         num_train_epochs=1,
         max_steps=1000,
         max_seeds=max_seeds,
-        min_convergent_seeds=1,
+        min_convergent_seeds=MIN_CONVERGENT_SEEDS,
+        fail_on_non_convergence=True,
         source="alternative",
         target="diff",
         eval_batch_size=8,
         learning_rate=1e-5,
-        use_cache=True,
+        use_cache="only_convergent",
         add_identity_for_other_classes=True,
     )
 
@@ -401,9 +432,54 @@ def _append_result(results: List[GridResult], result: GridResult, path: str) -> 
 
 def _has_success(results: List[GridResult], pair: str, run_id: str) -> bool:
     return any(
-        r.pair == pair and r.run_id == run_id and r.topk_indices_file
+        r.pair == pair
+        and r.run_id == run_id
+        and r.topk_indices_file
+        and r.converged is True
+        and not r.error
         for r in results
     )
+
+
+def _read_run_convergence(checkpoint_path: str) -> Dict[str, Any]:
+    stats = load_training_stats(checkpoint_path) or {}
+    info = stats.get("convergence_info") or {}
+    run_dir = os.path.dirname(os.path.normpath(checkpoint_path))
+    report_path = os.path.join(run_dir, "seeds", "seed_report.json")
+    report: Dict[str, Any] = {}
+    if os.path.isfile(report_path):
+        with open(report_path, encoding="utf-8") as handle:
+            payload = json.load(handle)
+            report = payload if isinstance(payload, dict) else {}
+
+    n_convergent = info.get("convergent_count")
+    if not isinstance(n_convergent, int):
+        report_count = report.get("convergent_count")
+        n_convergent = int(report_count) if isinstance(report_count, int) else 0
+
+    seeds_tried = report.get("seeds_tried")
+    n_tried = len(seeds_tried) if isinstance(seeds_tried, list) else info.get("max_seeds")
+    if not isinstance(n_tried, int):
+        n_tried = DEFAULT_MAX_SEEDS
+
+    selected_seed = report.get("best_seed")
+    selected_seed = int(selected_seed) if isinstance(selected_seed, int) else None
+    converged = n_convergent >= MIN_CONVERGENT_SEEDS
+    return {
+        "converged": converged,
+        "n_convergent_seeds": n_convergent,
+        "n_seeds_tried": n_tried,
+        "selected_seed": selected_seed,
+    }
+
+
+def _apply_convergence_fields(result: GridResult, checkpoint_path: str) -> GridResult:
+    meta = _read_run_convergence(checkpoint_path)
+    result.converged = bool(meta["converged"])
+    result.n_convergent_seeds = int(meta["n_convergent_seeds"])
+    result.n_seeds_tried = int(meta["n_seeds_tried"])
+    result.selected_seed = meta["selected_seed"]
+    return result
 
 
 def _topk_base_global(model: Any, *, topk: int, part: str) -> Set[int]:
@@ -521,19 +597,40 @@ def _run_baseline(
     results = _load_results(results_path)
 
     cached = next(
-        (r for r in results if r.pair == pair_key and r.run_id == run_id and r.topk_indices_file),
+        (
+            r
+            for r in results
+            if r.pair == pair_key
+            and r.run_id == run_id
+            and r.converged is True
+            and r.topk_indices_file
+        ),
         None,
     )
     if cached is not None and os.path.isfile(cached.topk_indices_file):
-        logger.info("Using cached reference for pair %s.", pair_key)
+        logger.info("Using convergent cached reference for pair %s.", pair_key)
         return _load_topk_indices(cached.topk_indices_file)
 
     logger.info("Training reference (no pre-prune) for pair %s.", pair_key)
     trainer = _build_trainer(run_id=run_id, pair=pair, args=TrainingArguments(**args_base))
-    with CudaMemorySpan():
-        training_time = _train_and_get_time(trainer, output_dir, run_id)
-    trainer.unload_model()
-    _clear_cuda_memory()
+    checkpoint_path = _checkpoint_path(output_dir, run_id)
+    try:
+        with CudaMemorySpan():
+            training_time = _train_and_get_time(trainer, output_dir, run_id)
+    except RuntimeError as exc:
+        logger.error("Reference training failed for pair %s: %s", pair_key, exc)
+        failed = GridResult(
+            pair=pair_key,
+            run_id=run_id,
+            pre_topk=1.0,
+            converged=False,
+            error=str(exc),
+        )
+        _append_result(results, failed, results_path)
+        return None
+    finally:
+        trainer.unload_model()
+        _clear_cuda_memory()
 
     eval_trainer = _build_trainer(
         run_id=run_id,
@@ -555,12 +652,19 @@ def _run_baseline(
         result.training_time_s = training_time
         result.ref_recall = 1.0
         result.ref_precision = 1.0
+        result = _apply_convergence_fields(result, checkpoint_path)
+        if not result.converged:
+            result.error = (
+                f"baseline converged {result.n_convergent_seeds}/{MIN_CONVERGENT_SEEDS} seeds"
+            )
     finally:
         eval_trainer.unload_model()
         del model
         _clear_cuda_memory()
 
     _append_result(results, result, results_path)
+    if not result.converged or not result.topk_indices_file:
+        return None
     return ref_topk
 
 
@@ -598,13 +702,31 @@ def _run_grid_cell(
     )
     train_args = TrainingArguments(**args_base, pre_prune_config=pre_cfg)
     trainer = _build_trainer(run_id=run_id, pair=pair, args=train_args)
+    checkpoint_path = _checkpoint_path(output_dir, run_id)
     pre_start = time.perf_counter()
     with CudaMemorySpan():
         trainer.pre_prune(inplace=True)
     pre_pruning_time_s = time.perf_counter() - pre_start
     trainer._training_args = TrainingArguments(**args_base)
-    with CudaMemorySpan():
-        training_time_s = _train_and_get_time(trainer, output_dir, run_id)
+    try:
+        with CudaMemorySpan():
+            training_time_s = _train_and_get_time(trainer, output_dir, run_id)
+    except RuntimeError as exc:
+        logger.error("Grid cell failed convergence for %s: %s", run_id, exc)
+        failed = GridResult(
+            pair=pair_key,
+            run_id=run_id,
+            pre_topk=topk,
+            pre_source=source,
+            pre_n_samples=n_samples,
+            converged=False,
+            error=str(exc),
+            pre_pruning_time_s=pre_pruning_time_s,
+        )
+        _append_result(results, failed, results_path)
+        trainer.unload_model()
+        _clear_cuda_memory()
+        return
     trainer.unload_model()
     _clear_cuda_memory()
 
@@ -629,6 +751,11 @@ def _run_grid_cell(
         )
         result.training_time_s = training_time_s
         result.pre_pruning_time_s = pre_pruning_time_s
+        result = _apply_convergence_fields(result, checkpoint_path)
+        if not result.converged:
+            result.error = (
+                f"grid cell converged {result.n_convergent_seeds}/{MIN_CONVERGENT_SEEDS} seeds"
+            )
     finally:
         eval_trainer.unload_model()
         del model
@@ -688,7 +815,11 @@ def run_full_grid(
 
 
 def _summarize_configs(results: List[GridResult]) -> List[ConfigSummary]:
-    ok = [r for r in results if r.topk_indices_file]
+    ok = [
+        r
+        for r in results
+        if r.topk_indices_file and r.converged is True and not r.error
+    ]
     by_config: Dict[str, List[GridResult]] = {}
     for row in ok:
         if row.pre_topk is not None and math.isclose(row.pre_topk, 1.0):
@@ -896,9 +1027,9 @@ def plot_all(
 
     plot_metric_panels(
         summaries,
-        metric="mean_ref_recall",
-        title="Mean reference top-1000 recall (5 der<->die pairs)",
-        output_path=os.path.join(output_dir, "grid_mean_ref_recall_heatmap.pdf"),
+        metric="mean_cross_overlap",
+        title="Cross-GRADIEND top-1000 overlap (mean over 5 der<->die pairs)",
+        output_path=os.path.join(output_dir, "grid_mean_cross_overlap_heatmap.pdf"),
         sources=sources,
         n_samples_values=n_samples_values,
         pre_topk_values=pre_topk_values,
@@ -907,9 +1038,9 @@ def plot_all(
     )
     plot_metric_panels(
         summaries,
-        metric="mean_cross_overlap",
-        title="Mean pairwise top-1000 overlap across 5 pairs (heatmap proxy)",
-        output_path=os.path.join(output_dir, "grid_mean_cross_overlap_heatmap.pdf"),
+        metric="mean_ref_recall",
+        title="Within-GRADIEND reference recall (appendix; vs no-pre top-1000)",
+        output_path=os.path.join(output_dir, "grid_mean_ref_recall_heatmap.pdf"),
         sources=sources,
         n_samples_values=n_samples_values,
         pre_topk_values=pre_topk_values,
@@ -971,7 +1102,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--pre-n-samples", type=_csv_ints, default=PRE_N_SAMPLES)
     parser.add_argument("--pre-sources", type=_csv_strings, default=PRE_SOURCES)
     parser.add_argument("--pre-topk-values", type=_csv_floats, default=PRE_TOPK_VALUES)
-    parser.add_argument("--max-seeds", type=int, default=1)
+    parser.add_argument(
+        "--max-seeds",
+        type=int,
+        default=DEFAULT_MAX_SEEDS,
+        help=f"Must be >= min_convergent_seeds ({MIN_CONVERGENT_SEEDS}); values below that are raised to {DEFAULT_MAX_SEEDS}.",
+    )
     parser.add_argument("--eval-max-size", type=int, default=200)
     return parser
 
@@ -998,6 +1134,7 @@ def main() -> None:
     else:
         results = _load_results(results_path)
     if args.mode in ("run", "both"):
+        max_seeds = _resolve_max_seeds(args.max_seeds)
         results = run_full_grid(
             output_dir=args.output_dir,
             results_path=results_path,
@@ -1005,7 +1142,7 @@ def main() -> None:
             sources=args.pre_sources,
             n_samples_values=args.pre_n_samples,
             pre_topk_values=args.pre_topk_values,
-            max_seeds=args.max_seeds,
+            max_seeds=max_seeds,
             max_size=args.eval_max_size,
         )
         if args.mode == "both":
