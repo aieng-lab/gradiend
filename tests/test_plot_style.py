@@ -86,8 +86,9 @@ class TestPlotStyle:
     def test_require_matplotlib_triggers_style_config(self, monkeypatch):
         pytest.importorskip("matplotlib")
         monkeypatch.delenv(ENV_USE_LATEX, raising=False)
-        with patch("gradiend.visualizer.plot_optional.configure_matplotlib_style") as mock_configure:
-            from gradiend.visualizer.plot_optional import _require_matplotlib
+        import gradiend.visualizer.plot_style as plot_style_module
+        from gradiend.visualizer.plot_optional import _require_matplotlib
 
-            _require_matplotlib()
-        mock_configure.assert_called_once()
+        assert plot_style_module._CONFIGURED is False
+        _require_matplotlib()
+        assert plot_style_module._CONFIGURED is True
