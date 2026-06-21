@@ -11,6 +11,15 @@ from gradiend.trainer.text.classification.trainer import TextClassificationTrain
 import gradiend.trainer.trainer as trainer_module
 
 
+def _patch_training_cache_hit(monkeypatch) -> None:
+    """Train() checks should_reuse_training_cache, not trainer.has_saved_model directly."""
+    monkeypatch.setattr(
+        trainer_module,
+        "should_reuse_training_cache",
+        lambda *args, **kwargs: True,
+    )
+
+
 class _DummyPredictionTokenizer:
     mask_token = "[MASK]"
     mask_token_id = 1
@@ -88,7 +97,7 @@ def _make_classification_trainer(experiment_dir: str) -> TextClassificationTrain
 
 
 def test_prediction_cached_train_defers_data_loading(monkeypatch):
-    monkeypatch.setattr(trainer_module, "has_saved_model", lambda output_dir: True)
+    _patch_training_cache_hit(monkeypatch)
     trainer = _make_prediction_trainer("prediction-cache-exp")
 
     trainer.train()
@@ -98,7 +107,7 @@ def test_prediction_cached_train_defers_data_loading(monkeypatch):
 
 
 def test_prediction_evaluate_encoder_keeps_data_unloaded_when_encoder_df_is_provided(monkeypatch):
-    monkeypatch.setattr(trainer_module, "has_saved_model", lambda output_dir: True)
+    _patch_training_cache_hit(monkeypatch)
     trainer = _make_prediction_trainer("prediction-cache-exp")
     trainer.train()
     trainer._evaluator = SimpleNamespace(
@@ -115,7 +124,7 @@ def test_prediction_evaluate_encoder_keeps_data_unloaded_when_encoder_df_is_prov
 
 
 def test_prediction_evaluate_encoder_lazy_loads_data_when_needed(monkeypatch):
-    monkeypatch.setattr(trainer_module, "has_saved_model", lambda output_dir: True)
+    _patch_training_cache_hit(monkeypatch)
     trainer = _make_prediction_trainer("prediction-cache-exp")
     trainer.train()
     trainer._evaluator = SimpleNamespace(evaluate_encoder=lambda **kwargs: {"ok": True})
@@ -141,7 +150,7 @@ def test_prediction_evaluate_encoder_lazy_loads_data_when_needed(monkeypatch):
 
 
 def test_prediction_evaluate_decoder_keeps_data_unloaded_when_frames_are_supplied(monkeypatch):
-    monkeypatch.setattr(trainer_module, "has_saved_model", lambda output_dir: True)
+    _patch_training_cache_hit(monkeypatch)
     trainer = _make_prediction_trainer("prediction-cache-exp")
     trainer.train()
     trainer.get_model = lambda: SimpleNamespace(tokenizer=_DummyPredictionTokenizer())
@@ -164,7 +173,7 @@ def test_prediction_evaluate_decoder_keeps_data_unloaded_when_frames_are_supplie
 
 
 def test_prediction_evaluate_decoder_lazy_loads_data_when_needed(monkeypatch):
-    monkeypatch.setattr(trainer_module, "has_saved_model", lambda output_dir: True)
+    _patch_training_cache_hit(monkeypatch)
     trainer = _make_prediction_trainer("prediction-cache-exp")
     trainer.train()
     trainer.get_model = lambda: SimpleNamespace(tokenizer=_DummyPredictionTokenizer())
@@ -192,7 +201,7 @@ def test_prediction_evaluate_decoder_lazy_loads_data_when_needed(monkeypatch):
 
 
 def test_classification_cached_train_defers_data_loading(monkeypatch):
-    monkeypatch.setattr(trainer_module, "has_saved_model", lambda output_dir: True)
+    _patch_training_cache_hit(monkeypatch)
     trainer = _make_classification_trainer("classification-cache-exp")
 
     trainer.train()
@@ -202,7 +211,7 @@ def test_classification_cached_train_defers_data_loading(monkeypatch):
 
 
 def test_classification_evaluate_encoder_keeps_data_unloaded_when_encoder_df_is_provided(monkeypatch):
-    monkeypatch.setattr(trainer_module, "has_saved_model", lambda output_dir: True)
+    _patch_training_cache_hit(monkeypatch)
     trainer = _make_classification_trainer("classification-cache-exp")
     trainer.train()
     trainer._evaluator = SimpleNamespace(
@@ -219,7 +228,7 @@ def test_classification_evaluate_encoder_keeps_data_unloaded_when_encoder_df_is_
 
 
 def test_classification_evaluate_encoder_lazy_loads_data_when_needed(monkeypatch):
-    monkeypatch.setattr(trainer_module, "has_saved_model", lambda output_dir: True)
+    _patch_training_cache_hit(monkeypatch)
     trainer = _make_classification_trainer("classification-cache-exp")
     trainer.train()
     trainer._evaluator = SimpleNamespace(evaluate_encoder=lambda **kwargs: {"ok": True})
@@ -239,7 +248,7 @@ def test_classification_evaluate_encoder_lazy_loads_data_when_needed(monkeypatch
 
 
 def test_classification_evaluate_decoder_keeps_data_unloaded_when_frames_are_supplied(monkeypatch):
-    monkeypatch.setattr(trainer_module, "has_saved_model", lambda output_dir: True)
+    _patch_training_cache_hit(monkeypatch)
     trainer = _make_classification_trainer("classification-cache-exp")
     trainer.train()
     trainer.get_model = lambda: SimpleNamespace(tokenizer=_DummyClassificationTokenizer())
@@ -262,7 +271,7 @@ def test_classification_evaluate_decoder_keeps_data_unloaded_when_frames_are_sup
 
 
 def test_classification_evaluate_decoder_lazy_loads_data_when_needed(monkeypatch):
-    monkeypatch.setattr(trainer_module, "has_saved_model", lambda output_dir: True)
+    _patch_training_cache_hit(monkeypatch)
     trainer = _make_classification_trainer("classification-cache-exp")
     trainer.train()
     trainer.get_model = lambda: SimpleNamespace(tokenizer=_DummyClassificationTokenizer())
