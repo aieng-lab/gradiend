@@ -9,6 +9,11 @@ import os
 from typing import Any, Dict, List, Optional, Tuple
 
 from gradiend.visualizer.plot_optional import _require_matplotlib
+from gradiend.visualizer.labels import (
+    converged_for_trainer,
+    format_label_with_convergence,
+    resolve_highlight_non_convergence,
+)
 from gradiend.util.logging import get_logger
 
 logger = get_logger(__name__)
@@ -24,8 +29,10 @@ def plot_probability_shifts(
     output: Optional[str] = None,
     show: bool = True,
     figsize: Optional[Tuple[float, float]] = None,
+    highlight_non_convergence: Optional[bool] = None,
+    return_fig_ax: bool = False,
     **kwargs: Any
-) -> str:
+) -> Any:
     """
     Plot decoder probability shifts vs learning rate for a single target (target_class).
 
@@ -47,10 +54,15 @@ def plot_probability_shifts(
         output: Path to save plot. If None and trainer.experiment_dir is set, saves there.
         show: Whether to display the plot
         figsize: Figure size in inches. If None, auto-calculated.
+        highlight_non_convergence: When True, append a non-convergence marker to the figure title
+            for non-converged runs. ``None`` uses ``TrainingArguments.highlight_non_convergence``.
+        return_fig_ax: If True, return ``(fig, axes)`` and leave the figure open for
+            caller-side customization.
         **kwargs: Additional arguments passed to matplotlib
 
     Returns:
-        Path to saved plot file (or empty string if not saved)
+        Path to saved plot file (or empty string if not saved). If ``return_fig_ax=True``,
+        returns ``(fig, axes)``.
     """
     plt = _require_matplotlib()
     
@@ -320,7 +332,17 @@ def plot_probability_shifts(
         for ax in axes:
             ax.axvline(x=selected_lr, color="gray", linestyle="--", alpha=0.7, zorder=1)
     
-    # Shared legend for dataset probability plots
+    highlight = resolve_highlight_non_convergence(highlight_non_convergence, trainer=trainer)
+    suptitle = None
+    if trainer is not None and highlight:
+        run_id = getattr(trainer, "run_id", None) or "Probability shifts"
+        suptitle = format_label_with_convergence(
+            str(run_id),
+            converged=converged_for_trainer(trainer),
+            highlight_non_convergence=True,
+        )
+
+    # Shared legend for dataset probability plots (below subplots so suptitle stays on top)
     if len(dataset_classes) > 0:
         handles, labels = axes[-1].get_legend_handles_labels()
         seen = set()
@@ -333,12 +355,18 @@ def plot_probability_shifts(
         fig.legend(
             unique_handles,
             unique_labels,
-            loc="upper center",
+            loc="lower center",
+            bbox_to_anchor=(0.5, 0.0),
             ncol=min(len(unique_labels), 6),
             fontsize=8,
         )
-    
-    plt.tight_layout(rect=[0, 0, 1, 0.96])  # Leave space for top legend
+
+    bottom_margin = 0.06 if len(dataset_classes) > 0 else 0.0
+    top_margin = 0.93 if suptitle else 1.0
+    plt.tight_layout(rect=[0, bottom_margin, 1, top_margin])
+
+    if suptitle:
+        fig.suptitle(suptitle, fontsize=10, y=top_margin)
     
     # Save plot
     output_path = None
@@ -367,7 +395,9 @@ def plot_probability_shifts(
     
     if show:
         plt.show()
-    else:
+    if return_fig_ax:
+        return fig, axes
+    if not show:
         plt.close(fig)
     
     return output_path or ""

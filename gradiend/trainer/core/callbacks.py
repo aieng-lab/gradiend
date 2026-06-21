@@ -83,15 +83,13 @@ class EvaluationCallback(TrainingCallback):
         # Check if we should evaluate at this step
         # Evaluate at step 0 (initial), every n_evaluation steps, and at last iteration
         should_eval = (
-            step % self.n_evaluation == 0 or 
+            (self.n_evaluation > 0 and step % self.n_evaluation == 0) or
             kwargs.get('last_iteration', False)
         )
         
-        # Skip if we already evaluated at this step
+        # Skip if we already evaluated successfully at this step
         if not should_eval or step == self.last_eval_step:
             return None
-        
-        self.last_eval_step = step
         
         logger.debug(f'Evaluating at step {step}...')
         
@@ -99,62 +97,64 @@ class EvaluationCallback(TrainingCallback):
         # We need gradients enabled for GRADIEND evaluation, so don't use torch.no_grad()
         base_model_was_training = model.base_model.training
         gradiend_was_training = model.gradiend.training
-        
-        try:
-            # Set eval mode on submodules (not the whole model to avoid recursion)
-            model.base_model.eval()
-            model.gradiend.eval()
 
-            eval_result = self.evaluate_fn(config=config, training_stats=training_stats)
-            
-            if eval_result:
-                # Store label_value_to_class_name once (same for all steps); used for display
-                if "label_value_to_class_name" in eval_result:
-                    training_stats["label_value_to_class_name"] = eval_result["label_value_to_class_name"]
+        with model.exclusive_base_gradient_access():
+            try:
+                # Set eval mode on submodules (not the whole model to avoid recursion)
+                model.base_model.eval()
+                model.gradiend.eval()
 
-                # Update training_stats with evaluation results (tracked over time)
-                for key, value in eval_result.items():
-                    if key == "label_value_to_class_name":
-                        continue  # already stored above
-                    if key not in training_stats:
-                        training_stats[key] = {}
-                    
-                    # Store results by step for tracking over time
-                    if isinstance(training_stats[key], dict):
-                        training_stats[key][step] = value
-                    elif isinstance(training_stats[key], list):
-                        training_stats[key].append(value)
-                    elif isinstance(training_stats[key], (int, float)):
-                        # Convert to dict to track over time
-                        training_stats[key] = {step: value}
-                
-                # Ensure correlation is set (and per-step history)
-                if 'correlation' in eval_result:
-                    val = eval_result['correlation']
-                    training_stats['correlation'] = val
-                    if 'scores' not in training_stats:
-                        training_stats['scores'] = {}
-                    training_stats['scores'][step] = val
-                
-                # Per-feature-class means at DEBUG, 4 decimals
-                if 'mean_by_feature_class' in eval_result:
-                    mbfc = eval_result['mean_by_feature_class']
-                    compact = ', '.join(f'{k}={v:.4f}' if isinstance(v, (int, float)) else f'{k}={v}' for k, v in sorted(mbfc.items()))
-                    logger.debug(f'Mean by feature class: {compact}')
-                
-                return eval_result
-            else:
-                logger.warning(f'Evaluation at step {step} returned no results')
+                eval_result = self.evaluate_fn(config=config, training_stats=training_stats)
+
+                if eval_result:
+                    # Store label_value_to_class_name once (same for all steps); used for display
+                    if "label_value_to_class_name" in eval_result:
+                        training_stats["label_value_to_class_name"] = eval_result["label_value_to_class_name"]
+
+                    # Update training_stats with evaluation results (tracked over time)
+                    for key, value in eval_result.items():
+                        if key == "label_value_to_class_name":
+                            continue  # already stored above
+                        if key not in training_stats:
+                            training_stats[key] = {}
+
+                        # Store results by step for tracking over time
+                        if isinstance(training_stats[key], dict):
+                            training_stats[key][step] = value
+                        elif isinstance(training_stats[key], list):
+                            training_stats[key].append(value)
+                        elif isinstance(training_stats[key], (int, float)):
+                            # Convert to dict to track over time
+                            training_stats[key] = {step: value}
+
+                    # Ensure correlation is set (and per-step history)
+                    if 'correlation' in eval_result:
+                        val = eval_result['correlation']
+                        training_stats['correlation'] = val
+                        if 'scores' not in training_stats:
+                            training_stats['scores'] = {}
+                        training_stats['scores'][step] = val
+                        self.last_eval_step = step
+
+                    # Per-feature-class means at DEBUG, 4 decimals
+                    if 'mean_by_feature_class' in eval_result:
+                        mbfc = eval_result['mean_by_feature_class']
+                        compact = ', '.join(f'{k}={v:.4f}' if isinstance(v, (int, float)) else f'{k}={v}' for k, v in sorted(mbfc.items()))
+                        logger.debug(f'Mean by feature class: {compact}')
+
+                    return eval_result
+                else:
+                    logger.warning(f'Evaluation at step {step} returned no results')
+                    return None
+            except Exception as e:
+                logger.error(f"Error during evaluation at step {step}: {e}", exc_info=True)
                 return None
-        except Exception as e:
-            logger.error(f"Error during evaluation at step {step}: {e}", exc_info=True)
-            return None
-        finally:
-            # Restore training mode
-            if base_model_was_training:
-                model.base_model.train()
-            if gradiend_was_training:
-                model.gradiend.train()
+            finally:
+                # Restore training mode
+                if base_model_was_training:
+                    model.base_model.train()
+                if gradiend_was_training:
+                    model.gradiend.train()
     
     def on_epoch_end(self, epoch: int, model, config: Dict[str, Any], **kwargs):
         """No action needed at epoch end."""
@@ -243,6 +243,7 @@ class CheckpointCallback(TrainingCallback):
     - Saves the best model based on evaluation correlation (or loss when use_loss_for_best=True)
     - When use_loss_for_best=True (e.g. supervised_decoder), correlation is meaningless; best = lowest loss
     - Saves periodic checkpoints every checkpoint_interval steps (if checkpoints enabled)
+    - Tracks step-0 metrics but does not materialize step-0 as a selectable best checkpoint
     
     Args:
         output: Directory to save checkpoints
@@ -296,7 +297,7 @@ class CheckpointCallback(TrainingCallback):
             elif score_for_log is not None:
                 logger.debug(f'New best {"loss" if self.use_loss_for_best else "correlation"}: {score_for_log:.4f} at step {step} (previous: {old_score:.4f})')
 
-            if step > 1:
+            if step > 0:
                 best_output = f'{self.output}_best'
                 training_info = {
                     'losses': kwargs.get('losses', []),
@@ -310,7 +311,16 @@ class CheckpointCallback(TrainingCallback):
                     'training_args': config,
                 }
                 model.save_pretrained(best_output, training=training_info)
-                logger.debug(f'Saved best model checkpoint at step {step} ({"loss" if self.use_loss_for_best else "correlation"}: {score_for_log:.4f})')
+                if score_for_log is not None:
+                    logger.debug(
+                        f'Saved best model checkpoint at step {step} '
+                        f'({"loss" if self.use_loss_for_best else "correlation"}: {score_for_log:.4f})'
+                    )
+            else:
+                logger.debug(
+                    "Initial step-0 evaluation is currently best, but is not saved as a selectable "
+                    "checkpoint; trained or final model state will be used instead."
+                )
         
         # Save periodic checkpoint
         if self.checkpoint_step > 0 and step % self.checkpoint_step == 0 and step > 0:
@@ -353,6 +363,9 @@ class LoggingCallback(TrainingCallback):
         """
         self.n_loss_report = n_loss_report
         self.loss_only = loss_only
+        # Track best correlation across ALL evaluations (including the initial step 0 eval)
+        # so "(new best)" logging matches the same best-checkpoint selection used by training.
+        self._best_corr_including_start: Optional[float] = None
     
     def on_step_end(self, step: int, loss: float, model, config: Dict[str, Any],
                     training_stats: Dict[str, Any], **kwargs):
@@ -397,11 +410,13 @@ class LoggingCallback(TrainingCallback):
                 mean_str = ", ".join(parts)
 
             suffix = ""
-            if not self.loss_only and kwargs.get('best_score_checkpoint') and corr is not None:
-                bsc = kwargs['best_score_checkpoint']
-                best_corr = bsc.get('correlation')
-                if best_corr is not None and abs(corr) > abs(best_corr):
+            if not self.loss_only and corr is not None:
+                # Compare against the best correlation seen so far (including step 0)
+                # so that "(new best)" in logs matches the global best used in plots
+                # and final training stats.
+                if self._best_corr_including_start is None or abs(corr) > abs(self._best_corr_including_start):
                     suffix = " (new best)"
+                    self._best_corr_including_start = float(corr)
             corr_str = "N/A" if (self.loss_only or corr is None) else f"{corr:.4f}"
             logger.info(
                 f'Step {step}, Correlation: {corr_str}, '

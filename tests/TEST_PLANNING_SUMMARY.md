@@ -30,10 +30,10 @@ To ensure example files run without errors (minimal file existence checks).
 **Status:** ❌ **NOT IMPLEMENTED**
 
 **Files to test:**
-- `gradiend/examples/gender_en.py`
-- `gradiend/examples/gender_de.py`
-- `gradiend/examples/gender_de_decoder_only.py`
-- `gradiend/examples/gender_de_detailed.py`
+- `gradiend/examples/train_gender_en.py`
+- `gradiend/examples/train_gender_de.py`
+- `gradiend/examples/train_gender_de_decoder_only.py`
+- `gradiend/examples/train_gender_de_detailed.py`
 - `gradiend/examples/gender_de_pruning_analysis.py` (temporary, can be ignored)
 
 ### 3. Test Bench ✗ NOT IMPLEMENTED

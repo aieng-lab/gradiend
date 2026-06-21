@@ -77,6 +77,7 @@ nav:
     - Saving & loading: guides/saving-loading.md
     - Training arguments: guides/training-arguments.md
     - Decoder-only models: guides/decoder-only.md
+    - Encoder-decoder models (T5/BART): guides/encoder-decoder.md
     - Testing: guides/testing.md
   - Reference:
     - Examples: examples.md

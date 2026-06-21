@@ -10,6 +10,7 @@ matplotlib is also optional; if missing, plotting raises ImportError with instal
 from typing import Dict, List, Optional, Tuple, Union
 
 from gradiend.visualizer.plot_optional import _require_matplotlib
+from gradiend.visualizer.labels import format_model_labels_with_convergence
 
 
 def _require_matplotlib_venn() -> None:
@@ -85,6 +86,7 @@ def plot_topk_venn(
     patch_linewidth: Optional[float] = None,
     alpha: float = 0.5,
     title: Optional[str] = None,
+    highlight_non_convergence: bool = True,
 ) -> None:
     """
     Plot a Venn diagram for top-k weight index sets (2–6 models).
@@ -108,6 +110,8 @@ def plot_topk_venn(
         patch_linewidth: Line width of Venn patches. Default 3.0.
         alpha: Patch transparency in [0, 1]. Default 0.5.
         title: Optional figure title.
+        highlight_non_convergence: When True, append a non-convergence marker to circle labels
+            for non-converged models.
     """
     model_ids = list(models.keys())
     n_models = len(model_ids)
@@ -120,6 +124,12 @@ def plot_topk_venn(
     plt = _require_matplotlib()
     per_model, _, _ = compute_topk_sets(models, topk=topk, part=part)
     sets_dict = {mid: set(per_model[mid]) for mid in model_ids}
+    label_map = format_model_labels_with_convergence(
+        model_ids,
+        models=models,
+        highlight_non_convergence=highlight_non_convergence,
+    )
+    display_labels = [label_map[mid] for mid in model_ids]
 
     if figsize is None:
         figsize = (8, 8) if n_models >= 4 else (6, 6)
@@ -142,7 +152,7 @@ def plot_topk_venn(
         plt.figure(figsize=figsize)
         v = venn2(
             subsets=(only_a, only_b, ab),
-            set_labels=(model_ids[0], model_ids[1]),
+            set_labels=(display_labels[0], display_labels[1]),
             alpha=alpha,
         )
         _style_venn2_venn3(
@@ -169,7 +179,7 @@ def plot_topk_venn(
         plt.figure(figsize=figsize)
         v = venn3(
             subsets=(only_a, only_b, ab, only_c, ac, bc, abc),
-            set_labels=(model_ids[0], model_ids[1], model_ids[2]),
+            set_labels=(display_labels[0], display_labels[1], display_labels[2]),
             alpha=alpha,
         )
         _style_venn2_venn3(
@@ -183,9 +193,10 @@ def plot_topk_venn(
         _require_venn()
         from venn import venn
 
+        display_sets_dict = {label_map[mid]: sets_dict[mid] for mid in model_ids}
         plt.figure(figsize=figsize)
         ax = plt.gca()
-        venn(sets_dict, ax=ax, legend_loc="upper center")
+        venn(display_sets_dict, ax=ax, legend_loc="upper center")
         for txt in ax.texts:
             if txt:
                 txt.set_color("black")
@@ -243,6 +254,7 @@ def plot_topk_overlap_venn(
     patch_linewidth: Optional[float] = None,
     alpha: float = 0.5,
     title: Optional[str] = None,
+    highlight_non_convergence: bool = True,
 ) -> Dict[str, object]:
     """
     Plot top-k weight index set intersection across multiple GRADIEND models and return overlap stats.
@@ -264,6 +276,8 @@ def plot_topk_overlap_venn(
         patch_linewidth: Line width of Venn patch borders. Default 3.0.
         alpha: Patch transparency in [0, 1].
         title: Optional figure title.
+        highlight_non_convergence: When True, append a non-convergence marker to circle labels
+            for non-converged models.
 
     Returns:
         Dict with keys: ``per_model`` (model_id -> list of weight indices), ``intersection``,
@@ -287,6 +301,7 @@ def plot_topk_overlap_venn(
         patch_linewidth=patch_linewidth,
         alpha=alpha,
         title=title,
+        highlight_non_convergence=highlight_non_convergence,
     )
 
     return {

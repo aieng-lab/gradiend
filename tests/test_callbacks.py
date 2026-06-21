@@ -103,6 +103,41 @@ class TestEvaluationCallback:
         assert result == eval_result
         evaluate_fn.assert_called_once()
 
+    def test_evaluation_callback_does_not_mark_step_on_failed_eval(self):
+        """Failed evaluations must not mark the step as done (allows retry)."""
+        evaluate_fn = MagicMock(return_value=None)
+        callback = EvaluationCallback(evaluate_fn=evaluate_fn, n_evaluation=100, do_eval=True)
+
+        model = MagicMock()
+        model.base_model.training = True
+
+        result = callback.on_step_end(
+            step=75, loss=0.5, model=model, config={}, training_stats={},
+            last_iteration=True,
+        )
+
+        assert result is None
+        assert callback.last_eval_step == -1
+        evaluate_fn.assert_called_once()
+
+    def test_evaluation_callback_evaluates_on_last_iteration_when_n_evaluation_zero(self):
+        """last_iteration should still trigger eval when periodic interval is disabled."""
+        eval_result = {"correlation": 0.8}
+        evaluate_fn = MagicMock(return_value=eval_result)
+        callback = EvaluationCallback(evaluate_fn=evaluate_fn, n_evaluation=0, do_eval=True)
+
+        model = MagicMock()
+        model.base_model.training = True
+
+        result = callback.on_step_end(
+            step=12, loss=0.5, model=model, config={}, training_stats={},
+            last_iteration=True,
+        )
+
+        assert result == eval_result
+        assert callback.last_eval_step == 12
+        evaluate_fn.assert_called_once()
+
 
 class TestNormalizationCallback:
     """Test NormalizationCallback."""
@@ -113,43 +148,62 @@ class TestNormalizationCallback:
         assert callback is not None
     
     def test_normalization_callback_inverts_on_negative_correlation(self):
-        """Test that normalization inverts encoding when correlation < -0.5."""
+        """Test that normalization inverts encoding when correlation < -0.6."""
         callback = NormalizationCallback()
-        
+
         model = MagicMock()
         model.gradiend.latent_dim = 1
-        model.gradiend.encoder = MagicMock()
-        model.gradiend.decoder = MagicMock()
-        
-        # Mock eval result with negative correlation
-        eval_result = {"correlation": -0.6}
-        
-        # Should invert when correlation < -0.5
+        model.invert_encoding = MagicMock()
+
+        eval_result = {"correlation": -0.7, "mean_by_class": {1.0: 0.5, -1.0: -0.5}}
+        training_stats = {"scores": {100: -0.7}, "mean_by_class": {100: eval_result["mean_by_class"]}}
+
         callback.on_step_end(
-            step=100, loss=0.5, model=model, config={}, training_stats={},
-            eval_result=eval_result
+            step=100, loss=0.5, model=model, config={}, training_stats=training_stats,
+            eval_result=eval_result,
         )
-        
-        # Check that encoder/decoder were swapped (inversion)
-        # The actual inversion logic is in the callback implementation
-        # We just verify it doesn't crash
-    
+
+        model.invert_encoding.assert_called_once_with(update_direction=False)
+        assert eval_result["correlation"] == pytest.approx(0.7)
+        assert training_stats["correlation"] == pytest.approx(0.7)
+        assert training_stats["scores"][100] == pytest.approx(0.7)
+        assert eval_result["mean_by_class"][1.0] == pytest.approx(-0.5)
+
     def test_normalization_callback_no_inversion_on_positive_correlation(self):
-        """Test that normalization doesn't invert when correlation >= -0.5."""
+        """Test that normalization doesn't invert when correlation >= -0.6."""
         callback = NormalizationCallback()
-        
+
         model = MagicMock()
         model.gradiend.latent_dim = 1
-        
-        # Mock eval result with positive correlation
-        eval_result = {"correlation": 0.5}
-        
-        # Should not invert when correlation >= -0.5
+        model.invert_encoding = MagicMock()
+
+        eval_result = {"correlation": 0.5, "mean_by_class": {1.0: 0.5, -1.0: -0.5}}
+
         callback.on_step_end(
             step=100, loss=0.5, model=model, config={}, training_stats={},
-            eval_result=eval_result
+            eval_result=eval_result,
         )
-        # Should complete without errors
+
+        model.invert_encoding.assert_not_called()
+        assert eval_result["correlation"] == pytest.approx(0.5)
+
+    def test_normalization_callback_no_inversion_when_correlation_mildly_negative(self):
+        """Correlation below zero but above the inversion threshold must not flip."""
+        callback = NormalizationCallback()
+
+        model = MagicMock()
+        model.gradiend.latent_dim = 1
+        model.invert_encoding = MagicMock()
+
+        eval_result = {"correlation": -0.55, "mean_by_class": {1.0: 0.5, -1.0: -0.5}}
+
+        callback.on_step_end(
+            step=100, loss=0.5, model=model, config={}, training_stats={},
+            eval_result=eval_result,
+        )
+
+        model.invert_encoding.assert_not_called()
+        assert eval_result["correlation"] == pytest.approx(-0.55)
 
 
 class TestCheckpointCallback:
@@ -206,16 +260,38 @@ class TestCheckpointCallback:
         assert model.save_pretrained.call_count >= 2
         assert callback.best_score == 0.8
         
+        save_count_after_best = model.save_pretrained.call_count
+
         # Third step with worse correlation
         training_stats['correlation'] = 0.6
         callback.on_step_end(
             step=150, loss=0.5, model=model, config=config, training_stats=training_stats
         )
-        
-        # Should not save (worse metric)
-        # Count should be same as before
-        prev_count = model.save_pretrained.call_count
+
         assert callback.best_score == 0.8
+        assert model.save_pretrained.call_count == save_count_after_best
+
+    def test_checkpoint_callback_tracks_but_does_not_save_step_zero_best_model(self, temp_dir):
+        """Initial step-0 best metrics must not become the selected checkpoint."""
+        callback = CheckpointCallback(
+            output=temp_dir,
+            checkpoints=False,
+            keep_only_best=True,
+            use_loss_for_best=False
+        )
+
+        model = MagicMock()
+        model.save_pretrained = MagicMock()
+
+        training_stats = {"correlation": 0.9}
+
+        callback.on_step_end(
+            step=0, loss=0.0, model=model, config={}, training_stats=training_stats
+        )
+
+        model.save_pretrained.assert_not_called()
+        assert callback.best_step == 0
+        assert callback.best_score == 0.9
     
     def test_checkpoint_callback_saves_periodic_checkpoints(self, temp_dir):
         """Test that checkpoint saves periodic checkpoints when checkpoints=True."""
@@ -275,40 +351,38 @@ class TestLoggingCallback:
         assert callback.loss_only is False
     
     def test_logging_callback_logs_loss(self):
-        """Test that logging callback logs loss at intervals."""
+        """Test that logging callback emits a step log at report intervals."""
         callback = LoggingCallback(n_loss_report=50, loss_only=True)
-        
         training_stats = {}
-        
-        # Should log at step 50 (LoggingCallback requires last_losses to log)
-        # We just verify it doesn't crash
-        callback.on_step_end(
-            step=50, loss=0.5, model=None, config={}, training_stats=training_stats,
-            last_losses=[0.5, 0.4, 0.3]  # Required for logging
-        )
-        
-        # LoggingCallback doesn't modify training_stats, it just logs via logger.info()
-        # The test verifies the callback executes without error
-        assert True  # If we get here, the callback executed successfully
-    
+
+        with patch("gradiend.trainer.core.callbacks.logger") as mock_logger:
+            callback.on_step_end(
+                step=50, loss=0.5, model=None, config={}, training_stats=training_stats,
+                last_losses=[0.5, 0.4, 0.3],
+            )
+
+        mock_logger.info.assert_called_once()
+        message = mock_logger.info.call_args[0][0]
+        assert message.startswith("Step 50,")
+        assert "Correlation: N/A" in message
+
     def test_logging_callback_logs_metrics(self):
-        """Test that logging callback logs metrics when loss_only=False."""
+        """Test that logging callback records correlation and marks new best runs."""
         callback = LoggingCallback(n_loss_report=50, loss_only=False)
-        
-        training_stats = {'correlation': 0.8}
-        eval_result = {"correlation": 0.8, "mean_by_class": 0.7}
-        
-        # Should log metrics (LoggingCallback logs via logger, doesn't modify training_stats)
-        # We just verify it doesn't crash
-        callback.on_step_end(
-            step=50, loss=0.5, model=None, config={}, training_stats=training_stats,
-            eval_result=eval_result,
-            last_losses=[0.5, 0.4, 0.3]
-        )
-        
-        # LoggingCallback doesn't modify training_stats, it just logs
-        # The test verifies the callback executes without error
-        assert True  # If we get here, the callback executed successfully
+        training_stats = {"correlation": 0.8}
+
+        with patch("gradiend.trainer.core.callbacks.logger") as mock_logger:
+            callback.on_step_end(
+                step=50, loss=0.5, model=None, config={}, training_stats=training_stats,
+                eval_result={"correlation": 0.8},
+                last_losses=[0.5, 0.4, 0.3],
+            )
+
+        mock_logger.info.assert_called_once()
+        message = mock_logger.info.call_args[0][0]
+        assert "Step 50," in message
+        assert "Correlation: 0.8000" in message
+        assert "(new best)" in message
 
 
 # Note: EarlyStoppingCallback is not yet implemented in the codebase

@@ -11,6 +11,7 @@ from .callbacks import (
     LoggingCallback,
     get_default_callbacks,
 )
+from .transition_selection import TransitionSpec, pair, identity, expand_transition_selection
 
 __all__ = [
     'train',
@@ -20,4 +21,8 @@ __all__ = [
     'NormalizationCallback',
     'LoggingCallback',
     'get_default_callbacks',
+    'TransitionSpec',
+    'pair',
+    'identity',
+    'expand_transition_selection',
 ]

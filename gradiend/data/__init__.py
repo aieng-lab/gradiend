@@ -1,10 +1,11 @@
 """
 Data module: create training and neutral datasets from base corpora.
 
-Use TextPredictionDataCreator to filter and mask base texts based on TextFilterConfig.
+Use TextPredictionDataCreator for the public text-prediction workflow.
+Experimental data creators live in their own subpackages.
 """
 
-from gradiend.data.core import resolve_base_data
+from gradiend.data.core import DataCreator, resolve_base_data
 from gradiend.data.text import (
     SpacyTagSpec,
     TextFilterConfig,
@@ -18,6 +19,7 @@ __all__ = [
     "TextFilterConfig",
     "TextPreprocessConfig",
     "TextPredictionDataCreator",
+    "DataCreator",
     "preprocess_texts",
     "resolve_base_data",
 ]

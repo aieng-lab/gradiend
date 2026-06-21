@@ -267,6 +267,58 @@ class TestEncoderMetricsDetailed:
         assert abs(mbfc["fem"] - (-1.0)) < 0.01
         assert abs(mbfc["neut"]) < 0.01
 
+    def test_mean_by_eval_group_uses_transition_names_for_feature_class_id(self):
+        """eval_group keyed by feature_class_id should expose transition names."""
+        encoder_df = pd.DataFrame({
+            "encoded": [0.8, 0.6, -0.7, -0.5, 0.0],
+            "label": [1.0, 1.0, -1.0, -1.0, 0.0],
+            "source_id": ["3SG", "3SG", "3PL", "3PL", "1SG"],
+            "target_id": ["3PL", "3PL", "3SG", "3SG", "1SG"],
+            "feature_class_id": [0.0, 0.0, 1.0, 1.0, 2.0],
+            "eval_group": [0.0, 0.0, 1.0, 1.0, 2.0],
+            "type": ["training"] * 5,
+        })
+        result = get_encoder_metrics_from_dataframe(encoder_df)
+        assert result.get("eval_group_basis") == "feature_class_id"
+        mean_by_eval_group = result.get("mean_by_eval_group", {})
+        assert "3SG->3PL" in mean_by_eval_group
+        assert "3PL->3SG" in mean_by_eval_group
+        assert "1SG (identity)" in mean_by_eval_group
+        assert abs(mean_by_eval_group["3SG->3PL"] - 0.7) < 0.01
+        assert "0.0" not in mean_by_eval_group
+        assert "eval_group_id2name" not in result
+
+    def test_mean_by_target_groups_by_feature_class_and_token(self):
+        encoder_df = pd.DataFrame({
+            "encoded": [0.8, 0.6, -0.7, -0.5, 0.9, -0.9],
+            "label": [1.0, 1.0, -1.0, -1.0, 1.0, -1.0],
+            "source_id": ["positive", "positive", "negative", "negative", "positive", "negative"],
+            "target_id": ["negative"] * 6,
+            "factual_token": ["love", "amazing", "hate", "awful", "great", "bad"],
+            "type": ["training"] * 6,
+        })
+        result = get_encoder_metrics_from_dataframe(encoder_df)
+        mean_by_target = result.get("mean_by_target", {})
+        assert abs(mean_by_target["positive"]["love"] - 0.8) < 0.01
+        assert abs(mean_by_target["positive"]["amazing"] - 0.6) < 0.01
+        assert abs(mean_by_target["negative"]["hate"] - (-0.7)) < 0.01
+        assert abs(mean_by_target["negative"]["awful"] - (-0.5)) < 0.01
+
+    def test_label_value_to_class_name_uses_sign_labels_when_multiple_classes_share_label(self):
+        encoder_df = pd.DataFrame({
+            "encoded": [0.9, 0.7, -0.8, -0.6],
+            "label": [1.0, 1.0, -1.0, -1.0],
+            "source_id": ["associative_max", "commutative_max", "non_associative_max", "non_commutative_max"],
+            "target_id": ["non_associative_max", "non_commutative_max", "associative_max", "commutative_max"],
+            "type": ["training"] * 4,
+        })
+
+        result = get_encoder_metrics_from_dataframe(encoder_df)
+
+        label_map = result.get("label_value_to_class_name", {})
+        assert label_map.get(1.0) == "positive"
+        assert label_map.get(-1.0) == "negative"
+
     def test_sample_counts_and_mean_by_feature_class_include_all_classes(self):
         """
         sample_counts.by_type must reflect all rows; mean_by_feature_class must

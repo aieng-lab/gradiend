@@ -8,7 +8,7 @@ Generate these by running the relevant code, then save outputs into this directo
 
 | File | Where it's used | How to generate |
 |------|-----------------|------------------|
-| `system-overview.png` | [index.md](../index.md) | Schematic of GRADIEND components (replace AI placeholder when you have a final figure). |
+| `workflow-diagram.png` | [index.md](../index.md), [tutorials/detailed-workflow.md](../tutorials/detailed-workflow.md) | Render `workflow-diagram.tex` after updating the overview figure. |
 | `start_workflow_training_convergence.png` | [start.md](../start.md) | Run start workflow, then `trainer.plot_training_convergence(output="docs/img/start_workflow_training_convergence.png", img_format="png")`. |
 | `start_workflow_encoder_analysis_split_test.png` | [start.md](../start.md) | Run start workflow, then `trainer.evaluate_encoder(..., plot=True)` and save from the plot or use the trainer’s plot output path. |
 | `training_convergence.png` | [evaluation-visualization.md](../guides/evaluation-visualization.md) | `plot_training_convergence(..., output="docs/img/training_convergence.png", img_format="png")`. |

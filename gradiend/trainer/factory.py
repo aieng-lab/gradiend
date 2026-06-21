@@ -13,7 +13,7 @@ logger = get_logger(__name__)
 
 
 def create_model_with_gradiend(
-    model: Union[str, ModelWithGradiend],
+    model: Any,
     model_class: Type[ModelWithGradiend],
     param_map: Optional[List[str]] = None,
     activation_encoder: str = 'tanh',

@@ -8,17 +8,24 @@ and when caching is used, cache_key_fields (list of batch keys to include in the
 """
 
 import os
+import queue
+import threading
+import time
+from contextlib import nullcontext
 from typing import Any, Callable, List, Optional
 
 import torch
 from torch.nn.utils.rnn import pad_sequence
 
 from gradiend.util import hash_it
+from gradiend.util.logging import get_logger
 from gradiend.trainer.core.config import (
     factual_computation_required_keywords,
     alternative_computation_required_keywords,
     source_target_keywords,
 )
+
+logger = get_logger(__name__)
 
 
 class GradientTrainingDataset:
@@ -63,6 +70,8 @@ class GradientTrainingDataset:
         device: Optional[torch.device] = None,
         return_metadata: bool = False,
         get_padding_value: Optional[Callable[[str], int]] = None,
+        timing_steps: int = 0,
+        timing_label: str = "gradient",
     ):
         assert source in source_target_keywords, f'Invalid source {source}, must be one of {source_target_keywords}'
         assert target in source_target_keywords, f'Invalid target {target}, must be one of {source_target_keywords}'
@@ -89,6 +98,16 @@ class GradientTrainingDataset:
         self.device = device
         self.return_metadata = return_metadata
         self._get_padding_value = get_padding_value if callable(get_padding_value) else (lambda _: 0)
+        self.timing_steps = int(timing_steps or 0)
+        self.timing_label = timing_label
+
+    @staticmethod
+    def _sync_cuda_for_timing() -> None:
+        if torch.cuda.is_available():
+            try:
+                torch.cuda.synchronize()
+            except Exception:
+                pass
 
     def __len__(self) -> int:
         return len(self.training_data) // self.batch_size
@@ -135,81 +154,188 @@ class GradientTrainingDataset:
                 batch[key] = {subkey: torch.stack([d[subkey] for d in batch[key]]) for subkey in first}
         return batch
 
+    def _exclusive_gradient_access(self):
+        """Serialize tokenization and base forward/backward for one gradient row."""
+        creator = self.gradient_creator
+        model = getattr(creator, "__self__", None)
+        if model is not None and hasattr(model, "exclusive_base_gradient_access"):
+            return model.exclusive_base_gradient_access()
+        return nullcontext()
+
     def __getitem__(self, index: int) -> dict:
+        timing_enabled = self.timing_steps > 0 and (index == 0 or (index + 1) % self.timing_steps == 0)
+        if timing_enabled:
+            self._sync_cuda_for_timing()
+        t0 = time.perf_counter() if timing_enabled else 0.0
+        t_merge = t0
+        t_factual = t0
+        t_alternative = t0
+        t_combine = t0
+
         indices = list(range(index * self.batch_size, min((index + 1) * self.batch_size, len(self.training_data))))
-        batch = self._merge_batch(indices)
 
-        cache_file_factual = ''
-        cache_file_alternative = ''
-        if self.use_cached_gradients and self.cache_dir is not None and self.cache_key_fields:
-            missing = [k for k in self.cache_key_fields if k not in batch]
-            if missing:
-                raise KeyError(
-                    f"Cache key requires batch keys {self.cache_key_fields}; missing in batch: {missing}. "
-                    "Ensure training_data yields these keys when caching is used."
-                )
-            h = hash_it([batch[k] for k in self.cache_key_fields] + [self.dtype])
-            cache_file_factual = os.path.join(self.cache_dir, f'factual_{h}.pt')
-            cache_file_alternative = os.path.join(self.cache_dir, f'alternative_{h}.pt')
+        with self._exclusive_gradient_access():
+            batch = self._merge_batch(indices)
+            if timing_enabled:
+                self._sync_cuda_for_timing()
+                t_merge = time.perf_counter()
 
-        factual_gradients = None
-        alternative_gradients = None
+            cache_file_factual = ''
+            cache_file_alternative = ''
+            if self.use_cached_gradients and self.cache_dir is not None and self.cache_key_fields:
+                missing = [k for k in self.cache_key_fields if k not in batch]
+                if missing:
+                    raise KeyError(
+                        f"Cache key requires batch keys {self.cache_key_fields}; missing in batch: {missing}. "
+                        "Ensure training_data yields these keys when caching is used."
+                    )
+                h = hash_it([batch[k] for k in self.cache_key_fields] + [self.dtype])
+                cache_file_factual = os.path.join(self.cache_dir, f'factual_{h}.pt')
+                cache_file_alternative = os.path.join(self.cache_dir, f'alternative_{h}.pt')
 
-        if self.use_cached_gradients and self.cache_dir is not None and cache_file_factual:
-            if os.path.exists(cache_file_factual):
-                factual_gradients = torch.load(cache_file_factual, weights_only=True)
-            if os.path.exists(cache_file_alternative):
-                alternative_gradients = torch.load(cache_file_alternative, weights_only=True)
+            factual_gradients = None
+            alternative_gradients = None
 
-        requires_factual = self.source in factual_computation_required_keywords or self.target in factual_computation_required_keywords
-        if factual_gradients is None and requires_factual:
-            factual_inputs = batch["factual"]
-            factual_gradients = self.gradient_creator(factual_inputs)
-            del factual_inputs
-            factual_gradients = factual_gradients.to(dtype=self.dtype, device=self.device)
             if self.use_cached_gradients and self.cache_dir is not None and cache_file_factual:
-                os.makedirs(self.cache_dir, exist_ok=True)
-                torch.save(factual_gradients, cache_file_factual)
+                if os.path.exists(cache_file_factual):
+                    factual_gradients = torch.load(cache_file_factual, weights_only=True)
+                if os.path.exists(cache_file_alternative):
+                    alternative_gradients = torch.load(cache_file_alternative, weights_only=True)
 
-        requires_alternative = self.source in alternative_computation_required_keywords or self.target in alternative_computation_required_keywords
-        if alternative_gradients is None and requires_alternative:
-            alternative_inputs = batch['alternative']
-            alternative_gradients = self.gradient_creator(alternative_inputs)
-            del alternative_inputs
-            alternative_gradients = alternative_gradients.to(dtype=self.dtype, device=self.device)
-            if self.use_cached_gradients and self.cache_dir is not None and cache_file_alternative:
-                os.makedirs(self.cache_dir, exist_ok=True)
-                torch.save(alternative_gradients, cache_file_alternative)
+            requires_factual = self.source in factual_computation_required_keywords or self.target in factual_computation_required_keywords
+            if factual_gradients is None and requires_factual:
+                factual_inputs = batch["factual"]
+                factual_gradients = self.gradient_creator(factual_inputs)
+                del factual_inputs
+                factual_gradients = factual_gradients.to(dtype=self.dtype, device=self.device)
+                if self.use_cached_gradients and self.cache_dir is not None and cache_file_factual:
+                    os.makedirs(self.cache_dir, exist_ok=True)
+                    torch.save(factual_gradients, cache_file_factual)
+            if timing_enabled:
+                self._sync_cuda_for_timing()
+                t_factual = time.perf_counter()
 
-        if self.source == 'factual':
-            source_tensor = factual_gradients
-        elif self.source == 'alternative':
-            source_tensor = alternative_gradients
-        elif self.source == 'diff':
-            source_tensor = factual_gradients - alternative_gradients
-        elif self.source is None:
-            source_tensor = None  # e.g. supervised_decoder: only target needed
-        else:
-            raise ValueError(f'Unknown source: {self.source}')
+            requires_alternative = self.source in alternative_computation_required_keywords or self.target in alternative_computation_required_keywords
+            if alternative_gradients is None and requires_alternative:
+                alternative_inputs = batch['alternative']
+                alternative_gradients = self.gradient_creator(alternative_inputs)
+                del alternative_inputs
+                alternative_gradients = alternative_gradients.to(dtype=self.dtype, device=self.device)
+                if self.use_cached_gradients and self.cache_dir is not None and cache_file_alternative:
+                    os.makedirs(self.cache_dir, exist_ok=True)
+                    torch.save(alternative_gradients, cache_file_alternative)
+            if timing_enabled:
+                self._sync_cuda_for_timing()
+                t_alternative = time.perf_counter()
 
-        if self.target == 'factual':
-            target_tensor = factual_gradients
-        elif self.target == 'alternative':
-            target_tensor = alternative_gradients
-        elif self.target == 'diff':
-            target_tensor = source_tensor.clone() if self.source == 'diff' else (factual_gradients - alternative_gradients)
-        elif self.target is None:
-            target_tensor = None
-        else:
-            raise ValueError(f'Unknown target: {self.target}')
+            if self.source == 'factual':
+                source_tensor = factual_gradients
+            elif self.source == 'alternative':
+                source_tensor = alternative_gradients
+            elif self.source == 'diff':
+                source_tensor = factual_gradients - alternative_gradients
+            elif self.source is None:
+                source_tensor = None  # e.g. supervised_decoder: only target needed
+            else:
+                raise ValueError(f'Unknown source: {self.source}')
 
-        del factual_gradients
-        del alternative_gradients
+            if self.target == 'factual':
+                target_tensor = factual_gradients
+            elif self.target == 'alternative':
+                target_tensor = alternative_gradients
+            elif self.target == 'diff':
+                target_tensor = source_tensor.clone() if self.source == 'diff' else (factual_gradients - alternative_gradients)
+            elif self.target is None:
+                target_tensor = None
+            else:
+                raise ValueError(f'Unknown target: {self.target}')
 
-        output = {'source': source_tensor, 'target': target_tensor}
-        for key in batch:
-            if key not in output and key != 'metadata':
-                output[key] = batch[key]
-        if self.return_metadata and 'metadata' in batch:
-            output['metadata'] = batch['metadata']
+            del factual_gradients
+            del alternative_gradients
+
+            output = {'source': source_tensor, 'target': target_tensor}
+            for key in batch:
+                if key not in output and key not in {'metadata', 'factual', 'alternative'}:
+                    output[key] = batch[key]
+            if self.return_metadata and 'metadata' in batch:
+                output['metadata'] = batch['metadata']
+        if timing_enabled:
+            self._sync_cuda_for_timing()
+            t_combine = time.perf_counter()
+            logger.info(
+                "%s row %s timing: merge=%.3fs, factual=%.3fs, alternative=%.3fs, combine=%.3fs, total=%.3fs",
+                self.timing_label,
+                index + 1,
+                t_merge - t0,
+                t_factual - t_merge,
+                t_alternative - t_factual,
+                t_combine - t_alternative,
+                t_combine - t0,
+            )
         return output
+
+
+class PreComputedTrainingDataset(torch.utils.data.IterableDataset):
+    """
+    Asynchronously precompute rows from another gradient dataset.
+
+    This wrapper is intentionally small: a single background thread evaluates the
+    wrapped dataset sequentially and keeps a bounded queue of ready rows. It does
+    not copy or wrap the model; it only overlaps the next base-gradient extraction
+    with the current GRADIEND optimizer step.
+
+    Safe when base forward/backward uses ModelWithGradiend.exclusive_base_gradient_access
+    (default for built-in text models and in-training encoder eval).
+    """
+
+    def __init__(self, dataset: Any, *, buffer_size: int = 1):
+        if buffer_size < 1:
+            raise ValueError(f"buffer_size must be >= 1, got {buffer_size}")
+        self.dataset = dataset
+        self.buffer_size = int(buffer_size)
+
+    def __len__(self) -> int:
+        return len(self.dataset)
+
+    def __iter__(self):
+        q: "queue.Queue[Any]" = queue.Queue(maxsize=self.buffer_size)
+        stop_event = threading.Event()
+        sentinel = object()
+
+        def _put(value: Any) -> None:
+            while not stop_event.is_set():
+                try:
+                    q.put(value, timeout=0.1)
+                    return
+                except queue.Full:
+                    continue
+
+        def _worker() -> None:
+            try:
+                for idx in range(len(self.dataset)):
+                    if stop_event.is_set():
+                        break
+                    _put((True, self.dataset[idx]))
+            except BaseException as e:
+                _put((False, e))
+            finally:
+                _put((None, sentinel))
+
+        worker = threading.Thread(
+            target=_worker,
+            name="gradiend-gradient-precompute",
+            daemon=True,
+        )
+        worker.start()
+
+        try:
+            while True:
+                ok, payload = q.get()
+                if ok is None:
+                    break
+                if ok is False:
+                    raise payload
+                yield payload
+        finally:
+            stop_event.set()
+            worker.join(timeout=1.0)

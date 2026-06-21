@@ -18,7 +18,7 @@ import pytest
 import torch
 
 from gradiend import TrainingArguments
-from gradiend.examples.gender_en import build_gender_trainer
+from gradiend.examples.train_gender_en import build_gender_trainer
 
 from .verify_utils import (
     BENCH_TRAIN_CONFIG,

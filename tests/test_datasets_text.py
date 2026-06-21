@@ -16,7 +16,7 @@ import torch
 
 from gradiend.trainer.text.common.dataset import TextGradientTrainingDataset
 from gradiend.trainer.text.prediction.dataset import TextTrainingDataset
-from gradiend.trainer.text.prediction.unified_schema import (
+from gradiend.trainer.core.unified_schema import (
     UNIFIED_MASKED,
     UNIFIED_FACTUAL,
     UNIFIED_ALTERNATIVE,
@@ -331,18 +331,15 @@ class TestTextTrainingDataset:
             tokenizer=tokenizer,
             batch_size=1
         )
-        # TextTrainingDataset.__len__ returns total_samples which can be large
-        # We just verify it creates batches
-        assert len(dataset_bs1) > 0
-        
-        # batch_size=2 - items batched in groups of 2 (within same label)
         dataset_bs2 = TextTrainingDataset(
             data=data,
             tokenizer=tokenizer,
             batch_size=2
         )
-        # Should have batches (grouped by label, then batched)
-        assert len(dataset_bs2) > 0
+
+        assert dataset_bs1.total_batches == 20
+        assert dataset_bs2.total_batches == 10
+        assert dataset_bs1.total_batches > dataset_bs2.total_batches
     
     def test_text_training_dataset_balance_column(self):
         """Test that balance_column affects batching."""

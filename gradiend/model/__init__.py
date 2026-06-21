@@ -2,7 +2,7 @@ from gradiend.model.model import GradiendModel
 from gradiend.model.param_mapped import ParamMappedGradiendModel
 from gradiend.model.model_with_gradiend import ModelWithGradiend
 
-from gradiend.model.utils import is_decoder_only_model
+from gradiend.model.utils import is_decoder_only_model, is_seq2seq_model
 
 __all__ = [
     # Core model classes
@@ -11,4 +11,5 @@ __all__ = [
     "ModelWithGradiend",
     # Utility functions
     "is_decoder_only_model",
+    "is_seq2seq_model",
 ]

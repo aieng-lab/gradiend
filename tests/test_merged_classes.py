@@ -4,7 +4,7 @@ import pandas as pd
 import pytest
 
 from gradiend.trainer.text.prediction.trainer import TextPredictionConfig, TextPredictionTrainer
-from gradiend.trainer.text.prediction.unified_data import (
+from gradiend.trainer.core.unified_data import (
     UNIFIED_ALTERNATIVE_CLASS,
     UNIFIED_FACTUAL_CLASS,
     UNIFIED_TRANSITION,
@@ -148,7 +148,8 @@ class TestClassMergeMapCreateTrainingData:
     """create_training_data with class_merge_map yields correct labels."""
 
     @pytest.fixture(scope="class")
-    def tokenizer(self):
+    @classmethod
+    def tokenizer(cls):
         from transformers import AutoTokenizer
         return AutoTokenizer.from_pretrained("bert-base-uncased")
 
@@ -264,6 +265,72 @@ class TestClassMergeMapGroupFiltering:
         assert "3PL" in set(cd[UNIFIED_FACTUAL_CLASS].unique()) | set(cd[UNIFIED_ALTERNATIVE_CLASS].unique())
 
 
+class TestClassMergeMapSuiteIntegration:
+    """TrainerSuite must pass class_merge_map to child trainers built from kwargs (no explicit config)."""
+
+    def test_suite_child_trainer_applies_class_merge_map(self):
+        from gradiend.trainer.core.arguments import TrainingArguments
+        from gradiend.trainer.suite import SymmetricTrainerSuite, SuitePairDefinition
+
+        pair_definitions = [
+            SuitePairDefinition(
+                target_classes=("singular", "plural"),
+                child_id="pronoun_number_singular_plural",
+                class_merge_map={"singular": ["1SG", "3SG"], "plural": ["1PL", "3PL"]},
+            )
+        ]
+        suite = SymmetricTrainerSuite(
+            TextPredictionTrainer,
+            data=_four_class_data(),
+            masked_col="masked",
+            split_col="split",
+            alternative_col="alternative",
+            alternative_class_col="alternative_class",
+            pair_definitions=pair_definitions,
+            model="bert-base-uncased",
+            args=TrainingArguments(do_eval=False, output_dir="tmp_test_suite_merge"),
+        )
+        trainer = suite.get_trainer("pronoun_number_singular_plural")
+        assert trainer.config.class_merge_map == {
+            "singular": ["1SG", "3SG"],
+            "plural": ["1PL", "3PL"],
+        }
+        trainer._ensure_data()
+        cd = trainer.combined_data
+        assert set(cd[UNIFIED_FACTUAL_CLASS].unique()) <= {"singular", "plural"}
+        transitions = set(cd[UNIFIED_TRANSITION].unique())
+        assert "singular\u2192plural" in transitions or "plural\u2192singular" in transitions
+
+    def test_suite_child_create_training_data_with_merged_pair(self):
+        from gradiend.trainer.core.arguments import TrainingArguments
+        from gradiend.trainer.suite import SymmetricTrainerSuite, SuitePairDefinition
+        from transformers import AutoTokenizer
+
+        pair_definitions = [
+            SuitePairDefinition(
+                target_classes=("singular", "plural"),
+                child_id="pronoun_number_singular_plural",
+                class_merge_map={"singular": ["1SG", "3SG"], "plural": ["1PL", "3PL"]},
+            )
+        ]
+        suite = SymmetricTrainerSuite(
+            TextPredictionTrainer,
+            data=_four_class_data(),
+            masked_col="masked",
+            split_col="split",
+            alternative_col="alternative",
+            alternative_class_col="alternative_class",
+            pair_definitions=pair_definitions,
+            model="bert-base-uncased",
+            args=TrainingArguments(do_eval=False, output_dir="tmp_test_suite_merge"),
+        )
+        trainer = suite.get_trainer("pronoun_number_singular_plural")
+        tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
+        training_data = trainer.create_training_data(tokenizer, split="train", batch_size=1)
+        assert training_data is not None
+        assert len(training_data) >= 1
+
+
 class TestClassMergeMapDecoderTargets:
     """Decoder eval targets work via effective data (merged class names)."""
 
@@ -275,8 +342,9 @@ class TestClassMergeMapDecoderTargets:
             alternative_class_col="alternative_class",
         )
         trainer = TextPredictionTrainer(model="bert-base-uncased", config=config)
-        targets = trainer._infer_decoder_eval_targets()
+        targets, has_overlap = trainer._infer_decoder_eval_targets()
         assert "singular" in targets
         assert "plural" in targets
+        assert has_overlap is False
         assert "I" in targets["singular"] or "he" in targets["singular"]
         assert "we" in targets["plural"] or "they" in targets["plural"]

@@ -18,13 +18,220 @@ from torch.utils.data import Dataset, DataLoader
 from tqdm import tqdm
 from transformers import PreTrainedModel, PretrainedConfig, AutoConfig, AutoModelForCausalLM, AutoTokenizer
 from transformers.utils import ModelOutput
-from typing import Optional, Union, List, Iterator, Tuple
+from typing import Any, Optional, Union, List, Iterator, Tuple, Dict, Sequence
 import os
 
 from gradiend.model.utils import load_model_weights, save_model_weights
+from gradiend.util.device import validate_cuda_usable_if_visible
 from gradiend.util.logging import get_logger
 
 logger = get_logger(__name__)
+
+PoolingLengthSpec = Union[int, Sequence[int]]
+
+
+def _normalize_pooling_lengths(pooling_length: PoolingLengthSpec) -> List[int]:
+    if isinstance(pooling_length, bool):
+        raise TypeError("pooling_length must be int or a sequence of ints, not bool")
+    if isinstance(pooling_length, int):
+        if pooling_length < 1:
+            raise ValueError("pooling_length must be >= 1")
+        return [pooling_length]
+    values = [int(v) for v in pooling_length]
+    if not values:
+        raise ValueError("pooling_length sequence must not be empty")
+    if any(v < 1 for v in values):
+        raise ValueError("pooling_length values must be >= 1")
+    return values
+
+
+def _split_train_val_df(train_df: pd.DataFrame, *, val_frac: float = 0.1, seed: int = 0) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    if val_frac <= 0.0 or len(train_df) < 4:
+        return train_df, train_df.iloc[0:0].copy()
+    shuffled = train_df.sample(frac=1.0, random_state=seed).reset_index(drop=True)
+    n_val = max(1, int(round(len(shuffled) * val_frac)))
+    if n_val >= len(shuffled):
+        n_val = max(1, len(shuffled) // 5)
+    val_df = shuffled.iloc[:n_val].reset_index(drop=True)
+    train_part = shuffled.iloc[n_val:].reset_index(drop=True)
+    if train_part.empty:
+        train_part = shuffled.iloc[1:].reset_index(drop=True)
+        val_df = shuffled.iloc[:1].reset_index(drop=True)
+    return train_part, val_df
+
+
+def _evaluate_mlm_head_val_loss(
+    model: "DecoderModelWithMLMHead",
+    tokenizer,
+    val_df: pd.DataFrame,
+    *,
+    batch_size: int,
+    max_length: int,
+    use_cache: Optional[bool],
+) -> float:
+    if val_df is None or len(val_df) == 0:
+        return float("inf")
+    cuda_available, _ = validate_cuda_usable_if_visible()
+    device = "cuda" if cuda_available else "cpu"
+    dataset = DataFrameMLMDataset(tokenizer, val_df, max_length=max_length)
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
+    model.eval()
+    total_loss = 0.0
+    count = 0
+    use_cache_val = use_cache if use_cache is not None else False
+    with torch.no_grad():
+        for batch in loader:
+            input_ids, attn_mask, labels_b = [b.to(device) for b in batch]
+            out = model(
+                input_ids=input_ids,
+                attention_mask=attn_mask,
+                labels=labels_b,
+                use_cache=use_cache_val,
+            )
+            if out.loss is None:
+                continue
+            total_loss += float(out.loss.item())
+            count += 1
+    if count == 0:
+        return float("inf")
+    return total_loss / count
+
+
+def _save_pooling_length_ablation(
+    results: List[Dict[str, float]],
+    output_dir: str,
+) -> Tuple[str, str]:
+    os.makedirs(output_dir, exist_ok=True)
+    json_path = os.path.join(output_dir, "pooling_length_ablation.json")
+    csv_path = os.path.join(output_dir, "pooling_length_ablation.csv")
+    with open(json_path, "w", encoding="utf-8") as handle:
+        json.dump({"results": results}, handle, indent=2)
+    pd.DataFrame(results).to_csv(csv_path, index=False)
+    plot_path = os.path.join(output_dir, "pooling_length_ablation.png")
+    try:
+        from gradiend.visualizer.plot_optional import _require_matplotlib
+
+        plt = _require_matplotlib()
+        lengths = [int(r["pooling_length"]) for r in results]
+        losses = [float(r["val_loss"]) for r in results]
+        fig, ax = plt.subplots(figsize=(6, 3.5))
+        ax.plot(lengths, losses, marker="o")
+        ax.set_xlabel("pooling_length")
+        ax.set_ylabel("validation loss")
+        ax.set_title("Decoder-only MLM head pooling_length selection")
+        fig.tight_layout()
+        fig.savefig(plot_path, dpi=150)
+        plt.close(fig)
+    except ImportError:
+        plot_path = ""
+        logger.warning("matplotlib not available; skipping pooling_length ablation plot")
+    return json_path, plot_path or csv_path
+
+
+_HF_MODEL_LOAD_KWARGS = {
+    "device_map",
+    "max_memory",
+    "low_cpu_mem_usage",
+    "torch_dtype",
+    "dtype",
+    "trust_remote_code",
+    "token",
+    "revision",
+    "cache_dir",
+    "local_files_only",
+}
+
+
+def _config_kwargs(kwargs: Dict) -> Dict:
+    return {
+        k: v
+        for k, v in kwargs.items()
+        if k not in {"device_map", "max_memory", "low_cpu_mem_usage", "token"}
+    }
+
+
+def _load_selected_checkpoint_tensors(directory: Union[str, os.PathLike], names: List[str]) -> Dict[str, torch.Tensor]:
+    st_path = os.path.join(directory, "model.safetensors")
+    bin_path = os.path.join(directory, "pytorch_model.bin")
+    if not os.path.exists(st_path) and not os.path.exists(bin_path):
+        nested = os.path.join(directory, "model")
+        st_path = os.path.join(nested, "model.safetensors")
+        bin_path = os.path.join(nested, "pytorch_model.bin")
+
+    if os.path.exists(st_path):
+        from safetensors import safe_open
+
+        tensors: Dict[str, torch.Tensor] = {}
+        with safe_open(st_path, framework="pt", device="cpu") as f:
+            available = set(f.keys())
+            for name in names:
+                if name in available:
+                    tensors[name] = f.get_tensor(name)
+        return tensors
+
+    if os.path.exists(bin_path):
+        state_dict = torch.load(bin_path, map_location="cpu", weights_only=True)
+        logger.warning(
+            "Loading selected tensors from %s requires reading the full .bin checkpoint into CPU memory. "
+            "Use safetensors for large decoder-only MLM-head checkpoints.",
+            bin_path,
+        )
+        return {name: state_dict[name] for name in names if name in state_dict}
+
+    raise FileNotFoundError(f"No model weights found in {directory}")
+
+
+def _decoder_embedding_keys(state_dict: Dict[str, torch.Tensor]) -> List[str]:
+    return [
+        key
+        for key in (
+            "decoder.transformer.wte.weight",
+            "decoder.model.embed_tokens.weight",
+        )
+        if key in state_dict
+    ]
+
+
+def _custom_head_state_dict(model: "DecoderModelWithMLMHead") -> Dict[str, torch.Tensor]:
+    state_dict = model.state_dict()
+    keep = {
+        key: value
+        for key, value in state_dict.items()
+        if key.startswith("classifier.") or key in _decoder_embedding_keys(state_dict)
+    }
+    if not any(key.startswith("classifier.") for key in keep):
+        raise ValueError("Could not find classifier weights to save for decoder-only MLM head.")
+    return keep
+
+
+def _resolve_decoder_hidden_size(decoder: nn.Module) -> int:
+    configs = []
+    config = getattr(decoder, "config", None)
+    if config is not None:
+        configs.append(config)
+        text_config = getattr(config, "text_config", None)
+        if text_config is not None:
+            configs.append(text_config)
+
+    for cfg in configs:
+        for attr in ("hidden_size", "n_embd", "d_model", "model_dim", "embed_dim", "embedding_size"):
+            value = getattr(cfg, attr, None)
+            if isinstance(value, int) and value > 0:
+                return value
+
+    get_input_embeddings = getattr(decoder, "get_input_embeddings", None)
+    if callable(get_input_embeddings):
+        embeddings = get_input_embeddings()
+        weight = getattr(embeddings, "weight", None)
+        if torch.is_tensor(weight) and weight.ndim == 2 and int(weight.shape[1]) > 0:
+            return int(weight.shape[1])
+
+    raise AttributeError(
+        "Could not determine decoder hidden size from config or input embeddings. "
+        "Expected one of hidden_size/n_embd/d_model/model_dim/embed_dim/embedding_size, "
+        "or a 2D get_input_embeddings().weight tensor."
+    )
+
 
 class DataFrameMLMDataset(Dataset):
     """Dataset from a DataFrame with 'masked' and 'label' columns for decoder-only MLM. Expects [MASK] in masked text."""
@@ -46,6 +253,9 @@ class DataFrameMLMDataset(Dataset):
         row = self.df.iloc[idx]
         masked = str(row["masked"]).strip()
         label = str(row["label"]).strip()
+        mask_token = getattr(self.tokenizer, "mask_token", None)
+        if mask_token and "[MASK]" in masked and mask_token != "[MASK]":
+            masked = masked.replace("[MASK]", mask_token, 1)
         enc = self.tokenizer(
             masked,
             padding="max_length",
@@ -70,11 +280,104 @@ def train_mlm_head(
     batch_size: int = 4,
     epochs: int = 5,
     lr: float = 1e-4,
+    pooling_length: PoolingLengthSpec = 3,
+    max_length: int = 128,
+    trust_remote_code: bool = False,
+    use_cache: Optional[bool] = None,
+    ablation_dir: Optional[str] = None,
+) -> str:
+    """
+    Train a DecoderModelWithMLMHead on (masked, label) data and save to output_path.
+
+    When ``pooling_length`` is a sequence (e.g. ``range(1, 7)``), run a small validation
+  grid search, save ablation JSON/CSV/plot under ``ablation_dir`` (or next to output_path),
+    then train the final head on the full dataset with the best length.
+    """
+    candidates = _normalize_pooling_lengths(pooling_length)
+    if len(candidates) == 1:
+        _train_mlm_head_single(
+            base_model=base_model,
+            train_df=train_df,
+            output_path=output_path,
+            batch_size=batch_size,
+            epochs=epochs,
+            lr=lr,
+            pooling_length=candidates[0],
+            max_length=max_length,
+            trust_remote_code=trust_remote_code,
+            use_cache=use_cache,
+            save=True,
+        )
+        return output_path
+
+    ablation_root = ablation_dir
+    if ablation_root is None:
+        ablation_root = os.path.join(os.path.dirname(os.path.normpath(output_path)), "pooling_length_ablation")
+    train_part, val_df = _split_train_val_df(train_df)
+    results: List[Dict[str, float]] = []
+    for pl in candidates:
+        model, tokenizer = _train_mlm_head_single(
+            base_model=base_model,
+            train_df=train_part,
+            output_path=None,
+            batch_size=batch_size,
+            epochs=epochs,
+            lr=lr,
+            pooling_length=pl,
+            max_length=max_length,
+            trust_remote_code=trust_remote_code,
+            use_cache=use_cache,
+            save=False,
+        )
+        val_loss = _evaluate_mlm_head_val_loss(
+            model,
+            tokenizer,
+            val_df,
+            batch_size=batch_size,
+            max_length=max_length,
+            use_cache=use_cache,
+        )
+        results.append({"pooling_length": int(pl), "val_loss": float(val_loss)})
+        logger.info("pooling_length=%s validation loss=%.4f", pl, val_loss)
+        del model
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    best = min(results, key=lambda row: row["val_loss"])
+    best_pl = int(best["pooling_length"])
+    logger.info("Selected pooling_length=%s (val_loss=%.4f)", best_pl, best["val_loss"])
+    _save_pooling_length_ablation(results, ablation_root)
+
+    _train_mlm_head_single(
+        base_model=base_model,
+        train_df=train_df,
+        output_path=output_path,
+        batch_size=batch_size,
+        epochs=epochs,
+        lr=lr,
+        pooling_length=best_pl,
+        max_length=max_length,
+        trust_remote_code=trust_remote_code,
+        use_cache=use_cache,
+        save=True,
+    )
+    return output_path
+
+
+def _train_mlm_head_single(
+    base_model: str,
+    train_df: pd.DataFrame,
+    output_path: Optional[str],
+    *,
+    batch_size: int = 4,
+    epochs: int = 5,
+    lr: float = 1e-4,
     pooling_length: int = 3,
     max_length: int = 128,
     trust_remote_code: bool = False,
     use_cache: Optional[bool] = None,
-) -> str:
+    save: bool = True,
+) -> Union[str, Tuple["DecoderModelWithMLMHead", Any]]:
     """
     Train a DecoderModelWithMLMHead on (masked, label) data and save to output_path.
 
@@ -90,7 +393,8 @@ def train_mlm_head(
     """
     if "masked" not in train_df.columns or "label" not in train_df.columns:
         raise ValueError("train_df must have columns 'masked' and 'label'")
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    cuda_available, _ = validate_cuda_usable_if_visible()
+    device = "cuda" if cuda_available else "cpu"
     tokenizer = AutoTokenizer.from_pretrained(base_model)
     if tokenizer.mask_token is None:
         tokenizer.add_special_tokens({"mask_token": "[MASK]"})
@@ -146,11 +450,14 @@ def train_mlm_head(
             total_loss += out.loss.item()
         logger.info("Epoch %d/%d - Loss: %.4f", epoch + 1, epochs, total_loss / len(loader))
 
-    os.makedirs(output_path, exist_ok=True)
-    model.save_pretrained(output_path)
-    tokenizer.save_pretrained(output_path)
-    return output_path
-
+    if save:
+        if output_path is None:
+            raise ValueError("output_path is required when save=True")
+        os.makedirs(output_path, exist_ok=True)
+        model.save_pretrained(output_path, base_model=base_model)
+        tokenizer.save_pretrained(output_path)
+        return output_path
+    return model, tokenizer
 
 
 @dataclass
@@ -182,15 +489,32 @@ class DecoderModelWithMLMHead(PreTrainedModel):
     """
     config_class = PretrainedConfig
 
+    def _align_classifier_to_decoder(self):
+        if self.target_token_ids is None:
+            self.classifier = self.decoder.lm_head
+            return
+
+        decoder_param = next(self.decoder.parameters(), None)
+        if decoder_param is None:
+            return
+        self.classifier.to(device=decoder_param.device, dtype=decoder_param.dtype)
+
+    def _align_classifier_to_hidden_states(self, hidden_states: torch.Tensor):
+        if self.target_token_ids is None:
+            self.classifier = self.decoder.lm_head
+            return
+        self.classifier.to(device=hidden_states.device, dtype=hidden_states.dtype)
+
     def __init__(
             self,
             config: PretrainedConfig,
             target_token_ids: Optional[List[int]] = None,
             pooling_length: int = 3,
+            decoder: Optional[nn.Module] = None,
     ):
         super().__init__(config)
         # Base decoder model
-        self.decoder = AutoModelForCausalLM.from_config(config)
+        self.decoder = decoder if decoder is not None else AutoModelForCausalLM.from_config(config)
 
         self.config.model_type = f'{self.decoder.config.model_type}-with-mlm-head'
         self.pooling_length = pooling_length
@@ -200,13 +524,15 @@ class DecoderModelWithMLMHead(PreTrainedModel):
         if self.target_token_ids is None:
             self.classifier = self.decoder.lm_head
         else:
-            hidden_size = self.decoder.config.hidden_size
+            hidden_size = _resolve_decoder_hidden_size(self.decoder)
             self.classifier = nn.Linear(hidden_size, len(self.target_token_ids))
             nn.init.normal_(self.classifier.weight, mean=0.0, std=0.02)
             if self.classifier.bias is not None:
                 nn.init.zeros_(self.classifier.bias)
 
-        self.init_weights()
+        # Transformers 5.x computes tied-weight metadata in post_init() before
+        # init_weights() calls tie_weights(recompute_mapping=False).
+        self.post_init()
 
     @classmethod
     def from_pretrained(
@@ -224,7 +550,7 @@ class DecoderModelWithMLMHead(PreTrainedModel):
 
         if is_custom_checkpoint:
             # --- Load from custom checkpoint ---
-            config = AutoConfig.from_pretrained(pretrained_model_name_or_path, **kwargs)
+            config = AutoConfig.from_pretrained(pretrained_model_name_or_path, **_config_kwargs(kwargs))
             config.mask_token_id = mask_token_id or getattr(config, "mask_token_id", None)
 
             # Restore target_token_ids from meta file if not provided
@@ -235,28 +561,63 @@ class DecoderModelWithMLMHead(PreTrainedModel):
                 target_token_ids = meta["target_token_ids"]
 
             pooling_length = getattr(config, "pooling_length", pooling_length)
+            requested_device_map = kwargs.get("device_map")
+            base_model_id = meta.get("base_model") or meta.get("base_model_id")
 
-            # Init wrapper
-            model = cls(config, target_token_ids=target_token_ids, pooling_length=pooling_length)
+            if base_model_id:
+                hf_kwargs = {k: v for k, v in kwargs.items() if k in _HF_MODEL_LOAD_KWARGS and v is not False}
+                decoder = AutoModelForCausalLM.from_pretrained(
+                    base_model_id, *model_args, **hf_kwargs
+                )
+                model = cls(config, target_token_ids=target_token_ids, pooling_length=pooling_length, decoder=decoder)
+                tokenizer = AutoTokenizer.from_pretrained(pretrained_model_name_or_path)
+                if len(tokenizer) != model.decoder.get_input_embeddings().weight.shape[0]:
+                    model.decoder.resize_token_embeddings(len(tokenizer))
 
-            # Load saved weights (safetensors preferred when available)
-            state_dict = load_model_weights(pretrained_model_name_or_path)
-
-            if 'decoder.transformer.wte.weight' in state_dict:
-                wte_size = state_dict['decoder.transformer.wte.weight'].size(0)
-            elif 'decoder.model.embed_tokens.weight' in state_dict:
-                wte_size = state_dict['decoder.model.embed_tokens.weight'].size(0)
+                selected = _load_selected_checkpoint_tensors(
+                    pretrained_model_name_or_path,
+                    [
+                        "classifier.weight",
+                        "classifier.bias",
+                        "decoder.transformer.wte.weight",
+                        "decoder.model.embed_tokens.weight",
+                    ],
+                )
+                incompatible = model.load_state_dict(selected, strict=False)
+                if incompatible.unexpected_keys:
+                    raise RuntimeError(
+                        "Unexpected tensor(s) while loading decoder-only MLM head: "
+                        f"{incompatible.unexpected_keys}"
+                    )
+                model._align_classifier_to_decoder()
+            elif requested_device_map not in (None, False):
+                if not base_model_id:
+                    raise ValueError(
+                        f"Decoder-only MLM-head checkpoint {pretrained_model_name_or_path!r} does not record "
+                        "the original base model id, so it cannot be loaded with device_map. Retrain the MLM "
+                        "head with a current GRADIEND version, or load with base_model_device_map=False."
+                    )
             else:
-                raise ValueError("Unknown model architecture for loading embeddings.")
-            # resize embeddings if needed
-            current_vocab_size = model.decoder.config.vocab_size
-            if current_vocab_size != wte_size:
-                model.decoder.resize_token_embeddings(wte_size)
-            model.load_state_dict(state_dict, strict=True)
+                # Load saved weights (safetensors preferred when available)
+                state_dict = load_model_weights(pretrained_model_name_or_path)
+
+                if 'decoder.transformer.wte.weight' in state_dict:
+                    wte_size = state_dict['decoder.transformer.wte.weight'].size(0)
+                elif 'decoder.model.embed_tokens.weight' in state_dict:
+                    wte_size = state_dict['decoder.model.embed_tokens.weight'].size(0)
+                else:
+                    raise ValueError("Unknown model architecture for loading embeddings.")
+                # resize embeddings if needed
+                model = cls(config, target_token_ids=target_token_ids, pooling_length=pooling_length)
+                current_vocab_size = model.decoder.config.vocab_size
+                if current_vocab_size != wte_size:
+                    model.decoder.resize_token_embeddings(wte_size)
+                model.load_state_dict(state_dict, strict=True)
+                model._align_classifier_to_decoder()
 
         else:
             # --- Load from a standard LM checkpoint (e.g., "gpt2") ---
-            config = AutoConfig.from_pretrained(pretrained_model_name_or_path, **kwargs)
+            config = AutoConfig.from_pretrained(pretrained_model_name_or_path, **_config_kwargs(kwargs))
             config.mask_token_id = mask_token_id or getattr(config, "mask_token_id", None)
 
             # Init wrapper — this will internally freeze decoder and init head
@@ -271,6 +632,8 @@ class DecoderModelWithMLMHead(PreTrainedModel):
             # Replace classifier if in full vocab mode
             if target_token_ids is None:
                 model.classifier = model.decoder.lm_head
+            else:
+                model._align_classifier_to_decoder()
 
         return model
 
@@ -289,11 +652,15 @@ class DecoderModelWithMLMHead(PreTrainedModel):
 
         # Save wrapper-specific meta
         meta = {"target_token_ids": self.target_token_ids}
+        base_model = kwargs.pop("base_model", None)
+        if base_model is not None:
+            meta["base_model"] = str(base_model)
         with open(os.path.join(save_directory, "config_mlm_head.json"), "w") as f:
             json.dump(meta, f, indent=2)
 
         # Save model weights (safetensors preferred when available)
-        save_model_weights(save_directory, self.state_dict(), use_safetensors=use_safetensors)
+        state_dict = _custom_head_state_dict(self) if base_model is not None else self.state_dict()
+        save_model_weights(save_directory, state_dict, use_safetensors=use_safetensors)
 
     def forward(
             self,
@@ -326,8 +693,14 @@ class DecoderModelWithMLMHead(PreTrainedModel):
             input_ids=input_ids, attention_mask=attention_mask, use_cache=use_cache
         )
         hidden_states = outputs.last_hidden_state
+        self._align_classifier_to_hidden_states(hidden_states)
 
         mask_pos = (input_ids == mask_token_id).nonzero(as_tuple=False)
+        if labels is not None and mask_pos.numel() == 0:
+            raise ValueError(
+                f"No mask token id {mask_token_id} found in decoder-only MLM input_ids. "
+                "Ensure the masked text uses tokenizer.mask_token, or normalize '[MASK]' placeholders before tokenization."
+            )
 
         logits_list = []
         for batch_idx, seq_idx in mask_pos:
@@ -381,15 +754,32 @@ class DecoderModelWithMLMHead(PreTrainedModel):
             remove_duplicate: bool = True
     ) -> Iterator[Tuple[str, Parameter]]:
         """
-        Override to ensure we return only the decoder parameters and not the head.
-        This ensures that this model implementations mimics the parameter structure of
-        the underlying decoder-only model.
+        Return only the decoder backbone parameters.
+
+        The auxiliary MLM classifier and the decoder LM head are prediction heads,
+        not GRADIEND parameters. This matters for untied-head models such as Qwen,
+        where decoder.lm_head.weight is a separate parameter but is not used by
+        this wrapper's MLM loss.
         """
-        return self.decoder.named_parameters(
-            prefix=prefix,
+        backbone_param_ids = {
+            id(param)
+            for param in self.get_gradiend_backbone_module().parameters(recurse=True)
+        }
+        seen = set()
+        for name, param in self.decoder.named_parameters(
             recurse=recurse,
-            remove_duplicate=remove_duplicate
-        )
+            remove_duplicate=remove_duplicate,
+        ):
+            if id(param) not in backbone_param_ids:
+                continue
+            if remove_duplicate and id(param) in seen:
+                continue
+            seen.add(id(param))
+            yield (f"{prefix}.{name}" if prefix else name), param
+
+    def get_gradiend_backbone_module(self):
+        """Backbone used for GRADIEND parameter discovery."""
+        return self.decoder.base_model
 
     def to_original_model(self):
         """

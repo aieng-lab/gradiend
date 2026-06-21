@@ -8,16 +8,40 @@ lazily when loading a path with config_mlm_head.json to avoid circular imports.
 import os
 import torch
 import torch.nn as nn
+import transformers
 from transformers import (
+    AutoConfig,
     AutoModelForMaskedLM,
     AutoTokenizer,
     AutoModelForCausalLM,
+    AutoModelForSeq2SeqLM,
 )
 
 from gradiend.util.util import set_requires_grad_true
 from gradiend.trainer.text.prediction.decoder_only_mlm import DecoderModelWithMLMHead
 
 HF_TOKEN = os.getenv("HF_TOKEN")
+
+
+def _is_unknown_transformers_architecture_error(error: Exception) -> bool:
+    """Detect HF errors for checkpoints newer than the installed Transformers."""
+    message = str(error)
+    return (
+        "does not recognize this architecture" in message
+        or "not recognize this architecture" in message
+        or "Unrecognized model" in message
+    )
+
+
+def _raise_unknown_transformers_architecture_error(name_or_path, error: Exception) -> None:
+    version = getattr(transformers, "__version__", "unknown")
+    raise ValueError(
+        f"Could not load {name_or_path!r} because Transformers {version} does not "
+        "recognize the checkpoint architecture. This usually means the model was "
+        "released after the installed Transformers version. Upgrade Transformers "
+        "in the runtime environment, or choose a model whose model_type is supported "
+        "by that version."
+    ) from error
 
 
 
@@ -34,13 +58,29 @@ class AutoModelForLM(nn.Module):
         """
         Load a language model from a pretrained checkpoint.
 
-        Tries to load as MaskedLM first, then falls back to CausalLM.
+        Tries to load as Seq2SeqLM (encoder-decoder), MaskedLM, or CausalLM.
         Handles special cases like decoder-only models with MLM heads and Llama models.
         """
-        hf_dtype = kwargs.get("torch_dtype", kwargs.get("dtype", torch_dtype))
+        hf_dtype = kwargs.get("dtype", kwargs.get("torch_dtype", torch_dtype))
         rest = {k: v for k, v in kwargs.items() if k not in ("torch_dtype", "dtype")}
-        # Prefer dtype (HF standard); torch_dtype is deprecated in transformers
         load_kwargs = {"trust_remote_code": trust_remote_code, "dtype": hf_dtype, **rest}
+        if load_kwargs.get("device_map") is not None:
+            load_kwargs.setdefault("low_cpu_mem_usage", True)
+        try:
+            config = AutoConfig.from_pretrained(name_or_path, trust_remote_code=trust_remote_code)
+        except Exception as config_error:
+            if _is_unknown_transformers_architecture_error(config_error):
+                _raise_unknown_transformers_architecture_error(name_or_path, config_error)
+            raise
+        if getattr(config, "is_encoder_decoder", False):
+            try:
+                model = AutoModelForSeq2SeqLM.from_pretrained(name_or_path, token=HF_TOKEN, **load_kwargs)
+                set_requires_grad_true(model)
+                return model
+            except Exception as seq2seq_error:
+                if _is_unknown_transformers_architecture_error(seq2seq_error):
+                    _raise_unknown_transformers_architecture_error(name_or_path, seq2seq_error)
+                raise
         try:
             model = AutoModelForMaskedLM.from_pretrained(name_or_path, **load_kwargs)
         except Exception:
@@ -48,7 +88,12 @@ class AutoModelForLM(nn.Module):
             if os.path.exists(config_file):
                 model = DecoderModelWithMLMHead.from_pretrained(name_or_path, **load_kwargs)
             else:
-                model = AutoModelForCausalLM.from_pretrained(name_or_path, token=HF_TOKEN, **load_kwargs)
+                try:
+                    model = AutoModelForCausalLM.from_pretrained(name_or_path, token=HF_TOKEN, **load_kwargs)
+                except Exception as causal_error:
+                    if _is_unknown_transformers_architecture_error(causal_error):
+                        _raise_unknown_transformers_architecture_error(name_or_path, causal_error)
+                    raise
         set_requires_grad_true(model)
         return model
 

@@ -1,5 +1,5 @@
 """
-Smoke tests: run all gradiend.examples so they complete without verification.
+Smoke tests: run configured gradiend.examples so they complete without verification.
 
 These tests execute the example scripts as they are (no result checks) to ensure
 the example workflows do not break. They use the examples' own iteration counts
@@ -27,18 +27,21 @@ EXAMPLE_RUNS_DIR = PROJECT_ROOT / "runs" / "examples"
 
 # Example modules to run (under gradiend.examples)
 # start_workflow is the self-contained tutorial script used by docs/start.md
-# data_creation_pronouns must run before english_pronouns (creates data it needs)
+# create_english_pronoun_data must run before train_english_pronouns (creates data it needs)
 EXAMPLE_MODULES = [
+    "gradiend.examples.plot_visualization_gallery",
     "gradiend.examples.start_workflow",
     "gradiend.examples.readme",
-    "gradiend.examples.race_religion",
-    "gradiend.examples.gender_en",
-    "gradiend.examples.gender_de",
-    "gradiend.examples.gender_de_decoder_only",
-    "gradiend.examples.data_creator_demo",
-    "gradiend.examples.data_creation_pronouns",
-    "gradiend.examples.english_pronouns",
-    #"gradiend.examples.gender_de_detailed", # we exclude detailed run as it takes very long (many features)
+    "gradiend.examples.train_gender_en",
+    "gradiend.examples.train_gender_de",
+    "gradiend.examples.train_gender_de_decoder_only",
+    "gradiend.examples.create_german_article_data",
+    "gradiend.examples.create_english_pronoun_data",
+    "gradiend.examples.train_english_pronouns",
+    "gradiend.examples.train_multi_seed_stability",
+    "gradiend.examples.train_seq2seq_decoder_sequence",
+    "gradiend.examples.train_sentiment",
+    #"gradiend.examples.train_gender_de_detailed", # we exclude detailed run as it takes very long (many features)
 ]
 
 

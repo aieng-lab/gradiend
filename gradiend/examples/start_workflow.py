@@ -104,8 +104,7 @@ NEUTRAL_EXCLUDE = [
 ]
 
 
-def create_data():
-    """Build training and neutral data with TextPredictionDataCreator (matches start.md)."""
+if __name__ == "__main__":
     creator = TextPredictionDataCreator(
         base_data=ARTIFICIAL_TEXTS,
         feature_targets=[
@@ -118,18 +117,15 @@ def create_data():
         additional_excluded_words=NEUTRAL_EXCLUDE,
         max_size=50,
     )
-    return training, neutral
 
-
-def train_and_evaluate(training, neutral):
-    """Train, evaluate encoder/decoder, and return the selected changed model (matches start.md)."""
     args = TrainingArguments(
         train_batch_size=4,
         eval_steps=5,
         num_train_epochs=5,
         max_steps=25,
         learning_rate=1e-3,
-        experiment_dir='runs/examples/start_workflow'
+        experiment_dir='runs/examples/start_workflow',
+        fail_on_non_convergence=True,
     )
     trainer = TextPredictionTrainer(
         model="bert-base-uncased",
@@ -146,10 +142,4 @@ def train_and_evaluate(training, neutral):
     print("Correlation:", enc_result["correlation"])
     dec = trainer.evaluate_decoder(plot=True, target_class="3SG")
     print(dec["3SG"])
-    changed_base_model = trainer.rewrite_base_model(decoder_results=dec, target_class="3SG")
-
-    return trainer, enc_result, dec, changed_base_model
-
-
-training, neutral = create_data()
-trainer, enc_result, dec, changed_base_model = train_and_evaluate(training, neutral)
+    trainer.rewrite_base_model(decoder_results=dec, target_class="3SG")

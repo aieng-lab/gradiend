@@ -75,4 +75,6 @@ Shared fixtures are in `conftest.py`:
 
 - **Unit tests**: Fast tests using mocked/toy networks
 - **Integration tests**: Marked with `@pytest.mark.integration` (run actual training)
-- **Slow tests**: Marked with `@pytest.mark.slow` (can be skipped with `-m "not slow"`)
+- **Slow tests**: Marked with `@pytest.mark.slow`; default pytest runs deselect them via `-m "not slow"`.
+  Slow tests should include a marker reason or nearby docstring explaining whether they use real HF models,
+  network/cache-dependent assets, or intentionally heavier wrapper/integration paths.

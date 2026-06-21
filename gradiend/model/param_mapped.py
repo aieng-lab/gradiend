@@ -30,7 +30,8 @@ import json
 import os
 import math
 import hashlib
-from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
+import bisect
+from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, Union
 
 import torch
 
@@ -40,11 +41,100 @@ from gradiend.model.utils import (
     _save_tensor_dict,
     _tensor_file_name,
     _is_int32_safe,
-    _bytes_per_index,
+    _bytes_per_index, _normalize_param_name,
 )
 from gradiend.util.logging import get_logger
 
 logger = get_logger(__name__)
+
+
+class _CompiledParamSelector:
+    """Runtime-only selector for one parameter-map entry."""
+
+    __slots__ = ("name", "shape", "numel", "repr", "num_selected", "selector", "_device_selector")
+
+    def __init__(self, name: str, spec: Dict[str, Any]) -> None:
+        self.name = name
+        self.shape = tuple(spec["shape"])
+        self.numel = int(torch.tensor(self.shape).prod().item())
+        self.repr = str(spec["repr"])
+        self.selector: Optional[torch.Tensor] = None
+        self._device_selector: Optional[torch.Tensor] = None
+
+        if self.repr == "all":
+            self.num_selected = self.numel
+        elif self.repr == "mask":
+            self.selector = spec["mask"].detach().to("cpu").bool().flatten()
+            self.num_selected = int(self.selector.sum().item())
+            if self.num_selected == 0:
+                self.repr = "empty"
+                self.selector = None
+        elif self.repr == "indices":
+            self.selector = spec["indices"].detach().to("cpu").long().flatten()
+            self.num_selected = int(self.selector.numel())
+            if self.num_selected == 0:
+                self.repr = "empty"
+                self.selector = None
+        else:
+            raise ValueError(f"Unknown param repr {self.repr!r} for {name}")
+
+    def selector_for(self, device: torch.device) -> Optional[torch.Tensor]:
+        if self.selector is None:
+            return None
+        if self.selector.device == device:
+            return self.selector
+        if self._device_selector is None or self._device_selector.device != device:
+            self._device_selector = self.selector.to(device=device, non_blocking=False)
+        return self._device_selector
+
+    def select_flat(self, flat: torch.Tensor) -> torch.Tensor:
+        if self.repr == "all":
+            return flat
+        if self.repr == "empty":
+            return flat.new_empty(0)
+        selector = self.selector_for(flat.device)
+        if self.repr == "mask":
+            return flat[selector]
+        if self.repr == "indices":
+            return flat[selector.to(dtype=torch.long)]
+        raise ValueError(f"Unknown compiled repr {self.repr!r}")
+
+
+def _selected_positions_from_spec(spec: Dict[str, Any]) -> torch.Tensor:
+    shape = tuple(spec["shape"])
+    numel = int(torch.tensor(shape).prod().item())
+    r = spec["repr"]
+    if r == "all":
+        return torch.arange(numel, dtype=torch.long)
+    if r == "mask":
+        return spec["mask"].flatten().nonzero(as_tuple=False).flatten().to("cpu").long()
+    if r == "indices":
+        return spec["indices"].to("cpu").long().flatten()
+    raise ValueError(f"Unknown param repr {r!r}")
+
+
+def _make_runtime_spec_from_selected_positions(
+    shape: Tuple[int, ...],
+    sel_positions: torch.Tensor,
+    *,
+    margin: float = 0.80,
+) -> Dict[str, Any]:
+    """Choose an efficient in-memory mapping representation for selected positions."""
+    numel = int(torch.tensor(shape).prod().item())
+    sel_positions = sel_positions.to("cpu").long().flatten()
+    k = int(sel_positions.numel())
+    if k == numel:
+        return {"shape": shape, "repr": "all"}
+    if k == 0:
+        return {"shape": shape, "repr": "indices", "indices": torch.empty(0, dtype=torch.long)}
+    bpi = _bytes_per_index(numel)
+    est_indices = k * bpi
+    est_mask = numel
+    if est_indices < est_mask * margin:
+        return {"shape": shape, "repr": "indices", "indices": sel_positions}
+    mask = torch.zeros(numel, dtype=torch.bool)
+    mask[sel_positions] = True
+    return {"shape": shape, "repr": "mask", "mask": mask.reshape(shape)}
 
 
 class ParamMappedGradiendModel(GradiendModel):
@@ -132,10 +222,41 @@ class ParamMappedGradiendModel(GradiendModel):
         self._base_global_index_map: Optional[torch.Tensor] = None
         self._base_global_index_map_version: int = 0
         self._param_map_version: int = 0
+        self._compiled_param_selectors: Optional[List[_CompiledParamSelector]] = None
 
     def _param_map_items(self) -> Iterator[Tuple[str, Dict[str, Any]]]:
         # dict insertion order is the mapping order
         yield from self.param_map.items()
+
+    def _invalidate_runtime_param_map_cache(self) -> None:
+        self._compiled_param_selectors = None
+
+    def _compile_param_selectors(self) -> List[_CompiledParamSelector]:
+        selectors = [_CompiledParamSelector(name, spec) for name, spec in self._param_map_items()]
+        selected_total = sum(selector.num_selected for selector in selectors)
+        if selected_total != int(self.input_dim):
+            raise ValueError(
+                f"Inconsistent compiled param selectors: expected input_dim={self.input_dim}, "
+                f"got selected_total={selected_total}"
+            )
+        return selectors
+
+    def _get_compiled_param_selectors(self) -> List[_CompiledParamSelector]:
+        if self._compiled_param_selectors is None:
+            self._compiled_param_selectors = self._compile_param_selectors()
+        return self._compiled_param_selectors
+
+    def _normalize_param_map_reprs(self) -> None:
+        """Normalize param_map representations without changing selected dimensions."""
+        self.param_map = {
+            name: _make_runtime_spec_from_selected_positions(
+                tuple(spec["shape"]),
+                _selected_positions_from_spec(spec),
+            )
+            for name, spec in self._param_map_items()
+        }
+        self._base_global_index_map = None
+        self._invalidate_runtime_param_map_cache()
 
     @property
     def param_map_hash(self) -> str:
@@ -174,19 +295,18 @@ class ParamMappedGradiendModel(GradiendModel):
         parts: List[torch.Tensor] = []
         base_offset = 0
 
-        for param_name, spec in self._param_map_items():
-            shape = tuple(spec["shape"])
-            numel = int(torch.tensor(shape).prod().item())
-            r = spec["repr"]
-
-            if r == "all":
+        for selector in self._get_compiled_param_selectors():
+            numel = selector.numel
+            if selector.repr == "all":
                 sel_positions = torch.arange(numel, dtype=torch.long)
-            elif r == "mask":
-                sel_positions = spec["mask"].flatten().nonzero(as_tuple=False).flatten().to("cpu").long()
-            elif r == "indices":
-                sel_positions = spec["indices"].to("cpu").long()
+            elif selector.repr == "empty":
+                sel_positions = torch.empty(0, dtype=torch.long)
+            elif selector.repr == "mask":
+                sel_positions = selector.selector.nonzero(as_tuple=False).flatten().to("cpu").long()
+            elif selector.repr == "indices":
+                sel_positions = selector.selector.to("cpu").long()
             else:
-                raise ValueError(f"Unknown param repr {r!r} for {param_name}")
+                raise ValueError(f"Unknown param repr {selector.repr!r} for {selector.name}")
 
             if sel_positions.numel() > 0:
                 parts.append(sel_positions + base_offset)
@@ -219,6 +339,57 @@ class ParamMappedGradiendModel(GradiendModel):
         self._base_global_index_map = mapping
         self._base_global_index_map_version = self._param_map_version
         return mapping
+
+    def decode_base_global_index(self, base_global_index: int) -> Dict[str, Any]:
+        """
+        Decode one base-global index into parameter-local coordinates.
+
+        Args:
+            base_global_index: Index in the flattened base-parameter space.
+
+        Returns:
+            Dict with parameter name, shape, flat index within that parameter, and
+            coordinate tuple/list.
+        """
+        if isinstance(base_global_index, bool) or not isinstance(base_global_index, int):
+            raise TypeError(
+                f"base_global_index must be int, got {type(base_global_index).__name__}"
+            )
+
+        offsets: List[int] = []
+        meta: List[Tuple[str, Tuple[int, ...], int]] = []
+        base_offset = 0
+        for param_name, spec in self._param_map_items():
+            shape = tuple(spec["shape"])
+            numel = int(torch.tensor(shape).prod().item())
+            offsets.append(base_offset)
+            meta.append((param_name, shape, numel))
+            base_offset += numel
+
+        if base_global_index < 0 or base_global_index >= base_offset:
+            raise IndexError(
+                f"base_global_index {base_global_index} out of bounds for total size {base_offset}"
+            )
+
+        param_pos = bisect.bisect_right(offsets, base_global_index) - 1
+        param_name, shape, numel = meta[param_pos]
+        param_offset = offsets[param_pos]
+        flat_index = int(base_global_index - param_offset)
+        coords = tuple(int(x) for x in torch.unravel_index(torch.tensor(flat_index), shape))
+
+        return {
+            "param_name": param_name,
+            "param_shape": list(shape),
+            "param_numel": numel,
+            "flat_index_in_param": flat_index,
+            "coords": list(coords),
+            "param_row": coords[0] if len(coords) >= 1 else None,
+            "param_col": coords[1] if len(coords) >= 2 else None,
+        }
+
+    def decode_base_global_indices(self, base_global_indices: List[int]) -> List[Dict[str, Any]]:
+        """Vectorized convenience wrapper around decode_base_global_index()."""
+        return [self.decode_base_global_index(int(idx)) for idx in base_global_indices]
 
     # -----------------------------
     # gradient extraction / IO
@@ -258,13 +429,39 @@ class ParamMappedGradiendModel(GradiendModel):
         Raises:
             RuntimeError: If any required parameter gradient is None.
         """
-        param_lookup = {k: v for k, v in model.named_parameters()}
+
+        def _get_param_for_map_name(name: str):
+            p = param_lookup.get(name)
+            if p is not None:
+                return p
+            p = param_lookup.get(_normalize_param_name(name))
+            if p is not None:
+                return p
+            # optional DS/DDP fallback if normalize doesn't cover all wrappers
+            p = param_lookup.get(f"module.{name}")
+            if p is not None:
+                return p
+            raise KeyError(
+                f"Parameter '{name}' not found in model.named_parameters(). "
+                f"Examples: {list(param_lookup.keys())[:10]}"
+            )
+
+
+        param_lookup = {}
+        base_model = model.module if hasattr(model, "module") else model
+        for n, p in base_model.named_parameters():
+            param_lookup[n] = p
+            param_lookup.setdefault(_normalize_param_name(n), p)
+
+        selectors = self._get_compiled_param_selectors()
+        active_selectors = [selector for selector in selectors if selector.num_selected > 0]
 
         # ensure grads exist
         missing = []
-        for param_name, _spec in self._param_map_items():
-            if param_lookup[param_name].grad is None:
-                missing.append(param_name)
+        for selector in active_selectors:
+            p = _get_param_for_map_name(selector.name)
+            if p.grad is None:
+                missing.append(selector.name)
         if missing:
             raise RuntimeError(
                 f"Gradients are None for parameters: {missing}. "
@@ -281,42 +478,176 @@ class ParamMappedGradiendModel(GradiendModel):
 
         if return_dict:
             out = {}
-            for param_name, _spec in self._param_map_items():
-                g = param_lookup[param_name].grad.detach()
+            empty_device = target_device
+            if empty_device is None:
+                for selector in active_selectors:
+                    empty_device = _get_param_for_map_name(selector.name).grad.device
+                    break
+            empty_device = empty_device or torch.device("cpu")
+            for selector in selectors:
+                if selector.num_selected == 0:
+                    out[selector.name] = torch.zeros(selector.shape, dtype=self.torch_dtype, device=empty_device)
+                    continue
+                p = _get_param_for_map_name(selector.name)
+                g = p.grad.detach()
                 if stream_to_cpu and g.device.type != "cpu":
                     g = g.to(target_device, non_blocking=False)
                 elif not stream_to_cpu:
                     g = g.clone()
-                out[param_name] = g
+                out[selector.name] = g
             return out
 
         parts: List[torch.Tensor] = []
-        for param_name, spec in self._param_map_items():
-            grad = param_lookup[param_name].grad
+        for selector in active_selectors:
+            p = _get_param_for_map_name(selector.name)
+            grad = p.grad
             if stream_to_cpu and grad.device.type != "cpu":
                 g = grad.detach().flatten()
             else:
                 g = grad.detach().clone().flatten()
 
-            r = spec["repr"]
-            if r == "all":
-                chunk = g
-            elif r == "mask":
-                m = spec["mask"].flatten()
-                if m.device != g.device:
-                    m = m.to(g.device, non_blocking=False)
-                chunk = g[m]
-            elif r == "indices":
-                idx = spec["indices"].to(dtype=torch.long, device=g.device)
-                chunk = g[idx]
-            else:
-                raise ValueError(f"Unknown param repr {r!r} for {param_name}")
-
+            chunk = selector.select_flat(g)
             if target_device is not None and chunk.device != target_device:
                 chunk = chunk.to(target_device, non_blocking=False)
             parts.append(chunk)
 
-        return torch.concat(parts)
+        return torch.concat(parts) if parts else torch.empty(0, dtype=self.torch_dtype, device=target_device or torch.device("cpu"))
+
+    def extract_gradients_streaming(
+        self,
+        model: torch.nn.Module,
+        backward_fn: Callable[[], Any],
+        return_dict: bool = False,
+        target_device: Optional[torch.device] = None,
+    ) -> Union[torch.Tensor, Dict[str, torch.Tensor]]:
+        """
+        Extract mapped base-model gradients while backward is running.
+
+        Hooks collect only the entries selected by ``param_map``. On PyTorch versions
+        with ``register_post_accumulate_grad_hook``, full ``p.grad`` tensors are cleared
+        as soon as each parameter finishes accumulating, reducing peak memory for large
+        frozen base models used only as gradient generators.
+
+        Args:
+            model: Base model whose backward pass will populate gradients.
+            backward_fn: Callable that runs the base-model backward pass.
+            return_dict: If True, return a per-parameter dict. Unselected entries are
+                zero-filled for masked/indexed parameters.
+            target_device: Optional device to move selected chunks to immediately.
+        """
+
+        if target_device is not None and not isinstance(target_device, torch.device):
+            target_device = torch.device(target_device)
+
+        base_model = model.module if hasattr(model, "module") else model
+        param_lookup = {}
+        for n, p in base_model.named_parameters():
+            param_lookup[n] = p
+            param_lookup.setdefault(_normalize_param_name(n), p)
+
+        def _get_param_for_map_name(name: str):
+            p = param_lookup.get(name)
+            if p is not None:
+                return p
+            p = param_lookup.get(_normalize_param_name(name))
+            if p is not None:
+                return p
+            p = param_lookup.get(f"module.{name}")
+            if p is not None:
+                return p
+            raise KeyError(
+                f"Parameter '{name}' not found in model.named_parameters(). "
+                f"Examples: {list(param_lookup.keys())[:10]}"
+            )
+
+        collected: Dict[str, torch.Tensor] = {}
+        handles = []
+        mapped_params = []
+        selectors = self._get_compiled_param_selectors()
+        active_selectors = [selector for selector in selectors if selector.num_selected > 0]
+
+        def _select_chunk(grad: torch.Tensor, selector: _CompiledParamSelector) -> torch.Tensor:
+            flat = grad.detach().flatten()
+            chunk = selector.select_flat(flat)
+
+            if target_device is not None and chunk.device != target_device:
+                return chunk.to(target_device, non_blocking=False)
+            return chunk.clone()
+
+        for selector in active_selectors:
+            p = _get_param_for_map_name(selector.name)
+            mapped_params.append(p)
+
+            def _make_hook(name: str, param_selector: _CompiledParamSelector):
+                def _hook(grad: torch.Tensor):
+                    chunk = _select_chunk(grad, param_selector)
+                    if name in collected:
+                        collected[name] = collected[name] + chunk
+                    else:
+                        collected[name] = chunk
+                    return grad
+
+                return _hook
+
+            handles.append(p.register_hook(_make_hook(selector.name, selector)))
+            if hasattr(p, "register_post_accumulate_grad_hook"):
+                def _clear_grad(param: torch.nn.Parameter):
+                    param.grad = None
+
+                handles.append(p.register_post_accumulate_grad_hook(_clear_grad))
+
+        try:
+            backward_fn()
+        finally:
+            for h in handles:
+                h.remove()
+            for p in mapped_params:
+                p.grad = None
+
+        missing = [selector.name for selector in active_selectors if selector.name not in collected]
+        if missing:
+            raise RuntimeError(
+                f"Gradients were not collected for parameters: {missing}. "
+                "This indicates a bug in gradient computation (no backward, no_grad, requires_grad=False, ...)."
+            )
+
+        if not return_dict:
+            parts = [collected[selector.name] for selector in active_selectors]
+            if not parts:
+                dev = target_device or torch.device("cpu")
+                return torch.empty(0, dtype=self.torch_dtype, device=dev)
+            return torch.concat(parts)
+
+        out: Dict[str, torch.Tensor] = {}
+        empty_device = target_device
+        if empty_device is None:
+            for selector in active_selectors:
+                if selector.name in collected:
+                    empty_device = collected[selector.name].device
+                    break
+        empty_device = empty_device or torch.device("cpu")
+        for selector in selectors:
+            shape = selector.shape
+            r = selector.repr
+            if r == "empty":
+                out[selector.name] = torch.zeros(shape, dtype=self.torch_dtype, device=empty_device)
+                continue
+            chunk = collected[selector.name]
+            if r == "all":
+                out[selector.name] = chunk.reshape(shape)
+            elif r == "mask":
+                m = selector.selector_for(chunk.device)
+                full = torch.zeros(int(m.numel()), dtype=chunk.dtype, device=chunk.device)
+                full[m] = chunk
+                out[selector.name] = full.reshape(shape)
+            elif r == "indices":
+                idx = selector.selector_for(chunk.device).to(dtype=torch.long)
+                full = torch.zeros(int(torch.tensor(shape).prod().item()), dtype=chunk.dtype, device=chunk.device)
+                full[idx] = chunk
+                out[selector.name] = full.reshape(shape)
+            else:
+                raise ValueError(f"Unknown param repr {r!r} for {selector.name}")
+        return out
 
     def flatten_gradient_dict(self, grad_dict: Dict[str, torch.Tensor]) -> torch.Tensor:
         """
@@ -331,23 +662,16 @@ class ParamMappedGradiendModel(GradiendModel):
             1D tensor in GRADIEND input space, concatenated in param_map order.
         """
         parts: List[torch.Tensor] = []
-        for param_name, spec in self._param_map_items():
-            t = grad_dict[param_name]
+        for selector in self._get_compiled_param_selectors():
+            if selector.num_selected == 0:
+                continue
+            t = grad_dict[selector.name]
             flat = t.flatten()
-            r = spec["repr"]
-            if r == "all":
-                parts.append(flat)
-            elif r == "mask":
-                m = spec["mask"].flatten()
-                if m.device != flat.device:
-                    m = m.to(flat.device)
-                parts.append(flat[m])
-            elif r == "indices":
-                idx = spec["indices"].to(dtype=torch.long, device=flat.device)
-                parts.append(flat[idx])
-            else:
-                raise ValueError(f"Unknown param repr {r!r} for {param_name}")
-        return torch.concat(parts)
+            parts.append(selector.select_flat(flat))
+        if parts:
+            return torch.concat(parts)
+        dev = next(iter(grad_dict.values())).device if grad_dict else torch.device("cpu")
+        return torch.empty(0, dtype=self.torch_dtype, device=dev)
 
     def forward(
         self, x: Union[torch.Tensor, Dict[str, torch.Tensor]], return_encoded: bool = False
@@ -376,28 +700,17 @@ class ParamMappedGradiendModel(GradiendModel):
             pass
         elif isinstance(x, dict):
             parts: List[torch.Tensor] = []
-            for param_name, spec in self._param_map_items():
-                t = x[param_name]
+            for selector in self._get_compiled_param_selectors():
+                if selector.num_selected == 0:
+                    orig_shapes[selector.name] = ("empty", selector.shape)
+                    continue
+                t = x[selector.name]
                 flat = t.flatten()
-
-                r = spec["repr"]
-                if r == "all":
-                    sel = flat
-                    orig_shapes[param_name] = ("all", t.shape)
-                elif r == "mask":
-                    m = spec["mask"].flatten()
-                    sel = flat[m]
-                    orig_shapes[param_name] = ("mask", t.shape, spec["mask"])
-                elif r == "indices":
-                    idx = spec["indices"].to(dtype=torch.long, device=flat.device)
-                    sel = flat[idx]
-                    orig_shapes[param_name] = ("indices", t.shape, spec["indices"])
-                else:
-                    raise ValueError(f"Unknown param repr {r!r} for {param_name}")
-
+                sel = selector.select_flat(flat)
+                orig_shapes[selector.name] = (selector.repr, t.shape, selector)
                 parts.append(sel)
 
-            x = torch.concat(parts)
+            x = torch.concat(parts) if parts else torch.empty(0, dtype=self.torch_dtype, device=self.device_encoder)
         else:
             raise TypeError(f"x must be a tensor or dict of gradients, got {type(x)}")
 
@@ -416,20 +729,23 @@ class ParamMappedGradiendModel(GradiendModel):
                     out[param_name] = decoded[start : start + n].reshape(shape)
                     start += n
                 elif kind == "mask":
-                    _shape, mask = info[1], info[2]
-                    n = int(mask.sum().item())
-                    full = torch.zeros_like(mask, dtype=decoded.dtype)
+                    selector = info[2]
+                    mask = selector.selector_for(decoded.device)
+                    n = selector.num_selected
+                    full = torch.zeros(int(mask.numel()), dtype=decoded.dtype, device=decoded.device)
                     full[mask] = decoded[start : start + n]
                     out[param_name] = full.reshape(shape)
                     start += n
                 elif kind == "indices":
-                    _shape, idx = info[1], info[2]
-                    idx = idx.to("cpu").long()
-                    n = int(idx.numel())
+                    selector = info[2]
+                    idx = selector.selector_for(decoded.device).to(dtype=torch.long)
+                    n = selector.num_selected
                     full = torch.zeros(int(torch.tensor(shape).prod().item()), dtype=decoded.dtype, device=decoded.device)
-                    full[idx.to(decoded.device)] = decoded[start : start + n]
+                    full[idx] = decoded[start : start + n]
                     out[param_name] = full.reshape(shape)
                     start += n
+                elif kind == "empty":
+                    out[param_name] = torch.zeros(shape, dtype=decoded.dtype, device=decoded.device)
                 else:
                     raise ValueError(kind)
 
@@ -450,19 +766,12 @@ class ParamMappedGradiendModel(GradiendModel):
         """
         if isinstance(x, dict):
             parts: List[torch.Tensor] = []
-            for param_name, spec in self._param_map_items():
-                flat = x[param_name].flatten()
-                r = spec["repr"]
-                if r == "all":
-                    parts.append(flat)
-                elif r == "mask":
-                    parts.append(flat[spec["mask"].flatten()])
-                elif r == "indices":
-                    idx = spec["indices"].to(dtype=torch.long, device=flat.device)
-                    parts.append(flat[idx])
-                else:
-                    raise ValueError(f"Unknown param repr {r!r} for {param_name}")
-            x = torch.concat(parts)
+            for selector in self._get_compiled_param_selectors():
+                if selector.num_selected == 0:
+                    continue
+                flat = x[selector.name].flatten()
+                parts.append(selector.select_flat(flat))
+            x = torch.concat(parts) if parts else torch.empty(0, dtype=self.torch_dtype, device=self.device_encoder)
         elif not torch.is_tensor(x):
             raise TypeError(f"forward_encoder x must be a tensor or dict of gradients, got {type(x)}")
         return super().forward_encoder(x)
@@ -478,6 +787,7 @@ class ParamMappedGradiendModel(GradiendModel):
         mask: Optional[torch.Tensor] = None,
         part: str = "decoder-weight",
         importance: Optional[torch.Tensor] = None,
+        keep_idx: Optional[torch.Tensor] = None,
         inplace: bool = False,
         return_mask: bool = False,
     ) -> Union["ParamMappedGradiendModel", Tuple["ParamMappedGradiendModel", torch.Tensor]]:
@@ -494,6 +804,7 @@ class ParamMappedGradiendModel(GradiendModel):
             mask: optional bool tensor of shape (input_dim,) in current input space.
             part: 'encoder-weight' | 'decoder-weight' | 'decoder-bias' | 'decoder-sum' (used when importance is None).
             importance: optional 1D tensor of length input_dim (e.g. from gradient mean); used instead of get_weight_importance(part) when provided.
+            keep_idx: optional 1D tensor of input-space indices to keep. Bypasses dense mask/importance materialization.
             inplace: modify this instance if True, else return a deepcopy.
             return_mask: if True, also return final combined_mask (original input space).
 
@@ -505,12 +816,15 @@ class ParamMappedGradiendModel(GradiendModel):
                 of shape (old_input_dim,) indicating kept dimensions in the
                 original input space.
         """
-        if topk is None and threshold is None and mask is None:
+        if keep_idx is not None and (topk is not None or threshold is not None or mask is not None or importance is not None):
+            raise ValueError("keep_idx cannot be combined with topk, threshold, mask, or importance.")
+        if topk is None and threshold is None and mask is None and keep_idx is None:
             raise ValueError("At least one of topk, threshold, mask must be provided.")
 
         # topk=1.0 (float) means no pruning (return self); topk int 1 means keep top-1 dimension
         if topk is not None and isinstance(topk, float) and topk == 1.0:
             m = self if inplace else copy.deepcopy(self)
+            m._normalize_param_map_reprs()
             if return_mask:
                 old_input_dim = int(m.input_dim)
                 full_mask = torch.ones(old_input_dim, dtype=torch.bool)
@@ -520,57 +834,68 @@ class ParamMappedGradiendModel(GradiendModel):
         m = self if inplace else copy.deepcopy(self)
         old_input_dim = int(m.input_dim)
 
-        combined = torch.ones(old_input_dim, dtype=torch.bool)
+        combined = None
+        if keep_idx is not None:
+            if not torch.is_tensor(keep_idx):
+                raise TypeError("keep_idx must be a tensor.")
+            keep_idx = keep_idx.detach().to(dtype=torch.long, device="cpu").flatten()
+            if keep_idx.numel() == 0:
+                raise ValueError("keep_idx must not be empty.")
+            if int(keep_idx.min().item()) < 0 or int(keep_idx.max().item()) >= old_input_dim:
+                raise ValueError(f"keep_idx out of bounds for input_dim={old_input_dim}")
+            keep_idx = torch.unique(keep_idx, sorted=True)
+        else:
+            combined = torch.ones(old_input_dim, dtype=torch.bool)
 
-        if mask is not None:
-            if not torch.is_tensor(mask) or mask.dtype != torch.bool or mask.shape != (old_input_dim,):
-                raise ValueError(f"mask must be bool tensor with shape ({old_input_dim},)")
-            combined &= mask.detach().to("cpu")
+            if mask is not None:
+                if not torch.is_tensor(mask) or mask.dtype != torch.bool or mask.shape != (old_input_dim,):
+                    raise ValueError(f"mask must be bool tensor with shape ({old_input_dim},)")
+                combined &= mask.detach().to("cpu")
 
-        importance_scores = None
-        if threshold is not None or topk is not None:
-            if importance is not None:
-                importance_scores = importance.detach().to("cpu")
-                if importance_scores.dim() != 1 or importance_scores.numel() != old_input_dim:
-                    raise ValueError(f"importance must be 1D tensor of length {old_input_dim}, got shape {importance_scores.shape}")
-            else:
-                importance_scores = m.get_weight_importance(part=part).detach().to("cpu")
-            if importance_scores.numel() != old_input_dim:
-                raise ValueError(f"importance length {importance_scores.numel()} != input_dim {old_input_dim}")
+            importance_scores = None
+            if threshold is not None or topk is not None:
+                if importance is not None:
+                    importance_scores = importance.detach().to("cpu")
+                    if importance_scores.dim() != 1 or importance_scores.numel() != old_input_dim:
+                        raise ValueError(f"importance must be 1D tensor of length {old_input_dim}, got shape {importance_scores.shape}")
+                else:
+                    importance_scores = m.get_weight_importance(part=part).detach().to("cpu")
+                if importance_scores.numel() != old_input_dim:
+                    raise ValueError(f"importance length {importance_scores.numel()} != input_dim {old_input_dim}")
 
-        if threshold is not None:
-            if not isinstance(threshold, (int, float)) or threshold < 0:
-                raise ValueError("threshold must be a non-negative float/int")
-            combined &= (importance_scores >= float(threshold))
+            if threshold is not None:
+                if not isinstance(threshold, (int, float)) or threshold < 0:
+                    raise ValueError("threshold must be a non-negative float/int")
+                combined &= (importance_scores >= float(threshold))
 
-        if topk is not None:
-            if isinstance(topk, bool):
-                raise TypeError("topk must be int or float, not bool")
-            active = combined.nonzero(as_tuple=False).flatten()
-            n_active = int(active.numel())
-            if n_active == 0:
-                raise ValueError("No dimensions left after mask/threshold.")
+            if topk is not None:
+                if isinstance(topk, bool):
+                    raise TypeError("topk must be int or float, not bool")
+                active = combined.nonzero(as_tuple=False).flatten()
+                n_active = int(active.numel())
+                if n_active == 0:
+                    raise ValueError("No dimensions left after mask/threshold.")
 
-            if isinstance(topk, float):
-                if not (0.0 < topk <= 1.0):
-                    raise ValueError("If topk is float, it must be in (0, 1].")
-                k = int(math.ceil(topk * n_active))
-            elif isinstance(topk, int):
-                if topk <= 0:
-                    raise ValueError("If topk is int, it must be >= 1.")
-                k = min(int(topk), n_active)
-            else:
-                raise TypeError(f"topk must be int or float, got {type(topk)}")
+                if isinstance(topk, float):
+                    if not (0.0 < topk <= 1.0):
+                        raise ValueError("If topk is float, it must be in (0, 1].")
+                    k = int(math.ceil(topk * n_active))
+                elif isinstance(topk, int):
+                    if topk <= 0:
+                        raise ValueError("If topk is int, it must be >= 1.")
+                    k = min(int(topk), n_active)
+                else:
+                    raise TypeError(f"topk must be int or float, got {type(topk)}")
 
-            if k < n_active:
-                scores = importance_scores[active]
-                keep_local = torch.topk(scores, k=k, largest=True, sorted=False).indices
-                keep_global = active[keep_local]
-                new_mask = torch.zeros_like(combined)
-                new_mask[keep_global] = True
-                combined = new_mask
+                if k < n_active:
+                    scores = importance_scores[active]
+                    keep_local = torch.topk(scores, k=k, largest=True, sorted=False).indices
+                    keep_global = active[keep_local]
+                    new_mask = torch.zeros_like(combined)
+                    new_mask[keep_global] = True
+                    combined = new_mask
 
-        keep_idx = combined.nonzero(as_tuple=False).flatten().long()
+            keep_idx = combined.nonzero(as_tuple=False).flatten().long()
         if keep_idx.numel() == 0:
             raise ValueError("Pruning would remove all dimensions (combined_mask all False).")
 
@@ -584,33 +909,15 @@ class ParamMappedGradiendModel(GradiendModel):
             numel = int(torch.tensor(shape).prod().item())
             r = spec["repr"]
 
-            if r == "all":
-                sel_positions = torch.arange(numel, dtype=torch.long)
-            elif r == "mask":
-                sel_positions = spec["mask"].flatten().nonzero(as_tuple=False).flatten().to("cpu").long()
-            elif r == "indices":
-                sel_positions = spec["indices"].to("cpu").long()
-            else:
-                raise ValueError(f"Unknown param repr {r!r} for {param_name}")
+            sel_positions = _selected_positions_from_spec(spec)
 
             n = int(sel_positions.numel())
 
             in_seg = (keep_cpu >= offset) & (keep_cpu < offset + n)
             seg_keep = keep_cpu[in_seg] - offset
 
-            if seg_keep.numel() == 0:
-                new_param_map[param_name] = {
-                    "shape": shape,
-                    "repr": "indices",
-                    "indices": torch.empty(0, dtype=torch.long),
-                }
-            else:
-                new_sel = sel_positions[seg_keep]
-                new_param_map[param_name] = {
-                    "shape": shape,
-                    "repr": "indices",
-                    "indices": new_sel.to(dtype=torch.long),
-                }
+            new_sel = sel_positions[seg_keep] if seg_keep.numel() > 0 else torch.empty(0, dtype=torch.long)
+            new_param_map[param_name] = _make_runtime_spec_from_selected_positions(shape, new_sel)
 
             offset += n
 
@@ -628,8 +935,14 @@ class ParamMappedGradiendModel(GradiendModel):
         m.param_map = new_param_map
         m._param_map_version = getattr(m, "_param_map_version", 0) + 1
         m._base_global_index_map = None
+        m._invalidate_runtime_param_map_cache()
 
-        return (m, combined) if return_mask else m
+        if return_mask:
+            if combined is None:
+                combined = torch.zeros(old_input_dim, dtype=torch.bool)
+                combined[keep_idx] = True
+            return m, combined
+        return m
 
     # -----------------------------
     # save/load (mapping-aware)
@@ -897,6 +1210,8 @@ class ParamMappedGradiendModel(GradiendModel):
         if "base_global_index_map" in index_map_dict:
             model._base_global_index_map = index_map_dict["base_global_index_map"].to("cpu").to(dtype=torch.long)
             model._base_global_index_map_version = getattr(model, "_param_map_version", 0)
+        model._normalize_param_map_reprs()
+        model._compiled_param_selectors = model._compile_param_selectors()
         return model
 
     def unpruned_length(self) -> int:

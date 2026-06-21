@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union, Set
 import numpy as np
 
 from gradiend.util.paths import resolve_output_path, ARTIFACT_CONVERGENCE_PLOT
+from gradiend.visualizer.labels import resolve_highlight_non_convergence, resolve_plot_title_with_convergence
 from gradiend.visualizer.plot_optional import _require_matplotlib
 from gradiend.trainer.core.stats import load_training_stats
 from gradiend.util.logging import get_logger
@@ -152,11 +153,22 @@ def draw_convergence_axes(
 ) -> None:
     """
     Draw convergence curves into existing axes (live or static).
-    axes[0] = mean_by_class (if plot_mean_by_class), axes[1] = mean_by_feature_class (if plot_mean_by_feature_class),
-    axes[2] = correlation (if plot_correlation). Caller must pass enough axes for the enabled options.
 
-    plot_mean_by_feature_class: None = auto (False when redundant with mean_by_class, True otherwise).
-    legend_ncol, legend_bbox_to_anchor, legend_loc: used for figure-level legend when >= 6 series.
+    Args:
+        training_stats: Training statistics dictionary containing convergence series.
+        axes: Matplotlib axes to draw into. ``axes[0]`` receives ``mean_by_class`` when
+            enabled, the next axis receives ``mean_by_feature_class`` when enabled, and
+            the next axis receives correlation when enabled.
+        best_step_val: Optional checkpoint step to mark with a vertical line.
+        best_corr: Optional best correlation value to mark on the correlation axis.
+        label_name_mapping: Optional mapping from raw label ids/names to display names.
+        plot_mean_by_class: Whether to draw the mean-by-class subplot.
+        plot_mean_by_feature_class: Whether to draw the mean-by-feature-class subplot.
+            ``None`` auto-disables it when it would duplicate ``mean_by_class``.
+        plot_correlation: Whether to draw the correlation subplot.
+        legend_ncol: Number of columns for the external legend when many series are shown.
+        legend_bbox_to_anchor: Matplotlib legend anchor used for the external legend.
+        legend_loc: Matplotlib legend location used for legends.
     """
     ts = training_stats
     steps, series_by_class, series_by_fc = _steps_and_values(
@@ -306,8 +318,10 @@ def plot_training_convergence(
     legend_ncol: Optional[int] = None,
     legend_bbox_to_anchor: Optional[Tuple[float, float]] = None,
     legend_loc: Optional[str] = None,
+    highlight_non_convergence: Optional[bool] = None,
+    return_fig_ax: bool = False,
     **kwargs: Any,
-) -> str:
+) -> Any:
     """
     Plot training convergence: up to three subplots (mean_by_class, mean_by_feature_class, correlation).
 
@@ -336,12 +350,21 @@ def plot_training_convergence(
         show: Whether to call plt.show().
         title: True (default run_id), False, or custom string.
         figsize: (width, height) for figure.
+        img_format: File extension used when resolving the default output path.
+        dpi: Optional Matplotlib savefig DPI.
         legend_ncol: Number of columns for the external legend when there are >= 6 series (default 1).
         legend_bbox_to_anchor: (x, y) for the external legend when >= 6 series (default (1.02, 0.5)).
         legend_loc: Matplotlib loc for the external legend when >= 6 series (default "center left").
+        highlight_non_convergence: When True, append a non-convergence marker to the title for
+            non-converged runs. ``None`` uses ``TrainingArguments.highlight_non_convergence``.
+        return_fig_ax: If True, return ``(fig, axes)`` and leave the figure open so callers can
+            customize it before showing, saving again, or closing it. Existing saving/display
+            behavior still runs when ``output``/``experiment_dir`` or ``show`` are set.
+        **kwargs: Reserved for compatibility with trainer visualizer wrappers.
 
     Returns:
-        Path to saved plot file, or "" if nothing to plot or no path.
+        Path to saved plot file, or "" if nothing to plot or no path. If ``return_fig_ax=True``,
+        returns ``(fig, axes)``.
     """
     if training_stats is not None:
         if "training_stats" in training_stats and "best_score_checkpoint" in training_stats:
@@ -523,12 +546,15 @@ def plot_training_convergence(
         ax.grid(True, alpha=0.3)
         ax.set_title("Correlation")
 
-    if title is not False:
-        if isinstance(title, str):
-            fig.suptitle(title, fontsize=10)
-        else:
-            rid = getattr(trainer, "run_id", None) if trainer is not None else None
-            fig.suptitle(rid or "Training convergence", fontsize=10)
+    highlight = resolve_highlight_non_convergence(highlight_non_convergence, trainer=trainer)
+    resolved_title = resolve_plot_title_with_convergence(
+        title,
+        trainer=trainer,
+        run_info=run_info,
+        highlight_non_convergence=highlight,
+    )
+    if resolved_title is not False:
+        fig.suptitle(str(resolved_title), fontsize=10)
     plt.tight_layout()
 
     out_path = None
@@ -541,7 +567,7 @@ def plot_training_convergence(
         ext = img_format if img_format.startswith(".") else f".{img_format}"
         out_path = os.path.splitext(out_path)[0] + ext
 
-    if out_path is None and not show:
+    if out_path is None and not show and not return_fig_ax:
         raise ValueError(
             "output is required when experiment_dir is not set and not show=True."
         )
@@ -555,5 +581,7 @@ def plot_training_convergence(
         logger.info("Saved convergence plot: %s", out_path)
     if show:
         plt.show()
-    plt.close()
+    if return_fig_ax:
+        return fig, axes
+    plt.close(fig)
     return out_path or ""

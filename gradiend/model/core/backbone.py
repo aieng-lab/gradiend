@@ -13,24 +13,58 @@ import torch
 
 from gradiend.model import ParamMappedGradiendModel
 from gradiend.model.utils import freeze_params_until_target
-from gradiend.util import get_logger
+from gradiend.util import get_logger, unwrap_model
 
 logger = get_logger(__name__)
+
+
+def _prefer_text_backbone_if_multimodal(module: torch.nn.Module) -> torch.nn.Module:
+    """Prefer the text tower when a multimodal HF backbone exposes one."""
+    has_vision = any(
+        hasattr(module, attr)
+        for attr in ("vision_tower", "vision_model", "visual", "vision_encoder")
+    )
+    if not has_vision:
+        return module
+
+    for attr in (
+        "language_model",
+        "text_model",
+        "text_tower",
+        "text_encoder",
+        "decoder",
+        "transformer",
+    ):
+        candidate = getattr(module, attr, None)
+        if isinstance(candidate, torch.nn.Module):
+            logger.info(
+                "Detected multimodal backbone; using text submodule %s.%s for GRADIEND parameters.",
+                module.__class__.__name__,
+                attr,
+            )
+            return candidate
+    return module
 
 
 def get_backbone_module(model: torch.nn.Module) -> torch.nn.Module:
     """
     Return the backbone (core) submodule of a Hugging Face–style model.
 
-    Uses base_model_prefix (e.g. "bert", "roberta", "model") when present,
+    Custom wrappers may expose get_gradiend_backbone_module(). Otherwise uses
+    base_model_prefix (e.g. "bert", "roberta", "model") when present,
     otherwise base_model, else the full model.
     """
+    custom = getattr(model, "get_gradiend_backbone_module", None)
+    if callable(custom):
+        backbone = custom()
+        if backbone is not None:
+            return _prefer_text_backbone_if_multimodal(backbone)
     prefix = getattr(model, "base_model_prefix", None)
     if prefix and hasattr(model, prefix):
-        return getattr(model, prefix)
+        return _prefer_text_backbone_if_multimodal(getattr(model, prefix))
     if hasattr(model, "base_model"):
-        return model.base_model
-    return model
+        return _prefer_text_backbone_if_multimodal(model.base_model)
+    return _prefer_text_backbone_if_multimodal(model)
 
 
 def split_backbone_vs_head_params(
@@ -46,7 +80,8 @@ def split_backbone_vs_head_params(
         core: OrderedDict of (name, parameter) for backbone parameters only.
         excluded: List of dicts with name, py_id, data_ptr, shape, requires_grad, device, dtype.
     """
-    backbone = get_backbone_module(model)
+    base_model = unwrap_model(model)
+    backbone = get_backbone_module(base_model)
     backbone_param_ids = {id(p) for p in backbone.parameters(recurse=True)}
 
     core = OrderedDict()
@@ -73,7 +108,8 @@ def debug_param_overlap(model: torch.nn.Module) -> Dict[str, int]:
     """
     Return counts of backbone vs full model parameters (for sanity checks).
     """
-    backbone = get_backbone_module(model)
+    base_model = unwrap_model(model)
+    backbone = get_backbone_module(base_model)
     backbone_ids = {id(p) for p in backbone.parameters(recurse=True)}
     model_ids = {id(p) for _, p in model.named_parameters(recurse=True)}
     return {

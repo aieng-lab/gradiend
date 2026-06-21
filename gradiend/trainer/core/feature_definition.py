@@ -15,6 +15,7 @@ import pandas as pd
 import os
 
 from gradiend.trainer.core.protocols import DataProvider
+from gradiend.trainer.core.unified_schema import UNIFIED_SPLIT
 from gradiend.util.paths import (
     resolve_custom_prediction_head_dir,
     resolve_output_path,
@@ -25,6 +26,8 @@ from gradiend.util.logging import get_logger
 from gradiend.model import ModelWithGradiend
 from gradiend.util.paths import resolve_encoder_analysis_path
 from gradiend.evaluator.encoder_metrics import get_encoder_metrics_from_dataframe, get_model_metrics
+from gradiend.util.encoder_splits import encoder_split_cache_key
+from gradiend.util.split_policy import SplitPolicy
 
 logger = get_logger(__name__)
 
@@ -101,12 +104,21 @@ class FeatureLearningDefinition(DataProvider, ABC):
         self.n_features = n_features
         self.version_map = {}
         self._model_with_gradiend_cls: Optional[Type[ModelWithGradiend]] = None
+        self._eval_group = "factual_id"
 
     def __str__(self) -> str:
         return (
             f"FeatureLearningDefinition(target_classes={self._target_classes!r}, "
             f"run_id={self.run_id!r}, n_features={self.n_features})"
         )
+
+    def _resolve_eval_group(self, source: Optional[str] = None) -> str:
+        resolved_source = self._default_from_training_args(source, "source", fallback="factual")
+        return "factual_id" if resolved_source == "factual" else "feature_class_id"
+
+    @property
+    def eval_group(self) -> str:
+        return str(self._eval_group)
 
     def resolve_custom_prediction_head_dir(self) -> Optional[str]:
         """
@@ -312,7 +324,11 @@ class FeatureLearningDefinition(DataProvider, ABC):
         max_size = encoder_kwargs.get("max_size")
         key_kwargs: Dict[str, Any] = {}
         if split is not None:
-            key_kwargs["split"] = split
+            available = None
+            combined = getattr(self, "combined_data", None)
+            if combined is not None and hasattr(combined, "columns") and "split" in combined.columns:
+                available = combined["split"].dropna().astype(str).tolist()
+            key_kwargs["split"] = encoder_split_cache_key(split, available=available)
         if max_size is not None:
             key_kwargs["max_size"] = max_size
         return resolve_encoder_analysis_path(experiment_dir, None, **key_kwargs)
@@ -324,6 +340,12 @@ class FeatureLearningDefinition(DataProvider, ABC):
     def get_training_stats(self, model_path: str) -> Optional[Dict[str, Any]]:
         """
         Load training statistics and metadata for a saved GRADIEND model.
+
+        Args:
+            model_path: Directory containing the saved model and ``training.json``.
+
+        Returns:
+            Parsed training statistics, or None when no stats file exists.
         """
         return load_training_stats(model_path)
 
@@ -378,10 +400,34 @@ class FeatureLearningDefinition(DataProvider, ABC):
             )
         return cls.from_pretrained(load_directory, **kwargs)
 
+    def resolve_split_for_role(self, role: str) -> str:
+        """
+        Resolve which dataset split to use for a workflow role given available data.
+
+        Roles: ``train`` (training), ``eval`` (in-training encoder monitoring),
+        ``decoder`` (held-out decoder / final encoder eval when not overridden).
+        """
+        splits: List[str] = []
+        combined = getattr(self, "_combined_data", None)
+        if combined is not None and len(combined) > 0:
+            if UNIFIED_SPLIT in combined.columns:
+                splits = combined[UNIFIED_SPLIT].dropna().astype(str).tolist()
+            else:
+                split_col = getattr(getattr(self, "config", None), "split_col", None) or "split"
+                if split_col in combined.columns:
+                    splits = combined[split_col].dropna().astype(str).tolist()
+        if splits:
+            return SplitPolicy.from_available(splits).split_for_role(role)
+        return {"train": "train", "eval": "validation", "decoder": "test"}.get(role, "train")
+
     @abstractmethod
     def create_training_data(self, *args, **kwargs):
         """
         Create training dataset without gradient computation (for efficiency).
+
+        Args:
+            *args: Positional arguments defined by the concrete trainer.
+            **kwargs: Keyword arguments defined by the concrete trainer.
 
         Returns:
             Training dataset compatible with GradientTrainingDataset
@@ -392,18 +438,27 @@ class FeatureLearningDefinition(DataProvider, ABC):
     def create_gradient_training_dataset(self, *args, **kwargs):
         """
         Create training dataset with gradient computation, wrapping the raw training data.
+
+        Args:
+            *args: Positional arguments defined by the concrete trainer.
+            **kwargs: Keyword arguments defined by the concrete trainer.
+
+        Returns:
+            Gradient-aware dataset used by the core training loop.
         """
         raise NotImplementedError(f"{self.__class__.__name__} must implement create_gradient_training_dataset")
 
     def create_eval_data(
         self,
         model_with_gradiend: Any,
-        split: str = "val",
+        split: str = "validation",
         source: Optional[str] = None,
         max_size: Optional[int] = None,
         is_decoder_only_model: Optional[bool] = None,
         pre_load_gradients: Optional[bool] = None,
-        include_other_classes: bool = False,
+        include_other_classes: Optional[bool] = None,
+        use_all_transitions: bool = False,
+        transition_selection: Optional[Any] = None,
         **kwargs,
     ) -> Any:
         """
@@ -413,7 +468,43 @@ class FeatureLearningDefinition(DataProvider, ABC):
         then wrap via create_gradient_training_dataset (modality-specific).
 
         Uses encoder_eval_balance from training args to set balance_column for
-        create_training_data; when True, balances eval samples by feature_class_id.
+        create_training_data. For factual-source evaluation the natural balancing
+        unit is the factual class itself; for alternative/diff we keep the default
+        pair-level transition grouping.
+
+        Args:
+            model_with_gradiend:
+                Model used to create gradients / encoder values for evaluation.
+            split:
+                Dataset split to evaluate. Defaults to ``"validation"``.
+            source:
+                Encoder source passed to gradient dataset creation. Defaults to
+                ``TrainingArguments.source`` or ``"factual"``.
+            max_size:
+                Optional row cap, defaulting to ``TrainingArguments.encoder_eval_max_size``.
+            is_decoder_only_model:
+                Optional model-family hint forwarded to concrete data creation.
+            pre_load_gradients:
+                Whether to precompute/cache gradients before iteration. Defaults
+                to ``TrainingArguments.use_cached_gradients``.
+            include_other_classes:
+                Deprecated coarse flag for broadening evaluation beyond the active
+                target pair. Prefer ``use_all_transitions`` for clearer semantics.
+            use_all_transitions:
+                If True, include all transitions available in the evaluation data
+                for the chosen split. This is a simple shortcut for broad probe
+                analysis.
+            transition_selection:
+                Optional explicit transition specs used only during evaluation.
+                When provided, these specs define which extra transitions are
+                included in addition to the active target pair. If set, this
+                overrides ``include_other_classes`` / ``use_all_transitions``.
+            **kwargs:
+                Additional options forwarded to ``create_training_data`` and
+                ``create_gradient_training_dataset``.
+
+        Returns:
+            Evaluation dataset compatible with encoder analysis.
         """
         source = self._default_from_training_args(source, "source", fallback="factual")
         target = self._default_from_training_args(None, "target", fallback="diff")
@@ -422,9 +513,20 @@ class FeatureLearningDefinition(DataProvider, ABC):
         encoder_eval_balance = self._default_from_training_args(
             kwargs.get("encoder_eval_balance"), "encoder_eval_balance", fallback=True
         )
-        balance_column = "feature_class_id" if encoder_eval_balance else None
+        include_other_classes = self._default_from_training_args(
+            include_other_classes, "include_other_classes", fallback=False
+        )
+        self._eval_group = self._resolve_eval_group(source)
+        if encoder_eval_balance:
+            balance_column = self.eval_group
+        else:
+            balance_column = None
 
-        create_kwargs = {k: v for k, v in kwargs.items() if k not in ("include_other_classes", "encoder_eval_balance")}
+        create_kwargs = {
+            k: v
+            for k, v in kwargs.items()
+            if k not in ("include_other_classes", "use_all_transitions", "transition_selection", "encoder_eval_balance")
+        }
         raw = self.create_training_data(
             model_with_gradiend,
             split=split,
@@ -433,6 +535,8 @@ class FeatureLearningDefinition(DataProvider, ABC):
             is_decoder_only_model=is_decoder_only_model,
             balance_column=balance_column,
             include_other_classes=include_other_classes,
+            use_all_transitions=use_all_transitions,
+            transition_selection=transition_selection,
             **create_kwargs,
         )
         cache_dir = (
@@ -440,7 +544,11 @@ class FeatureLearningDefinition(DataProvider, ABC):
             if pre_load_gradients
             else None
         )
-        grad_kwargs = {k: v for k, v in kwargs.items() if k not in ("include_other_classes", "encoder_eval_balance")}
+        grad_kwargs = {
+            k: v
+            for k, v in kwargs.items()
+            if k not in ("include_other_classes", "use_all_transitions", "transition_selection", "encoder_eval_balance")
+        }
         return self.create_gradient_training_dataset(
             raw,
             model_with_gradiend,
@@ -523,6 +631,12 @@ class FeatureLearningDefinition(DataProvider, ABC):
     ) -> Dict[str, Any]:
         """
         Evaluate a single model for decoder evaluation.
+
+        Args:
+            model: Model to evaluate.
+            tokenizer: Tokenizer paired with ``model``.
+            use_cache: Optional cache toggle for implementations that cache decoder results.
+            **kwargs: Additional modality-specific evaluation options.
 
         Returns:
             Dict with 'feature_score' (bias/feature probability score) and 'lms' (language modeling score)
@@ -627,7 +741,19 @@ class FeatureLearningDefinition(DataProvider, ABC):
             return None
         if os.path.exists(cache_path):
             logger.debug(f"Loading cached encoder analysis from {cache_path}")
-            return pd.read_csv(cache_path)
+            try:
+                return pd.read_csv(cache_path)
+            except (pd.errors.EmptyDataError, pd.errors.ParserError) as exc:
+                logger.warning(
+                    "Cached encoder analysis at %s is unreadable (%s). Removing stale cache.",
+                    cache_path,
+                    exc,
+                )
+                try:
+                    os.remove(cache_path)
+                except OSError:
+                    logger.warning("Failed to remove unreadable encoder cache at %s", cache_path, exc_info=True)
+                return None
         logger.info(f"No cached encoder analysis found at {cache_path}")
         return None
 
@@ -641,8 +767,16 @@ class FeatureLearningDefinition(DataProvider, ABC):
         Get unified encoder metrics from encoder_df or from cached results.
         Same format as evaluate_encoder metrics.
 
-        Pass encoder_df explicitly or use_cache=True to load cached metrics.
-        Pass the same **encoder_kwargs you use for evaluate_encoder when using cache.
+        Args:
+            model_path: Model path or identifier used for cache resolution.
+            encoder_df: Optional already-computed encoder analysis DataFrame.
+                When provided, metrics are computed directly from this DataFrame.
+            **encoder_kwargs: Options used for cache resolution, such as
+                ``split``, ``max_size``, and ``use_cache``. Pass the same
+                kwargs used for ``evaluate_encoder`` when loading cached data.
+
+        Returns:
+            Unified encoder metrics, or None when no usable encoder data exists.
         """
         encoder_kwargs = dict(encoder_kwargs)
         encoder_df_provided = encoder_kwargs.pop("encoder_df", encoder_df)
@@ -650,7 +784,10 @@ class FeatureLearningDefinition(DataProvider, ABC):
         if encoder_df_provided is not None:
             if encoder_df_provided.empty:
                 return None
-            return get_encoder_metrics_from_dataframe(encoder_df_provided)
+            return get_encoder_metrics_from_dataframe(
+                encoder_df_provided,
+                target_classes=getattr(self, "target_classes", None) or getattr(self, "pair", None),
+            )
 
         encoder_kwargs.setdefault("split", "test")
         use_cache = self._default_from_training_args(encoder_kwargs.pop("use_cache", None), "use_cache", fallback=None)

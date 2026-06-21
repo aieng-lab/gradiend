@@ -4,7 +4,7 @@
 [![arXiv:2602.23993](https://img.shields.io/badge/arXiv-2602.23993-blue.svg)](https://arxiv.org/abs/2602.23993)
 [![arXiv:2502.01406](https://img.shields.io/badge/arXiv-2502.01406-blue.svg)](https://arxiv.org/abs/2502.01406)
 [![arXiv:2601.09313](https://img.shields.io/badge/arXiv-2601.09313-blue.svg)](https://arxiv.org/abs/2601.09313)
-[![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
+[![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Tests](https://github.com/aieng-lab/gradiend/actions/workflows/tests.yml/badge.svg)](https://github.com/aieng-lab/gradiend/actions/workflows/tests.yml)
 [![Documentation](https://img.shields.io/badge/docs-github.io-blue.svg)](https://aieng-lab.github.io/gradiend/)
@@ -21,7 +21,7 @@ With minimal requirements (enables full data generation, training and evaluation
 pip install gradiend
 ```
 
-With recommended dependencies (enables additional features such as Hugging Face datasets, safetensors, and plotting):
+With recommended dependencies (enables additional features such as Hugging Face `device_map` loading, datasets, safetensors, and plotting):
 
 ```bash
 pip install gradiend[recommended]
@@ -60,7 +60,13 @@ creator = TextPredictionDataCreator(
 training = creator.generate_training_data(max_size_per_class=30)
 neutral = creator.generate_neutral_data(additional_excluded_words=["i", "we", "you"], max_size=10)
 
-args = TrainingArguments(train_batch_size=2, eval_steps=5, max_steps=20, learning_rate=1e-3)
+args = TrainingArguments(
+    train_batch_size=2,
+    eval_steps=5,
+    max_steps=20,
+    learning_rate=1e-3,
+    fail_on_non_convergence=True,
+)
 trainer = TextPredictionTrainer(model="bert-base-cased", data=training, eval_neutral_data=neutral, args=args)
 trainer.train()
 trainer.plot_training_convergence()
@@ -169,7 +175,7 @@ base = [
 
 
 
-More examples: [gradiend/examples](https://github.com/aieng-lab/gradiend/tree/main/gradiend/examples), e.g., this [Jupyter Notebook](gradiend/examples/english_pronouns.ipynb)
+More examples: [gradiend/examples](https://github.com/aieng-lab/gradiend/tree/main/gradiend/examples), e.g., this [Jupyter Notebook](gradiend/examples/train_english_pronouns.ipynb)
 
 ## Documentation
 
@@ -177,18 +183,18 @@ More examples: [gradiend/examples](https://github.com/aieng-lab/gradiend/tree/ma
 - [Installation details](docs/installation.md)
 - [Train Your first GRADIEND Model](docs/start.md)
 - [Tutorials](docs/index.md#tutorials)
-- [API reference](docs/api-reference.md)
+- [API reference](docs/api/index.md)
 
 ## Examples
 
 Example scripts and notebooks: [gradiend/examples](https://github.com/aieng-lab/gradiend/tree/main/gradiend/examples) on GitHub (not in the pip package; download a file or read to get inspired).
 
 - [start_workflow.py](gradiend/examples/start_workflow.py) — Minimal runnable example
-- [english_pronouns.ipynb](gradiend/examples/english_pronouns.ipynb) — English pronouns (3SG vs 3PL): data creation from Wikipedia → training → evaluation ([script](gradiend/examples/english_pronouns.py))
-- [gender_de.py](gradiend/examples/gender_de.py) — German gender (masc_nom vs fem_nom)
-- [gender_en.py](gradiend/examples/gender_en.py) — English gender with name augmentation
-- [gender_de_decoder_only.py](gradiend/examples/gender_de_decoder_only.py) — Decoder-only model with optional MLM head
-- [race_religion.py](gradiend/examples/race_religion.py) — Race and religion bias
+- [train_english_pronouns.ipynb](gradiend/examples/train_english_pronouns.ipynb) — English pronouns (3SG vs 3PL): data creation from Wikipedia → training → evaluation ([script](gradiend/examples/train_english_pronouns.py))
+- [train_sentiment.py](gradiend/examples/train_sentiment.py) — Sentiment example with split-aware evaluation and visualization
+- [train_gender_de.py](gradiend/examples/train_gender_de.py) — German gender (masc_nom vs fem_nom)
+- [train_multi_seed_stability.py](gradiend/examples/train_multi_seed_stability.py) — Multi-seed training and stability comparison
+- [train_gender_de_decoder_only.py](gradiend/examples/train_gender_de_decoder_only.py) — Decoder-only model with optional MLM head
 
 ## Datasets and models
 

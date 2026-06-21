@@ -2,7 +2,7 @@ from typing import List, Any, Optional
 
 import torch
 
-from gradiend.trainer import GradientTrainingDataset
+from gradiend.trainer.core.dataset import GradientTrainingDataset
 
 
 class TextGradientTrainingDataset(GradientTrainingDataset):
@@ -29,6 +29,8 @@ class TextGradientTrainingDataset(GradientTrainingDataset):
         dtype: torch.dtype = torch.float32,
         device: Optional[torch.device] = None,
         return_metadata: bool = False,
+        timing_steps: int = 0,
+        timing_label: str = "text-gradient",
     ):
         pad_token_id = getattr(tokenizer, 'pad_token_id', 0) if tokenizer is not None else 0
 
@@ -47,5 +49,7 @@ class TextGradientTrainingDataset(GradientTrainingDataset):
             device=device,
             return_metadata=return_metadata,
             get_padding_value=get_padding_value,
+            timing_steps=timing_steps,
+            timing_label=timing_label,
         )
         self.tokenizer = tokenizer

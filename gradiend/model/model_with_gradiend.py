@@ -14,19 +14,50 @@ from __future__ import annotations
 import os
 import copy
 import json
+import csv
+import threading
 from abc import ABC, abstractmethod
+from contextlib import contextmanager
 from typing import Iterator, List, Optional, Dict, Any, Tuple, Union
 
 import torch
 import torch.nn as nn
 from torch.nn import Parameter
 
+from gradiend.util import unwrap_model
 from gradiend.util.logging import get_logger
 from gradiend.model import ParamMappedGradiendModel
 from gradiend.model.core import build_gradiend_from_base_model
-from gradiend.model.utils import resolve_device_config_for_model, read_gradiend_context, write_gradiend_context
+from gradiend.model.utils import (
+    get_hf_device_map,
+    resolve_device_config_for_model,
+    read_gradiend_context,
+    write_gradiend_context,
+)
 
 logger = get_logger(__name__)
+
+
+def _gradiend_checkpoint_diagnostic(load_directory: str) -> str:
+    if not load_directory or not isinstance(load_directory, str):
+        return "path is not a string"
+    if not os.path.isdir(load_directory):
+        return "path is not an existing directory"
+    cfg_path = os.path.join(load_directory, "config.json")
+    if not os.path.isfile(cfg_path):
+        return "config.json is missing"
+    try:
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+    except json.JSONDecodeError as exc:
+        return f"config.json is not valid JSON ({exc})"
+    except OSError as exc:
+        return f"config.json could not be read ({exc})"
+    if not isinstance(cfg, dict):
+        return f"config.json is a {type(cfg).__name__}, expected object"
+    if "architecture" not in cfg:
+        return f"config.json keys={sorted(cfg.keys())}"
+    return "ok"
 
 
 def _is_gradiend_checkpoint(load_directory: str) -> bool:
@@ -88,8 +119,7 @@ def _check_convergence_warning(model_path: str) -> None:
                     _convergence_warning_logged.add(norm_path)
                     logger.warning(
                         "Loading model from non-convergent training: "
-                        "converged=False (convergent_count=%s, required: %s) for metric=%s threshold=%.4f. "
-                        "Model may not have reached the convergence threshold during training.",
+                        "converged=False (convergent_count=%s, required: %s) for metric=%s threshold=%.4f. ",
                         actual_count,
                         min_convergent_seeds,
                         convergence_metric,
@@ -143,8 +173,7 @@ def _check_convergence_warning(model_path: str) -> None:
             _convergence_warning_logged.add(norm_path)
             logger.warning(
                 "Loading model from non-convergent multi-seed training: "
-                "convergent_count=0 (required: %s) for metric=%s threshold=%.4f. "
-                "Model may not have reached the convergence threshold during training.",
+                "convergent_count=0 (required: %s) for metric=%s threshold=%.4f. ",
                 min_convergent_seeds,
                 convergence_metric,
                 threshold if threshold is not None else 0.0,
@@ -152,6 +181,46 @@ def _check_convergence_warning(model_path: str) -> None:
     except Exception as e:
         # Silently ignore errors reading seed_report.json (could be corrupted, etc.)
         logger.debug("Could not check convergence status from %s: %s", seed_report_path, e)
+
+
+def _normalize_param_name(name: str) -> str:
+    # tolerate wrappers like DDP/compiled modules
+    prefixes = ("module.", "_orig_mod.")
+    changed = True
+    while changed:
+        changed = False
+        for p in prefixes:
+            if name.startswith(p):
+                name = name[len(p):]
+                changed = True
+    return name
+
+def _build_param_lookup_named(model: torch.nn.Module):
+    # exact + normalized keys, plus unambiguous suffix aliases for cases where
+    # training wrappers expose backbone-local names but evaluation rewrites the
+    # original HF model with an extra container prefix such as "model.".
+    lookup = {}
+    suffix_candidates = {}
+    for n, p in model.named_parameters():
+        lookup[n] = p
+        normalized = _normalize_param_name(n)
+        lookup.setdefault(normalized, p)
+        parts = normalized.split(".")
+        for i in range(1, len(parts) - 1):
+            suffix = ".".join(parts[i:])
+            suffix_candidates.setdefault(suffix, []).append(p)
+
+    for suffix, params in suffix_candidates.items():
+        unique = []
+        for p in params:
+            if not any(p is existing for existing in unique):
+                unique.append(p)
+        if len(unique) == 1:
+            lookup.setdefault(suffix, unique[0])
+    return lookup
+
+def _first_param_device(model: torch.nn.Module) -> torch.device:
+    return next(model.parameters()).device
 
 
 class ModelWithGradiend(nn.Module, ABC):
@@ -184,6 +253,8 @@ class ModelWithGradiend(nn.Module, ABC):
         base_model_device=None,
         device_encoder=None,
         device_decoder=None,
+        base_model_device_map=None,
+        base_model_max_memory=None,
         gradient_creator=None,
         source: str = "factual",
         target: str = "diff",
@@ -205,27 +276,67 @@ class ModelWithGradiend(nn.Module, ABC):
 
         self._gradient_creator = gradient_creator or self
 
+
+        self.base_model_device_map = base_model_device_map or get_hf_device_map(base_model)
+        self.base_model_max_memory = base_model_max_memory
+        self.base_model_is_sharded = self.base_model_device_map not in (None, False)
+
         if gradiend.encoder is not None:
             self.base_model_device = base_model_device or gradiend.encoder[0].linear.weight.device
         else:
             self.base_model_device = base_model_device or gradiend.device_encoder
-        self.base_model.to(self.base_model_device)
+        if self.base_model_is_sharded:
+            self.base_model_device = None
+        else:
+            self.base_model.to(self.base_model_device)
         self.gradiend.to(device_encoder=device_encoder, device_decoder=device_decoder)
 
         # Stable parameter map for shapes + updates
-        self.param_lookup = {k: v for k, v in self.base_model.named_parameters()}
+        self.param_lookup = _build_param_lookup_named(self.base_model)
 
-        # Ensure GRADIEND param_map is always spec-dict (no list-mode in the new library design)
         self._ensure_gradiend_param_map_spec()
+        self._sync_base_requires_grad_to_param_map()
 
         self._enhancer_mask_cache = {}
         self.feature_class_encoding_direction: Optional[Dict[str, int]] = None
+        self._base_gradient_lock = threading.RLock()
 
-    def to(self, device: object) -> "ModelWithGradiend":
-        """Move base_model and gradiend to the given device. Accepts str or torch.device."""
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        state.pop("_base_gradient_lock", None)
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        self._base_gradient_lock = threading.RLock()
+
+    @contextmanager
+    def exclusive_base_gradient_access(self):
+        """Serialize base-model tokenization, forward, and backward across threads."""
+        self._base_gradient_lock.acquire()
+        try:
+            yield
+        finally:
+            self._base_gradient_lock.release()
+
+    def to(self, device: object = None, *, torch_dtype: Optional[torch.dtype] = None) -> "ModelWithGradiend":
+        """Move base_model and gradiend to the given device and/or GRADIEND torch_dtype."""
         dev = torch.device(device) if isinstance(device, str) else device
-        self.base_model.to(dev)
-        self.gradiend.to(dev)
+        move_base = not getattr(self, "base_model_is_sharded", False)
+        if dev is not None and torch_dtype is not None:
+            if move_base:
+                self.base_model.to(device=dev, dtype=torch_dtype)
+                self.base_model_device = dev
+            self.gradiend.to(dev, torch_dtype=torch_dtype)
+        elif dev is not None:
+            if move_base:
+                self.base_model.to(dev)
+                self.base_model_device = dev
+            self.gradiend.to(dev)
+        elif torch_dtype is not None:
+            if move_base:
+                self.base_model.to(dtype=torch_dtype)
+            self.gradiend.to(torch_dtype=torch_dtype)
         return self
 
     def cpu(self) -> "ModelWithGradiend":
@@ -239,6 +350,43 @@ class ModelWithGradiend(nn.Module, ABC):
         if isinstance(device, int):
             return self.to(f"cuda:{device}")
         return self.to(device)
+
+    def place_for_evaluation(
+        self,
+        *,
+        device: Optional[Union[str, torch.device]] = None,
+        device_encoder: Optional[Union[str, torch.device]] = None,
+        device_decoder: Optional[Union[str, torch.device]] = None,
+        device_base_model: Optional[Union[str, torch.device]] = None,
+        encoder_decoder_same_device: bool = False,
+    ) -> "ModelWithGradiend":
+        """
+        Place base model and GRADIEND on evaluation devices.
+
+        Used when an explicit ``device`` is passed to evaluation methods, or when
+        you call :meth:`cuda` / :meth:`to` yourself. Fresh :meth:`from_pretrained`
+        loads already use :func:`~gradiend.model.utils.resolve_device_config_for_model`
+        (CUDA when available). This does not run automatically when a cached
+        in-memory model was moved to CPU.
+        """
+        if device is not None:
+            dev = torch.device(device) if isinstance(device, str) else device
+            if dev.type == "cpu":
+                return self.cpu()
+
+        device_encoder, device_decoder, device_base_model, _ = resolve_device_config_for_model(
+            device=device,
+            device_encoder=device_encoder,
+            device_decoder=device_decoder,
+            device_base_model=device_base_model,
+            encoder_decoder_same_device=encoder_decoder_same_device,
+        )
+
+        if not getattr(self, "base_model_is_sharded", False):
+            self.base_model.to(device_base_model)
+            self.base_model_device = device_base_model
+        self.gradiend.to(device_encoder=device_encoder, device_decoder=device_decoder)
+        return self
 
     # ----------------------------
     # Construction-time normalization
@@ -269,6 +417,48 @@ class ModelWithGradiend(nn.Module, ABC):
             return
 
         raise TypeError(f"gradiend.param_map must be dict-spec, got {type(param_map)}")
+
+    def _active_param_map_names(self) -> set:
+        active = set()
+        for name, spec in self.gradiend.param_map.items():
+            r = spec.get("repr")
+            if r == "all":
+                shape = spec.get("shape")
+                if shape is None or int(torch.tensor(tuple(shape)).prod().item()) > 0:
+                    active.add(_normalize_param_name(name))
+            elif r == "mask":
+                mask = spec.get("mask")
+                if torch.is_tensor(mask) and bool(mask.any().item()):
+                    active.add(_normalize_param_name(name))
+            elif r == "indices":
+                indices = spec.get("indices")
+                if torch.is_tensor(indices) and int(indices.numel()) > 0:
+                    active.add(_normalize_param_name(name))
+            else:
+                raise ValueError(f"Unknown gradiend.param_map repr {r!r} for {name!r}")
+        return active
+
+    def _sync_base_requires_grad_to_param_map(self) -> None:
+        """Require base gradients only for parameters represented by the current param_map."""
+        active_names = self._active_param_map_names()
+        base = self._get_base_forward_model()
+        changed = 0
+        trainable = 0
+        total = 0
+        for name, param in base.named_parameters():
+            total += 1
+            should_train = _normalize_param_name(name) in active_names
+            if bool(param.requires_grad) != should_train:
+                param.requires_grad = should_train
+                changed += 1
+            if should_train:
+                trainable += 1
+        logger.debug(
+            "Synced base requires_grad to GRADIEND param_map: trainable_params=%s/%s changed=%s.",
+            trainable,
+            total,
+            changed,
+        )
 
     def __str__(self) -> str:
         g = self.gradiend
@@ -335,6 +525,92 @@ class ModelWithGradiend(nn.Module, ABC):
         base_map = self.gradiend._get_base_global_index_map()
         idx_t = torch.as_tensor(local_idx, dtype=torch.long)
         return base_map[idx_t].tolist()
+
+    def get_topk_feature_metadata(
+        self,
+        part: str = "decoder-weight",
+        topk: Union[int, float] = 1000,
+    ) -> List[Dict[str, Any]]:
+        """
+        Return human-readable metadata for the top-k most important GRADIEND input dimensions.
+
+        Each row includes both the base-global index and the corresponding base-model
+        parameter name plus parameter-local coordinates.
+        """
+        local_idx = self.gradiend.get_topk_weights(part=part, topk=topk)
+        if not local_idx:
+            return []
+
+        base_map = self.gradiend._get_base_global_index_map()
+        importance = self.gradiend.get_weight_importance(part=part)
+        rows: List[Dict[str, Any]] = []
+
+        for rank, local_index in enumerate(local_idx, start=1):
+            local_index = int(local_index)
+            base_global_index = int(base_map[local_index].item())
+            decoded = self.gradiend.decode_base_global_index(base_global_index)
+            rows.append({
+                "rank": rank,
+                "part": part,
+                "importance": float(importance[local_index].item()),
+                "local_input_index": local_index,
+                "base_global_index": base_global_index,
+                **decoded,
+            })
+
+        return rows
+
+    def export_topk_features(
+        self,
+        output_path: str,
+        *,
+        part: str = "decoder-weight",
+        topk: Union[int, float] = 1000,
+    ) -> List[Dict[str, Any]]:
+        """
+        Export top-k feature metadata to JSON or CSV based on output_path suffix.
+
+        Supported suffixes: .json, .csv
+        """
+        if not isinstance(output_path, str) or not output_path.strip():
+            raise ValueError("output_path must be a non-empty string")
+
+        rows = self.get_topk_feature_metadata(part=part, topk=topk)
+        out_dir = os.path.dirname(output_path)
+        if out_dir:
+            os.makedirs(out_dir, exist_ok=True)
+
+        suffix = os.path.splitext(output_path)[1].lower()
+        if suffix == ".json":
+            with open(output_path, "w", encoding="utf-8") as f:
+                json.dump(rows, f, indent=2)
+        elif suffix == ".csv":
+            fieldnames = [
+                "rank",
+                "part",
+                "importance",
+                "local_input_index",
+                "base_global_index",
+                "param_name",
+                "flat_index_in_param",
+                "param_row",
+                "param_col",
+                "coords",
+                "param_shape",
+                "param_numel",
+            ]
+            with open(output_path, "w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
+                for row in rows:
+                    csv_row = dict(row)
+                    csv_row["coords"] = json.dumps(csv_row["coords"])
+                    csv_row["param_shape"] = json.dumps(csv_row["param_shape"])
+                    writer.writerow(csv_row)
+        else:
+            raise ValueError("output_path must end with .json or .csv")
+
+        return rows
 
     def parameters(self, recurse: bool = True) -> Iterator[Parameter]:
         """Return GRADIEND parameters (adapter exposes GRADIEND weights as trainable parameters)."""
@@ -424,13 +700,31 @@ class ModelWithGradiend(nn.Module, ABC):
         if not isinstance(feature_factor, list):
             feature_factor = [feature_factor]
 
-        enhanced_model = copy.deepcopy(self.base_model)
+        # Work on the unwrapped model, not a training wrapper.
+        source_model = unwrap_model(self.base_model)
 
-        model_device = self.base_model.device
-        param_lookup = {k: v for k, v in enhanced_model.named_parameters()}
+        # Deep-copy the plain model
+        enhanced_model = copy.deepcopy(source_model)
+
+        model_device = _first_param_device(enhanced_model)
+        param_lookup = _build_param_lookup_named(enhanced_model)
+
+        def _get_param(name: str):
+            p = param_lookup.get(name)
+            if p is not None:
+                return p
+            p = param_lookup.get(_normalize_param_name(name))
+            if p is not None:
+                return p
+            p = param_lookup.get(f"module.{name}")  # extra fallback
+            if p is not None:
+                return p
+            raise KeyError(f"Parameter '{name}' not found in enhanced_model")
 
         if part == "decoder":
-            enhancer = self.gradiend.decoder(torch.tensor(feature_factor, dtype=torch.float, device=model_device))
+            enhancer = self.gradiend.decoder(
+                torch.tensor(feature_factor, dtype=torch.float, device=model_device)
+            )
         elif part in {"decoder-bias", "decoder-sum", "decoder-weight", "encoder-weight"}:
             enhancer = self.gradiend.get_update_vector(part).to(model_device)
         else:
@@ -442,30 +736,30 @@ class ModelWithGradiend(nn.Module, ABC):
         idx = 0
         with torch.no_grad():
             for param_name, spec in self.gradiend.param_map.items():
-                p = param_lookup[param_name]
+                p = _get_param(param_name)
                 r = spec["repr"]
 
                 if r == "all":
                     n = p.numel()
-                    chunk = enhancer[..., idx : idx + n].to(model_device)
+                    chunk = enhancer[..., idx: idx + n].to(p.device)
                     chunk = chunk.unsqueeze(0) if chunk.dim() == 1 and p.dim() > 0 else chunk
                     p.add_(learning_rate * chunk.reshape(p.shape))
                     idx += n
 
                 elif r == "mask":
-                    m = spec["mask"].to(device=model_device).bool()
+                    m = spec["mask"].to(device=p.device).bool()
                     n = int(m.sum().item())
-                    update_values = enhancer[idx : idx + n].to(model_device)
-                    update_tensor = torch.zeros_like(m, dtype=update_values.dtype)
+                    update_values = enhancer[idx: idx + n].to(p.device)
+                    update_tensor = torch.zeros_like(m, dtype=update_values.dtype, device=p.device)
                     update_tensor[m] = update_values
                     p.add_(learning_rate * update_tensor)
                     idx += n
 
                 elif r == "indices":
-                    flat_idx = spec["indices"].to(device=model_device, dtype=torch.long)
+                    flat_idx = spec["indices"].to(device=p.device, dtype=torch.long)
                     n = int(flat_idx.numel())
-                    update_values = enhancer[idx : idx + n].to(model_device)
-                    update_tensor = torch.zeros(p.numel(), dtype=update_values.dtype, device=model_device)
+                    update_values = enhancer[idx: idx + n].to(p.device)
+                    update_tensor = torch.zeros(p.numel(), dtype=update_values.dtype, device=p.device)
                     update_tensor[flat_idx] = update_values
                     p.add_(learning_rate * update_tensor.reshape(p.shape))
                     idx += n
@@ -474,7 +768,8 @@ class ModelWithGradiend(nn.Module, ABC):
                     raise ValueError(f"Unknown param repr {r!r} for param {param_name}")
 
         if idx != enhancer.numel():
-            raise ValueError(f"Inconsistent enhancer length vs mapping (used {idx}, enhancer has {enhancer.numel()})")
+            raise ValueError(
+                f"Inconsistent enhancer length vs mapping (used {idx}, enhancer has {enhancer.numel()})")
 
         return enhanced_model
 
@@ -496,7 +791,8 @@ class ModelWithGradiend(nn.Module, ABC):
         other = copy.copy(self)
         other.base_model = new_base
         # Recompute param_lookup so rewrite_base_model works with the new base
-        other.param_lookup = {k: v for k, v in new_base.named_parameters()}
+        other.param_lookup = _build_param_lookup_named(new_base)
+        other._sync_base_requires_grad_to_param_map()
         return other
 
     def get_enhancer_mask(self, topk, part="decoder-weight"):
@@ -549,50 +845,6 @@ class ModelWithGradiend(nn.Module, ABC):
                 for k, v in self.feature_class_encoding_direction.items()
             }
 
-    # ----------------------------
-    # Pruning wrapper (no list conversion here anymore)
-    # ----------------------------
-    def prune_gradiend(
-        self,
-        *,
-        topk: float = None,
-        threshold: float = None,
-        mask: torch.Tensor = None,
-        part: str = "decoder-weight",
-        importance: torch.Tensor = None,
-        inplace: bool = True,
-        return_mask: bool = False,
-    ):
-        """
-        Prune GRADIEND input space by selecting important input dimensions and physically reducing input_dim.
-
-        Delegates to gradiend.prune(). Assumes gradiend.param_map is already a spec-dict (enforced in __init__).
-        Selection order: mask -> threshold -> topk. When importance is provided, it is used instead of get_weight_importance(part).
-        """
-        kwargs = {
-            "topk": topk,
-            "threshold": threshold,
-            "mask": mask,
-            "part": part,
-            "importance": importance,
-            "return_mask": return_mask,
-        }
-
-        if inplace:
-            res = self.gradiend.prune(**kwargs, inplace=False)
-            if return_mask:
-                self.gradiend, combined_mask = res
-                return self, combined_mask
-            self.gradiend = res
-            return self
-
-        out = copy.deepcopy(self)
-        res = out.gradiend.prune(**kwargs, inplace=False)
-        if return_mask:
-            out.gradiend, combined_mask = res
-            return out, combined_mask
-        out.gradiend = res
-        return out
 
     # ----------------------------
     # Saving (unchanged naming; GRADIEND writes config + training.json itself)
@@ -633,12 +885,20 @@ class ModelWithGradiend(nn.Module, ABC):
 
     @classmethod
     @abstractmethod
-    def _load_model(cls, load_directory: str, base_model_id: Optional[str] = None, gradiend_kwargs: Optional[Dict[str, Any]] = None, **kwargs) -> tuple:
+    def _load_model(
+        cls,
+        load_directory: str,
+        base_model_id: Optional[str] = None,
+        gradiend_kwargs: Optional[Dict[str, Any]] = None,
+        base_model: Optional[Any] = None,
+        **kwargs,
+    ) -> tuple:
         """
         Subclass hook to load the base model and modality-specific components.
 
         When base_model_id is set, load_directory is a GRADIEND checkpoint dir and the base model
-        should be loaded from base_model_id (and gradiend_kwargs may contain e.g. tokenizer path).
+        should be loaded from base_model_id (and gradiend_kwargs may contain e.g. tokenizer path),
+        unless base_model is provided to reuse a shared base model instance.
         When base_model_id is None, load_directory is the base model path/name; load base model from it.
 
         Returns:
@@ -670,6 +930,8 @@ class ModelWithGradiend(nn.Module, ABC):
             "device_encoder": device_encoder,
             "device_decoder": device_decoder,
             "base_model_device": device_base_model,
+            "base_model_device_map": kwargs.get("base_model_device_map"),
+            "base_model_max_memory": kwargs.get("base_model_max_memory"),
         }
 
 
@@ -682,13 +944,15 @@ class ModelWithGradiend(nn.Module, ABC):
         When pre_prune_config is set, uses lazy_init=True so encoder/decoder are built only after prune.
         Subclasses may override for custom behavior.
         """
-        lazy_init = bool(kwargs.get("pre_prune_config") is not None)
+        create_kwargs = dict(kwargs)
+        lazy_init = bool(create_kwargs.get("pre_prune_config") is not None)
         return build_gradiend_from_base_model(
             base_model,
             load_directory,
-            params=kwargs.get("params"),
+            param_map=create_kwargs.pop("param_map", None),
+            params=create_kwargs.pop("params", None),
             lazy_init=lazy_init,
-            **kwargs,
+            **create_kwargs,
         )
 
     @classmethod
@@ -704,7 +968,7 @@ class ModelWithGradiend(nn.Module, ABC):
         Load a ModelWithGradiend from a directory (GRADIEND checkpoint) or create new from base model path.
 
         Common logic: normalize path, try ParamMappedGradiendModel.from_pretrained, then either load base via
-        _load_model(..., base_model_id=..., gradiend_kwargs=...) or _load_model + _create_gradiend;
+        _load_model(..., base_model_id=..., gradiend_kwargs=..., base_model=...) or _load_model + _create_gradiend;
         load gradiend_context.json (source/target), instantiate cls(...), restore feature_class_encoding_direction.
         Modality-specific loading is in _get_device_config, _load_model, _create_gradiend.
 
@@ -715,6 +979,7 @@ class ModelWithGradiend(nn.Module, ABC):
             feature_definition: Optional FeatureLearningDefinition instance. When provided, uses its
                 pair and classes attributes to set feature_class_encoding_direction on the model.
             **kwargs: Additional arguments passed to _load_model and _create_gradiend.
+                Optional ``base_model`` can be used to reuse an already loaded base model.
         """
         if not isinstance(load_directory, str) and not hasattr(load_directory, "name_or_path"):
             raise TypeError(
@@ -725,21 +990,40 @@ class ModelWithGradiend(nn.Module, ABC):
             kwargs["param_map"] = kwargs["param_map"][0]
         # Merge TrainingArguments into kwargs so params etc. are passed to _create_gradiend
         training_args = kwargs.pop("training_args", None)
+        def _training_arg_value(key: str, default: Any = None) -> Any:
+            if training_args is None:
+                return default
+            if isinstance(training_args, dict):
+                return training_args.get(key, default)
+            return getattr(training_args, key, default)
+
         if training_args is not None:
             gradiend_keys = (
                 "params", "param_map", "trust_remote_code", "torch_dtype",
                 "activation_encoder", "activation_decoder", "bias_decoder", "latent_dim",
                 "encoder_decoder_same_device", "pre_prune_config",
+                "base_model_device_map", "base_model_max_memory",
+                "prediction_objective",
+                "decoder_sequence_cloze_rhs_window",
             )
             for key in gradiend_keys:
-                if hasattr(training_args, key) and key not in kwargs:
-                    val = getattr(training_args, key, None)
-                    if val is not None:
-                        kwargs.setdefault(key, val)
+                val = _training_arg_value(key, None)
+                if val is not None and key not in kwargs:
+                    kwargs.setdefault(key, val)
         require_gradiend_model = kwargs.pop("require_gradiend_model", require_gradiend_model)
         feature_definition = kwargs.pop("feature_definition", feature_definition)
-        device_config = cls._get_device_config(load_directory_str, **kwargs)
-        gradiend_device_config = {k: v for k, v in device_config.items() if k != "base_model_device"}
+        base_model_device_map = kwargs.pop("base_model_device_map", None)
+        base_model_max_memory = kwargs.pop("base_model_max_memory", None)
+        device_config = cls._get_device_config(
+            load_directory_str,
+            base_model_device_map=base_model_device_map,
+            base_model_max_memory=base_model_max_memory,
+            **kwargs,
+        )
+        gradiend_device_config = {
+            k: v for k, v in device_config.items()
+            if k not in {"base_model_device", "base_model_device_map", "base_model_max_memory"}
+        }
 
         if _is_gradiend_checkpoint(load_directory_str):
             # Load as GRADIEND checkpoint
@@ -761,17 +1045,29 @@ class ModelWithGradiend(nn.Module, ABC):
         else:
             # Base model path (HF id, decoder_mlm_head, etc.) — load base model and create fresh GRADIEND
             if require_gradiend_model:
+                diagnostic = _gradiend_checkpoint_diagnostic(load_directory_str)
                 raise FileNotFoundError(
-                    f"Expected GRADIEND checkpoint at {load_directory_str}, but path is not a GRADIEND directory "
-                    "(missing config.json with 'architecture'). Pass require_gradiend_model=False to allow base model loading."
+                    f"Expected GRADIEND checkpoint at {load_directory_str}, but path is not a valid GRADIEND directory "
+                    f"({diagnostic}). Pass require_gradiend_model=False to allow base model loading."
                 )
             logger.debug(
                 "Path is not a GRADIEND checkpoint -> loading as base model",
             )
             gradiend = None
             load_arg = load_directory if not isinstance(load_directory, str) else load_directory_str
-            base_model, *extra = cls._load_model(load_arg, **kwargs, **device_config)
-            gradiend = cls._create_gradiend(base_model, load_directory_str, **kwargs, **gradiend_device_config)
+            base_model, *extra = cls._load_model(
+                load_arg,
+                **kwargs,
+                **device_config,
+            )
+            create_gradiend_kwargs = dict(kwargs)
+            create_gradiend_kwargs.pop("base_model", None)
+            gradiend = cls._create_gradiend(
+                base_model,
+                load_directory_str,
+                **create_gradiend_kwargs,
+                **gradiend_device_config,
+            )
 
         # Source/target: from adapter_config when loading checkpoint, else kwargs
         if gradiend is not None and getattr(gradiend, "name_or_path", None) == load_directory_str:
@@ -793,7 +1089,9 @@ class ModelWithGradiend(nn.Module, ABC):
         )
         model.name_or_path = load_directory_str
 
-        if feature_definition is not None:
+        if feature_class_encoding_direction_from_context is not None:
+            model.feature_class_encoding_direction = feature_class_encoding_direction_from_context
+        elif feature_definition is not None:
             pair = getattr(feature_definition, "pair", None)
             classes = getattr(feature_definition, "classes", None) or []
             if pair and len(pair) >= 2:
@@ -802,9 +1100,6 @@ class ModelWithGradiend(nn.Module, ABC):
                     if c not in class_labels:
                         class_labels[c] = 0.0
                 model.set_feature_class_encoding_direction(class_labels)
-        else:
-            if feature_class_encoding_direction_from_context is not None:
-                model.feature_class_encoding_direction = feature_class_encoding_direction_from_context
 
         model._post_init_from_pretrained()
         
@@ -828,6 +1123,7 @@ class ModelWithGradiend(nn.Module, ABC):
             mask: Optional[torch.Tensor] = None,
             part: str = "decoder-weight",
             importance: Optional[torch.Tensor] = None,
+            keep_idx: Optional[torch.Tensor] = None,
             inplace: bool = True,
             return_mask: bool = False,
     ) -> Union["ModelWithGradiend", Tuple["ModelWithGradiend", torch.Tensor]]:
@@ -844,6 +1140,7 @@ class ModelWithGradiend(nn.Module, ABC):
             mask: optional bool mask of shape (gradiend.input_dim,) in current GRADIEND input space.
             part: 'encoder-weight' | 'decoder-weight' | 'decoder-bias' | 'decoder-sum' (delegated to get_weight_importance when importance is None).
             importance: optional 1D tensor (e.g. from pre-prune gradient mean); when provided, used instead of get_weight_importance(part).
+            keep_idx: optional 1D tensor of input-space indices to keep. Bypasses dense mask/importance materialization.
             inplace: if True, mutate self; else return a deepcopy with pruned gradiend.
             return_mask: if True, also return the final combined_mask (in original input space).
 
@@ -856,6 +1153,7 @@ class ModelWithGradiend(nn.Module, ABC):
             "mask": mask,
             "part": part,
             "importance": importance,
+            "keep_idx": keep_idx,
             "return_mask": return_mask,
         }
 
@@ -863,16 +1161,20 @@ class ModelWithGradiend(nn.Module, ABC):
             res = self.gradiend.prune(**kwargs, inplace=False)
             if return_mask:
                 self.gradiend, combined_mask = res
+                self._sync_base_requires_grad_to_param_map()
                 return self, combined_mask
             self.gradiend = res
+            self._sync_base_requires_grad_to_param_map()
             return self
 
         out = copy.deepcopy(self)
         res = out.gradiend.prune(**kwargs, inplace=False)
         if return_mask:
             out.gradiend, combined_mask = res
+            out._sync_base_requires_grad_to_param_map()
             return out, combined_mask
         out.gradiend = res
+        out._sync_base_requires_grad_to_param_map()
         return out
 
 
@@ -888,3 +1190,46 @@ class ModelWithGradiend(nn.Module, ABC):
     def unpruned_length(self):
         """Length of the original GRADIEND input space (before pruning)."""
         return self.gradiend.unpruned_length()
+
+    def _move_batch_to_device(self, batch, device):
+        if torch.is_tensor(batch):
+            return batch.to(device, non_blocking=True)
+        if isinstance(batch, dict):
+            return {k: self._move_batch_to_device(v, device) for k, v in batch.items()}
+        if isinstance(batch, (list, tuple)):
+            return type(batch)(self._move_batch_to_device(v, device) for v in batch)
+        return batch
+
+    def _get_base_forward_model(self):
+        return self.base_model
+
+    def _get_base_forward_device(self):
+        m = self._get_base_forward_model()
+        base = m.module if hasattr(m, "module") else m
+        hf_device = getattr(base, "device", None)
+        if hf_device is not None:
+            try:
+                return hf_device if isinstance(hf_device, torch.device) else torch.device(hf_device)
+            except (TypeError, ValueError):
+                pass
+        get_embeddings = getattr(base, "get_input_embeddings", None)
+        if callable(get_embeddings):
+            emb = get_embeddings()
+            if emb is not None and hasattr(emb, "weight"):
+                return emb.weight.device
+        return next(base.parameters()).device
+
+    def _place_inputs_for_base_forward(self, batch):
+        return self._move_batch_to_device(batch, self._get_base_forward_device())
+
+    def _zero_base_grad(self, *, set_to_none: bool = True) -> None:
+        """Clear base-model gradients across regular modules."""
+        m = self._get_base_forward_model()
+        try:
+            m.zero_grad(set_to_none=set_to_none)
+        except TypeError:
+            m.zero_grad()
+            if set_to_none:
+                base = m.module if hasattr(m, "module") else m
+                for p in base.parameters():
+                    p.grad = None

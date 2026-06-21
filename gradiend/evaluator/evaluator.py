@@ -9,11 +9,14 @@ This module provides the high-level entry points to:
 4) produce evaluation-related plots if a Visualizer is configured.
 """
 
-from typing import Any, Dict, Optional, Type, Union
+from typing import Any, Dict, List, Literal, Optional, Tuple, Type, Union
+
+import pandas as pd
 
 from gradiend.evaluator.encoder import EncoderEvaluator
 from gradiend.evaluator.decoder import DecoderEvaluator
 from gradiend.util.logging import get_logger
+from gradiend.visualizer.plot_delegation import see_implementation
 
 logger = get_logger(__name__)
 
@@ -217,64 +220,355 @@ class Evaluator:
 
         return {"encoder": enc, "decoder": dec}
 
-    def plot_encoder_distributions(self, **kwargs: Any) -> Any:
+    def plot_encoder_distributions(
+        self,
+        encoder_df: Optional[pd.DataFrame] = None,
+        *,
+        output: Optional[str] = None,
+        output_dir: Optional[str] = None,
+        show: bool = True,
+        title: Union[str, bool] = True,
+        target_and_neutral_only: bool = True,
+        split_plot_mode: str = "facet",
+        include_neutral: bool = False,
+        figsize: Optional[Tuple[float, float]] = None,
+        img_format: str = "png",
+        dpi: Optional[int] = None,
+        highlight_non_convergence: Optional[bool] = None,
+        return_fig_ax: bool = False,
+        **kwargs: Any,
+    ) -> Any:
         """
-        Plot encoder distributions (typically a violin plot).
+        Plot encoder value distributions for target and optional neutral rows.
 
         Args:
-            **kwargs: Forwarded to the Visualizer implementation.
+            encoder_df: Optional encoder-evaluation DataFrame. When omitted, the
+                visualizer loads or computes the trainer's encoder analysis data.
+            output: Optional explicit output file path.
+            output_dir: Optional output directory used when ``output`` is omitted.
+            show: Whether to display the figure interactively.
+            title: Plot title. ``True`` uses the default title, ``False`` omits it.
+            target_and_neutral_only: If True, omit identity/auxiliary training rows.
+            split_plot_mode: How split-aware data is shown, e.g. ``"facet"``.
+            include_neutral: If True, include neutral evaluation rows when present.
+            figsize: Optional Matplotlib figure size.
+            img_format: File format used for generated output paths.
+            dpi: Optional figure DPI.
+            highlight_non_convergence: Override whether non-convergent runs are
+                marked in titles/labels. ``None`` uses trainer/config defaults.
+            return_fig_ax: If True, return Matplotlib ``(fig, ax)`` instead of
+                only the output path.
+            **kwargs: Additional keyword arguments forwarded to the visualizer.
 
         Returns:
-            Whatever the Visualizer returns (often a matplotlib/seaborn figure).
-
-        Raises:
-            NotImplementedError: If no Visualizer is configured and this method
-                is not overridden in a subclass.
+            Visualizer-specific result, usually an output path or ``(fig, ax)``.
         """
-        return self._delegate_to_visualizer("plot_encoder_distributions", **kwargs)
+        return self._delegate_to_visualizer(
+            "plot_encoder_distributions",
+            encoder_df=encoder_df,
+            output=output,
+            output_dir=output_dir,
+            show=show,
+            title=title,
+            target_and_neutral_only=target_and_neutral_only,
+            split_plot_mode=split_plot_mode,
+            include_neutral=include_neutral,
+            figsize=figsize,
+            img_format=img_format,
+            dpi=dpi,
+            highlight_non_convergence=highlight_non_convergence,
+            return_fig_ax=return_fig_ax,
+            **kwargs,
+        )
+    plot_encoder_distributions.__doc__ = (
+        plot_encoder_distributions.__doc__
+        + see_implementation("gradiend.visualizer.encoder_distributions.plot_encoder_distributions")
+    )
 
-    def plot_training_convergence(self, **kwargs: Any) -> Any:
+    def plot_training_convergence(
+        self,
+        *,
+        plot_mean_by_class: bool = True,
+        plot_mean_by_feature_class: Optional[bool] = None,
+        plot_correlation: bool = True,
+        output: Optional[str] = None,
+        show: bool = True,
+        title: Union[str, bool] = True,
+        figsize: Optional[Tuple[float, float]] = None,
+        img_format: str = "png",
+        dpi: Optional[int] = None,
+        highlight_non_convergence: Optional[bool] = None,
+        return_fig_ax: bool = False,
+        **kwargs: Any,
+    ) -> Any:
         """
-        Plot training convergence (means by class/feature_class and correlation).
+        Plot convergence statistics collected during GRADIEND training.
 
         Args:
-            **kwargs: Forwarded to the Visualizer implementation.
+            plot_mean_by_class: Plot mean encoder values by label class.
+            plot_mean_by_feature_class: Plot means grouped by feature class.
+                ``None`` lets the visualizer decide from available statistics.
+            plot_correlation: Plot correlation over training steps.
+            output: Optional explicit output file path.
+            show: Whether to display the figure interactively.
+            title: Plot title. ``True`` uses the default title, ``False`` omits it.
+            figsize: Optional Matplotlib figure size.
+            img_format: File format used for generated output paths.
+            dpi: Optional figure DPI.
+            highlight_non_convergence: Override whether non-convergent runs are
+                marked in titles/labels. ``None`` uses trainer/config defaults.
+            return_fig_ax: If True, return Matplotlib ``(fig, ax)``.
+            **kwargs: Additional keyword arguments forwarded to the visualizer.
 
         Returns:
-            Whatever the Visualizer returns (often a matplotlib/seaborn figure).
-
-        Raises:
-            NotImplementedError: If no Visualizer is configured and this method
-                is not overridden in a subclass.
+            Visualizer-specific result, usually an output path or ``(fig, ax)``.
         """
-        return self._delegate_to_visualizer("plot_training_convergence", **kwargs)
+        return self._delegate_to_visualizer(
+            "plot_training_convergence",
+            plot_mean_by_class=plot_mean_by_class,
+            plot_mean_by_feature_class=plot_mean_by_feature_class,
+            plot_correlation=plot_correlation,
+            output=output,
+            show=show,
+            title=title,
+            figsize=figsize,
+            img_format=img_format,
+            dpi=dpi,
+            highlight_non_convergence=highlight_non_convergence,
+            return_fig_ax=return_fig_ax,
+            **kwargs,
+        )
+    plot_training_convergence.__doc__ = (
+        plot_training_convergence.__doc__
+        + see_implementation("gradiend.visualizer.convergence.plot_training_convergence")
+    )
 
-    def plot_encoder_scatter(self, **kwargs: Any) -> Any:
+    def plot_encoder_scatter(
+        self,
+        encoder_df: Optional[pd.DataFrame] = None,
+        *,
+        color_by: str = "label",
+        x_col: Optional[str] = None,
+        label_name_mapping: Optional[dict] = None,
+        max_points: Optional[int] = None,
+        show: bool = True,
+        title: Optional[str] = None,
+        height: int = 500,
+        split: str = "test",
+        highlight_non_convergence: Optional[bool] = None,
+        **kwargs: Any,
+    ) -> Any:
         """
-        Plot interactive encoder scatter (Plotly: jitter x, encoded y, colored by label).
+        Create an interactive Plotly scatter plot for encoder outlier inspection.
 
         Args:
-            **kwargs: Forwarded to the Visualizer implementation (encoder_df, show, etc.).
+            encoder_df: Optional encoder-evaluation DataFrame. When omitted, the
+                visualizer loads or computes encoder analysis data.
+            color_by: Column used for point color, commonly ``"label"``.
+            x_col: Column used for the categorical x-axis. ``None`` lets the
+                visualizer choose a meaningful target/token column.
+            label_name_mapping: Optional mapping from raw labels to display names.
+            max_points: Optional cap on plotted rows.
+            show: Whether to display the Plotly figure.
+            title: Optional plot title.
+            height: Plot height in pixels.
+            split: Split to evaluate/load when ``encoder_df`` is omitted.
+            highlight_non_convergence: Override non-convergence markers in title.
+            **kwargs: Additional keyword arguments forwarded to the visualizer.
 
         Returns:
-            Plotly Figure or None if Plotly is not installed.
-
-        Raises:
-            NotImplementedError: If no Visualizer is configured.
+            Visualizer-specific result, typically an HTML path or Plotly figure.
         """
-        return self._delegate_to_visualizer("plot_encoder_scatter", **kwargs)
+        return self._delegate_to_visualizer(
+            "plot_encoder_scatter",
+            encoder_df=encoder_df,
+            color_by=color_by,
+            x_col=x_col,
+            label_name_mapping=label_name_mapping,
+            max_points=max_points,
+            show=show,
+            title=title,
+            height=height,
+            split=split,
+            highlight_non_convergence=highlight_non_convergence,
+            **kwargs,
+        )
+    plot_encoder_scatter.__doc__ = (
+        plot_encoder_scatter.__doc__
+        + see_implementation("gradiend.visualizer.encoder_scatter.plot_encoder_scatter")
+    )
 
-    def plot_probability_shifts(self, **kwargs: Any) -> Any:
+    def plot_encoder_strip_by_split(
+        self,
+        encoder_df: Optional[pd.DataFrame] = None,
+        *,
+        include_neutral: bool = False,
+        title: Optional[str] = None,
+        output: Optional[str] = None,
+        show: bool = True,
+        figsize: Optional[Tuple[float, float]] = None,
+        jitter: float = 0.08,
+        dodge: bool = True,
+        point_size: float = 5.0,
+        label_points: Union[bool, Literal["outliers", "outliers+sample", "sample"], str] = False,
+        highlight_non_convergence: Optional[bool] = None,
+        **kwargs: Any,
+    ) -> Optional[str]:
         """
-        Plot decoder probability shifts vs learning rate.
+        Plot encoder values as a strip plot grouped by data split.
 
         Args:
-            **kwargs: Forwarded to the Visualizer implementation (decoder_results, class_ids, use_cache, etc.).
+            encoder_df: Optional encoder-evaluation DataFrame.
+            include_neutral: If True, include neutral rows when available.
+            title: Optional plot title.
+            output: Optional explicit output file path.
+            show: Whether to display the Matplotlib figure.
+            figsize: Optional Matplotlib figure size.
+            jitter: Horizontal jitter for points.
+            dodge: If True, separate split hues within each group.
+            point_size: Marker size.
+            label_points: Whether and how to label points. Supported values are
+                visualizer-defined, including ``False``, ``"outliers"``,
+                ``"outliers+sample"``, and ``"sample"``.
+            highlight_non_convergence: Override non-convergence markers in title.
+            **kwargs: Additional keyword arguments forwarded to the visualizer.
 
         Returns:
-            Path to saved plot file or empty string.
-
-        Raises:
-            NotImplementedError: If no Visualizer is configured.
+            Output path when saved, otherwise visualizer-specific result.
         """
-        return self._delegate_to_visualizer("plot_probability_shifts", **kwargs)
+        return self._delegate_to_visualizer(
+            "plot_encoder_strip_by_split",
+            encoder_df=encoder_df,
+            include_neutral=include_neutral,
+            title=title,
+            output=output,
+            show=show,
+            figsize=figsize,
+            jitter=jitter,
+            dodge=dodge,
+            point_size=point_size,
+            label_points=label_points,
+            highlight_non_convergence=highlight_non_convergence,
+            **kwargs,
+        )
+    plot_encoder_strip_by_split.__doc__ = (
+        plot_encoder_strip_by_split.__doc__
+        + see_implementation("gradiend.visualizer.encoder_strip_split.plot_encoder_strip_by_split")
+    )
+
+    def plot_encoder_by_target(
+        self,
+        encoder_df: Optional[pd.DataFrame] = None,
+        *,
+        plot_style: Literal["strip", "box", "violin"] = "strip",
+        title: Optional[str] = None,
+        output: Optional[str] = None,
+        show: bool = True,
+        figsize: Optional[Tuple[float, float]] = None,
+        jitter: float = 0.25,
+        dodge: bool = True,
+        point_size: float = 1.5,
+        interactive: bool = False,
+        height: int = 520,
+        legend_loc: str = "upper right",
+        highlight_non_convergence: Optional[bool] = None,
+        **kwargs: Any,
+    ) -> Optional[str]:
+        """
+        Plot encoder values grouped by target token within feature class.
+
+        Args:
+            encoder_df: Optional encoder-evaluation DataFrame.
+            plot_style: Plot style: ``"strip"``, ``"box"``, or ``"violin"``.
+            title: Optional plot title.
+            output: Optional explicit output file path.
+            show: Whether to display the plot.
+            figsize: Optional Matplotlib figure size for static plots.
+            jitter: Horizontal jitter for strip points.
+            dodge: If True, separate split hues within each target.
+            point_size: Marker size for strip plots.
+            interactive: If True, create the interactive Plotly strip variant.
+            height: Plotly height in pixels for interactive plots.
+            legend_loc: Static Matplotlib legend location.
+            highlight_non_convergence: Override non-convergence markers in title.
+            **kwargs: Additional keyword arguments forwarded to the visualizer.
+
+        Returns:
+            Output path when saved, otherwise visualizer-specific result.
+        """
+        return self._delegate_to_visualizer(
+            "plot_encoder_by_target",
+            encoder_df=encoder_df,
+            plot_style=plot_style,
+            title=title,
+            output=output,
+            show=show,
+            figsize=figsize,
+            jitter=jitter,
+            dodge=dodge,
+            point_size=point_size,
+            interactive=interactive,
+            height=height,
+            legend_loc=legend_loc,
+            highlight_non_convergence=highlight_non_convergence,
+            **kwargs,
+        )
+    plot_encoder_by_target.__doc__ = (
+        plot_encoder_by_target.__doc__
+        + see_implementation("gradiend.visualizer.encoder_by_target.plot_encoder_by_target")
+    )
+
+    def plot_probability_shifts(
+        self,
+        decoder_results: Optional[Dict[str, Any]] = None,
+        class_ids: Optional[List[str]] = None,
+        target_class: Optional[str] = None,
+        increase_target_probabilities: bool = True,
+        use_cache: Optional[bool] = None,
+        *,
+        output: Optional[str] = None,
+        show: bool = True,
+        figsize: Optional[Tuple[float, float]] = None,
+        highlight_non_convergence: Optional[bool] = None,
+        return_fig_ax: bool = False,
+        **kwargs: Any,
+    ) -> Any:
+        """
+        Plot decoder probability shifts over learning-rate/grid candidates.
+
+        Args:
+            decoder_results: Optional result from ``evaluate_decoder``. When
+                omitted, cached decoder results may be loaded if available.
+            class_ids: Optional class ids to include in the plot.
+            target_class: Optional single target class to plot.
+            increase_target_probabilities: True for strengthen plots, False for
+                weaken plots.
+            use_cache: Whether the visualizer may use cached decoder results.
+            output: Optional explicit output file path.
+            show: Whether to display the Matplotlib figure.
+            figsize: Optional Matplotlib figure size.
+            highlight_non_convergence: Override non-convergence markers in title.
+            return_fig_ax: If True, return Matplotlib ``(fig, ax)``.
+            **kwargs: Additional keyword arguments forwarded to the visualizer.
+
+        Returns:
+            Visualizer-specific result, usually an output path or ``(fig, ax)``.
+        """
+        return self._delegate_to_visualizer(
+            "plot_probability_shifts",
+            decoder_results=decoder_results,
+            class_ids=class_ids,
+            target_class=target_class,
+            increase_target_probabilities=increase_target_probabilities,
+            use_cache=use_cache,
+            output=output,
+            show=show,
+            figsize=figsize,
+            highlight_non_convergence=highlight_non_convergence,
+            return_fig_ax=return_fig_ax,
+            **kwargs,
+        )
+    plot_probability_shifts.__doc__ = (
+        plot_probability_shifts.__doc__
+        + see_implementation("gradiend.visualizer.probability_shifts.plot_probability_shifts")
+    )

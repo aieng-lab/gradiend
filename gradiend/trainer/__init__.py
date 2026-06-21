@@ -16,6 +16,7 @@ Core components:
 
 # Trainer and reproducibility
 from .trainer import Trainer, set_seed
+from .core.multi_seed import MultiSeedTrainerView
 
 # Load training stats from saved model directory
 from .core.stats import load_training_stats
@@ -33,6 +34,7 @@ from .core.callbacks import (
 
 # Training Arguments (HF-like)
 from .core.arguments import TrainingArguments
+from .core.transition_selection import TransitionSpec, pair, identity, expand_transition_selection
 
 # Base config (modality-agnostic)
 from .config import TrainerConfig
@@ -41,24 +43,38 @@ from .config import TrainerConfig
 from .core.pruning import PostPruneConfig, PrePruneConfig, post_prune, pre_prune
 
 # Dataset: modality-agnostic in core; text wrapper in trainer.text.common
-from .core.dataset import GradientTrainingDataset
+from .core.dataset import GradientTrainingDataset, PreComputedTrainingDataset
 from .text.common.dataset import TextGradientTrainingDataset
 
 # Factory
 from .factory import create_model_with_gradiend
 
+# Suite (after datasets — text stack imports GradientTrainingDataset from gradiend.trainer)
+from .suite import TrainerSuite, PositiveTrainerSuite, SymmetricTrainerSuite, SuitePairDefinition, PositiveFeatureDefinition
+
 __all__ = [
     "Trainer",
+    "MultiSeedTrainerView",
+    "TrainerSuite",
+    "PositiveTrainerSuite",
+    "SymmetricTrainerSuite",
+    "SuitePairDefinition",
+    "PositiveFeatureDefinition",
     "set_seed",
     "TrainerConfig",
     "load_training_stats",
     "train_core",
     "TrainingArguments",
+    "TransitionSpec",
+    "pair",
+    "identity",
+    "expand_transition_selection",
     "PostPruneConfig",
     "PrePruneConfig",
     "post_prune",
     "pre_prune",
     "GradientTrainingDataset",
+    "PreComputedTrainingDataset",
     "TextGradientTrainingDataset",
     "create_model_with_gradiend",
     "TrainingCallback",

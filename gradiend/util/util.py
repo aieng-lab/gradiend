@@ -2,12 +2,40 @@ import io
 import json
 import pickle
 import hashlib
+from typing import Any
+
+import numpy as np
 import torch
+
+
+def format_count(value, *, sep: str = ",") -> str:
+    """Format integer-like counts for human-readable logs."""
+    try:
+        return f"{int(value):{sep}}"
+    except (TypeError, ValueError):
+        return str(value)
 
 def set_requires_grad_true(model):
     """Set requires_grad=True for all parameters (e.g. after loading for GRADIEND use)."""
     for p in model.parameters():
         p.requires_grad = True
+
+def to_jsonable(value: Any) -> Any:
+    """Recursively convert values to JSON-serializable plain Python types."""
+    if isinstance(value, dict):
+        return {str(to_jsonable(key)): to_jsonable(val) for key, val in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [to_jsonable(item) for item in value]
+    if isinstance(value, np.ndarray):
+        return [to_jsonable(item) for item in value.tolist()]
+    if isinstance(value, np.integer):
+        return int(value)
+    if isinstance(value, np.floating):
+        return float(value)
+    if isinstance(value, np.bool_):
+        return bool(value)
+    return value
+
 
 def convert_tuple_keys_recursively(obj):
     if isinstance(obj, dict):
@@ -41,21 +69,20 @@ def restore_tuple_keys_recursively(obj):
         return obj
 
 
+def unwrap_model(model: torch.nn.Module) -> torch.nn.Module:
+    while hasattr(model, "module"):
+        model = model.module
+    return model
+
 def normalize_split_name(split: str) -> str:
     """
-    Normalize split names to standard form.
-
-    Maps common variations to standard names:
-    - 'val' -> 'validation'
-    - 'validation' -> 'validation'
-    - 'train' -> 'train'
-    - 'test' -> 'test'
+    Normalize split names to standard form (train / validation / test), matching HuggingFace.
 
     Args:
         split: Split name to normalize (case-insensitive)
 
     Returns:
-        Normalized split name (lowercase, standard form)
+        Normalized split name (lowercase): "train", "validation", or "test".
     """
     split_normalization = {
         "val": "validation",

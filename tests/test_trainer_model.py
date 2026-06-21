@@ -6,6 +6,7 @@ base_model_path vs model_path, and require_gradiend_model flag.
 import json
 import os
 import tempfile
+import shutil
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -204,6 +205,333 @@ class TestBaseModelPathVsModelPath:
 
         assert trainer.base_model_path == "bert-base-cased", "base_model_path should never change"
         assert trainer.model_path == out_path, "model_path should reflect current path"
+
+
+class _FakeTopKModel:
+    def __init__(self, indices):
+        self._indices = list(indices)
+
+    def get_topk_weights(self, part="decoder-weight", topk=1000):
+        return list(self._indices)
+
+
+class TestMultiSeedTopkStability:
+    def test_fail_on_non_convergence_waits_until_max_seeds_exhausted(self):
+        local_tmp_root = os.path.join(os.getcwd(), "test_artifacts")
+        os.makedirs(local_tmp_root, exist_ok=True)
+        temp_dir = os.path.join(local_tmp_root, "multi_seed_fail_waits")
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        os.makedirs(temp_dir, exist_ok=True)
+        try:
+            args = TrainingArguments(
+                experiment_dir=temp_dir,
+                max_seeds=3,
+                min_convergent_seeds=2,
+                fail_on_non_convergence=True,
+                convergent_score_threshold=0.99,
+                convergent_mean_by_class_threshold=0.1,
+                seed=30,
+            )
+            trainer = MockTrainerForTest(model="mock-base", run_id="race_white_black", args=args)
+            output_dir = os.path.join(temp_dir, "selected_model")
+            stats_by_seed_path = {}
+            inner_fail_flags = []
+
+            def _make_stats() -> dict:
+                return {
+                    "training_stats": {
+                        "correlation": 0.5,
+                        "mean_by_class": {
+                            1: {
+                                -1: -0.4,
+                                1: 0.4,
+                            }
+                        },
+                    },
+                    "best_score_checkpoint": {
+                        "correlation": 0.5,
+                        "global_step": 1,
+                    },
+                    "abs_mean_by_type": {
+                        "training": 0.7,
+                    },
+                }
+
+            def _fake_train(self, output_dir=None, args=None, model=None, model_with_gradiend_cls=None, callbacks=None, runtime_monitor=None, **kwargs):
+                inner_fail_flags.append(bool(args.fail_on_non_convergence))
+                os.makedirs(output_dir, exist_ok=True)
+                stats_by_seed_path[output_dir] = _make_stats()
+                return output_dir
+
+            with patch.object(MockTrainerForTest, "_train", new=_fake_train):
+                with patch.object(trainer, "get_training_stats", side_effect=lambda p: stats_by_seed_path.get(p)):
+                    with patch.object(MockTrainerForTest, "plot_training_convergence", return_value=None):
+                        with pytest.raises(RuntimeError) as excinfo:
+                            trainer.train(output_dir=output_dir, use_cache=False)
+
+            assert inner_fail_flags == [False, False, False]
+            assert args.fail_on_non_convergence is True
+            message = str(excinfo.value)
+            assert "GRADIEND 'race_white_black'" in message
+            assert "only 0 seed(s) converged, but 2 are required" in message
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_train_reports_topk_stability_for_multiple_convergent_seeds(self):
+        local_tmp_root = os.path.join(os.getcwd(), "test_artifacts")
+        os.makedirs(local_tmp_root, exist_ok=True)
+        temp_dir = os.path.join(local_tmp_root, "topk_stability_case")
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        os.makedirs(temp_dir, exist_ok=True)
+        try:
+            args = TrainingArguments(
+                experiment_dir=temp_dir,
+                max_seeds=3,
+                min_convergent_seeds=2,
+                convergent_score_threshold=0.5,
+                convergent_mean_by_class_threshold=0.1,
+                seed=10,
+                seed_stability_topk=4,
+                seed_stability_part="decoder-weight",
+            )
+            trainer = MockTrainerForTest(model="mock-base", args=args)
+
+            output_dir = os.path.join(temp_dir, "selected_model")
+            write_calls = []
+
+            def _make_stats(correlation: float) -> dict:
+                return {
+                    "training_stats": {
+                        "correlation": correlation,
+                        "mean_by_class": {
+                            1: {
+                                -1: -0.4,
+                                1: 0.4,
+                            }
+                        },
+                    },
+                    "best_score_checkpoint": {
+                        "correlation": correlation,
+                        "global_step": 1,
+                    },
+                    "abs_mean_by_type": {
+                        "training": 0.7,
+                    },
+                }
+
+            stats_by_seed_path = {}
+
+            def _fake_train(self, output_dir=None, args=None, model=None, model_with_gradiend_cls=None, callbacks=None, runtime_monitor=None, **kwargs):
+                os.makedirs(output_dir, exist_ok=True)
+                stats_by_seed_path[output_dir] = _make_stats(0.9)
+                return output_dir
+
+            def _fake_get_training_stats(path):
+                return stats_by_seed_path.get(path)
+
+            def _fake_load_model(load_directory, use_cache=False, **kwargs):
+                basename = os.path.basename(str(load_directory))
+                if basename == "seed_10":
+                    return _FakeTopKModel([1, 2, 3, 4])
+                if basename == "seed_11":
+                    return _FakeTopKModel([1, 2, 3, 5])
+                return _FakeTopKModel([10, 11, 12, 13])
+
+            def _fake_write_training_stats(*args_, **kwargs_):
+                write_calls.append({"args": args_, "kwargs": kwargs_})
+                return os.path.join(output_dir, "training.json")
+
+            with patch.object(MockTrainerForTest, "_train", new=_fake_train):
+                with patch.object(trainer, "get_training_stats", side_effect=_fake_get_training_stats):
+                    with patch.object(trainer, "evaluate_encoder", return_value={"correlation": 0.9}):
+                        with patch.object(trainer, "load_model", side_effect=_fake_load_model):
+                            with patch.object(MockTrainerForTest, "plot_training_convergence", return_value=None):
+                                with patch("gradiend.trainer.core.stats.load_training_stats", return_value=_make_stats(0.9)):
+                                    with patch("gradiend.trainer.core.stats.write_training_stats", side_effect=_fake_write_training_stats):
+                                        result = trainer.train(output_dir=output_dir, use_cache=False)
+
+            assert result is trainer
+
+            seed_report_path = os.path.join(temp_dir, "seeds", "seed_report.json")
+            assert os.path.exists(seed_report_path)
+            with open(seed_report_path, "r", encoding="utf-8") as handle:
+                seed_report = json.load(handle)
+
+            assert seed_report["convergent_count"] == 2
+            assert seed_report["convergent_seeds"] == [10, 11]
+            topk_stability = seed_report.get("topk_stability")
+            assert topk_stability is not None
+            assert topk_stability["computed"] is True
+            assert topk_stability["topk"] == 4
+            assert topk_stability["part"] == "decoder-weight"
+            assert topk_stability["intersection_size"] == 3
+            assert topk_stability["union_size"] == 5
+            assert topk_stability["mean_pairwise_overlap_fraction"] == pytest.approx(0.75)
+
+            assert write_calls, "write_training_stats should be called to persist training.json updates"
+            written_seed_stability = write_calls[-1]["kwargs"].get("seed_stability")
+            assert written_seed_stability is not None
+            assert written_seed_stability["intersection_size"] == 3
+            assert written_seed_stability["union_size"] == 5
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+class TestMultiSeedSelectionFallback:
+    def test_train_does_not_count_step_zero_best_checkpoint_as_convergent(self):
+        local_tmp_root = os.path.join(os.getcwd(), "test_artifacts")
+        os.makedirs(local_tmp_root, exist_ok=True)
+        temp_dir = os.path.join(local_tmp_root, "step_zero_best_checkpoint_case")
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        os.makedirs(temp_dir, exist_ok=True)
+        try:
+            args = TrainingArguments(
+                experiment_dir=temp_dir,
+                max_seeds=2,
+                min_convergent_seeds=1,
+                convergent_score_threshold=0.5,
+                convergent_mean_by_class_threshold=0.1,
+                seed=20,
+            )
+            trainer = MockTrainerForTest(model="mock-base", args=args)
+
+            output_dir = os.path.join(temp_dir, "selected_model")
+            stats_by_seed_path = {}
+
+            def _make_stats(correlation: float) -> dict:
+                return {
+                    "training_stats": {
+                        "correlation": correlation,
+                        "mean_by_class": {
+                            0: {
+                                -1: -0.4,
+                                1: 0.4,
+                            }
+                        },
+                    },
+                    "best_score_checkpoint": {
+                        "correlation": correlation,
+                        "global_step": 0,
+                    },
+                    "abs_mean_by_type": {
+                        "training": 0.7,
+                    },
+                }
+
+            def _fake_train(self, output_dir=None, args=None, model=None, model_with_gradiend_cls=None, callbacks=None, runtime_monitor=None, **kwargs):
+                os.makedirs(output_dir, exist_ok=True)
+                stats_by_seed_path[output_dir] = _make_stats(0.9)
+                return output_dir
+
+            def _fake_get_training_stats(path):
+                return stats_by_seed_path.get(path)
+
+            def _fake_copytree(src, dst, *args_, **kwargs_):
+                os.makedirs(dst, exist_ok=True)
+                return dst
+
+            with patch.object(MockTrainerForTest, "_train", new=_fake_train):
+                with patch.object(trainer, "get_training_stats", side_effect=_fake_get_training_stats):
+                    with patch.object(trainer, "evaluate_encoder", return_value={"correlation": 0.9}):
+                        with patch.object(MockTrainerForTest, "plot_training_convergence", return_value=None):
+                            with patch("shutil.copytree", side_effect=_fake_copytree):
+                                trainer.train(output_dir=output_dir, use_cache=False)
+
+            seed_report_path = os.path.join(temp_dir, "seeds", "seed_report.json")
+            assert os.path.exists(seed_report_path)
+            with open(seed_report_path, "r", encoding="utf-8") as handle:
+                seed_report = json.load(handle)
+
+            assert seed_report["convergent_count"] == 0
+            assert seed_report["convergent_seeds"] == []
+            assert all(run["converged"] is False for run in seed_report["runs"])
+            assert all(run["best_checkpoint_global_step"] == 0 for run in seed_report["runs"])
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_train_uses_highest_correlation_when_no_seed_converges(self):
+        local_tmp_root = os.path.join(os.getcwd(), "test_artifacts")
+        os.makedirs(local_tmp_root, exist_ok=True)
+        temp_dir = os.path.join(local_tmp_root, "no_convergent_seed_case")
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        os.makedirs(temp_dir, exist_ok=True)
+        try:
+            args = TrainingArguments(
+                experiment_dir=temp_dir,
+                max_seeds=3,
+                min_convergent_seeds=2,
+                convergent_score_threshold=0.95,
+                convergent_mean_by_class_threshold=0.1,
+                seed=10,
+            )
+            trainer = MockTrainerForTest(model="mock-base", args=args)
+
+            output_dir = os.path.join(temp_dir, "selected_model")
+
+            stats_by_seed_value = {
+                10: 0.62,
+                11: 0.81,
+                12: 0.74,
+            }
+            stats_by_seed_path = {}
+
+            def _make_stats(correlation: float) -> dict:
+                return {
+                    "training_stats": {
+                        "correlation": correlation,
+                        "mean_by_class": {
+                            1: {
+                                -1: -0.4,
+                                1: 0.4,
+                            }
+                        },
+                    },
+                    "best_score_checkpoint": {
+                        "correlation": correlation,
+                        "global_step": 1,
+                    },
+                    "abs_mean_by_type": {
+                        "training": 0.7,
+                    },
+                }
+
+            def _fake_train(self, output_dir=None, args=None, model=None, model_with_gradiend_cls=None, callbacks=None, runtime_monitor=None, **kwargs):
+                os.makedirs(output_dir, exist_ok=True)
+                seed_value = int(os.path.basename(output_dir).split("_")[-1])
+                stats_by_seed_path[output_dir] = _make_stats(stats_by_seed_value[seed_value])
+                return output_dir
+
+            def _fake_get_training_stats(path):
+                return stats_by_seed_path.get(path)
+
+            copied_seed_paths = []
+
+            def _fake_copytree(src, dst, *args_, **kwargs_):
+                copied_seed_paths.append(src)
+                os.makedirs(dst, exist_ok=True)
+                return dst
+
+            with patch.object(MockTrainerForTest, "_train", new=_fake_train):
+                with patch.object(trainer, "get_training_stats", side_effect=_fake_get_training_stats):
+                    with patch.object(trainer, "evaluate_encoder", side_effect=RuntimeError("skip expensive eval")):
+                        with patch.object(MockTrainerForTest, "plot_training_convergence", return_value=None):
+                            with patch("shutil.copytree", side_effect=_fake_copytree):
+                                trainer.train(output_dir=output_dir, use_cache=False)
+
+            assert copied_seed_paths, "copytree should be called with the selected best seed path"
+            assert copied_seed_paths[-1].endswith(os.path.join("seeds", "seed_11"))
+
+            seed_report_path = os.path.join(temp_dir, "seeds", "seed_report.json")
+            assert os.path.exists(seed_report_path)
+            with open(seed_report_path, "r", encoding="utf-8") as handle:
+                seed_report = json.load(handle)
+
+            assert seed_report["convergent_count"] == 0
+            assert seed_report["best_seed"] == 11
+            assert seed_report["best_selection_score"] == pytest.approx(0.81)
+            assert seed_report["best_seed_selection_strategy"] == "highest_correlation_fallback"
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
 
 
 class TestRequireGradiendModel:
@@ -508,3 +836,52 @@ class TestSelectAndSaveChangedModel:
         # Should return a single string path, not a list
         assert isinstance(result, str)
         assert not isinstance(result, list)
+
+
+class TestEvalDeviceWarnings:
+    def test_unload_model_warns_before_eval_reload(self, caplog):
+        import logging
+
+        trainer = MockTrainerForTest(model="mock-base", args=TrainingArguments())
+        trainer.unload_model()
+        mock_model = MagicMock()
+        mock_model._get_base_forward_device = MagicMock(return_value=torch.device("cuda:0"))
+        with patch.object(trainer, "get_model", return_value=mock_model):
+            with caplog.at_level(logging.WARNING):
+                trainer.evaluate_encoder()
+        assert any("unload_model" in rec.message for rec in caplog.records)
+
+    def test_cpu_model_warns_on_encoder_eval(self, caplog):
+        import logging
+
+        trainer = MockTrainerForTest(model="mock-base", args=TrainingArguments())
+        mock_model = MagicMock()
+        mock_model._get_base_forward_device = MagicMock(return_value=torch.device("cpu"))
+        trainer._model_instance = mock_model
+        if not torch.cuda.is_available():
+            pytest.skip("CUDA required for CPU-vs-GPU warning test")
+        with caplog.at_level(logging.WARNING):
+            trainer.evaluate_encoder()
+        assert any("CPU while CUDA is available" in rec.message for rec in caplog.records)
+
+    def test_explicit_cpu_device_suppresses_cpu_warning(self, caplog):
+        import logging
+
+        trainer = MockTrainerForTest(model="mock-base", args=TrainingArguments())
+        mock_model = MagicMock()
+        mock_model._get_base_forward_device = MagicMock(return_value=torch.device("cpu"))
+        trainer._model_instance = mock_model
+        if not torch.cuda.is_available():
+            pytest.skip("CUDA required for CPU-vs-GPU warning test")
+        with caplog.at_level(logging.WARNING):
+            trainer.evaluate_encoder(device="cpu")
+        assert not any("CPU while CUDA is available" in rec.message for rec in caplog.records)
+
+    def test_explicit_cuda_device_moves_model(self):
+        trainer = MockTrainerForTest(model="mock-base", args=TrainingArguments())
+        mock_model = MagicMock()
+        mock_model.place_for_evaluation = MagicMock(return_value=mock_model)
+        trainer._model_instance = mock_model
+        trainer.evaluate_encoder(device="cuda")
+        mock_model.place_for_evaluation.assert_called_once()
+        assert mock_model.place_for_evaluation.call_args.kwargs.get("device") == "cuda"

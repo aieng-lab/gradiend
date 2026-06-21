@@ -1,7 +1,7 @@
 """
 Language-model evaluation for text: MLM and CLM (perplexity, accuracy, etc.).
 
-Used by prediction and classification decoder evaluation (e.g. compute_lms in decoder_eval_utils).
+compute_lms is defined here and used by prediction and classification decoder evaluation.
 """
 
 import json
@@ -17,6 +17,7 @@ from gradiend.util.metrics import f1_score, precision_score, recall_score
 
 from gradiend.trainer.text.common.loading import InstructTokenizerWrapper
 from gradiend.util.logging import get_logger
+from gradiend.model.utils import is_decoder_only_model, is_seq2seq_model
 
 logger = get_logger(__name__)
 
@@ -307,6 +308,96 @@ def _evaluate_with_common_workflow(
     return metrics, stats
 
 
+def evaluate_seq2seq_perplexity(
+    model: Any,
+    tokenizer: Any,
+    text_data: Union[List[str], Any],
+    file: Optional[str] = None,
+    batch_size: int = 32,
+    ignore: Optional[List[str]] = None,
+    max_length: int = 512,
+) -> Dict[str, Any]:
+    """Evaluate seq2seq (encoder-decoder) perplexity with teacher-forced labels."""
+    logger.debug("Evaluating seq2seq perplexity")
+    ignore = ignore or []
+    model.eval()
+    device = model.device
+    total_log_likelihood = 0.0
+    total_token_count = 0
+
+    ignore_ids: set = set()
+    if ignore:
+        for ig_text in ignore:
+            ig_tokens = tokenizer.encode(ig_text, add_special_tokens=False)
+            ignore_ids.update(ig_tokens)
+
+    start = time.time()
+    n = len(text_data)
+
+    for start_idx in range(0, n, batch_size):
+        end_idx = min(start_idx + batch_size, n)
+        batch_sentences = text_data[start_idx:end_idx]
+        if hasattr(batch_sentences, "tolist"):
+            batch_sentences = batch_sentences.tolist()
+
+        encoded = tokenizer(
+            batch_sentences,
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
+            max_length=max_length,
+        )
+        input_ids = encoded["input_ids"].to(device)
+        attention_mask = encoded["attention_mask"].to(device)
+        labels = input_ids.clone()
+        labels[attention_mask == 0] = -100
+        pad_id = getattr(tokenizer, "pad_token_id", None)
+        if pad_id is not None:
+            labels[labels == pad_id] = -100
+        if ignore_ids:
+            labels[torch.isin(labels, torch.tensor(list(ignore_ids), device=labels.device))] = -100
+
+        active = int((labels != -100).sum().item())
+        if active == 0:
+            continue
+
+        with torch.no_grad():
+            outputs = model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                labels=labels,
+            )
+            if outputs.loss is None:
+                continue
+            total_log_likelihood += float(outputs.loss.item()) * active
+            total_token_count += active
+
+    if total_token_count == 0:
+        return {
+            "lms": 0.0,
+            "perplexity": float("inf"),
+            "total_log_likelihood": 0.0,
+            "total_tokens": 0,
+        }
+
+    avg_neg_log_likelihood = total_log_likelihood / total_token_count
+    perplexity = math.exp(avg_neg_log_likelihood)
+    logger.debug(f"Evaluated {n} sentences in {time.time() - start:.2f}s")
+    logger.debug(f"Perplexity: {perplexity:.2f}")
+
+    lms = 1 / (1 + avg_neg_log_likelihood)
+    result = {
+        "lms": lms,
+        "perplexity": perplexity,
+        "total_log_likelihood": total_log_likelihood,
+        "total_tokens": total_token_count,
+    }
+    if file:
+        with open(file + ".json", "w+", encoding="utf8") as f:
+            json.dump(result, f, indent=2)
+    return result
+
+
 def evaluate_clm_perplexity(
     model: Any,
     tokenizer: Any,
@@ -503,3 +594,34 @@ def evaluate_mlm(
     result["lms"] = result["accuracy"]
     _save_results(result, stats, file)
     return result, stats
+
+
+def compute_lms(model: Any, tokenizer: Any, texts: List[str], ignore: Optional[List[str]] = None, max_texts: Optional[int] = None, batch_size: int = 32) -> Union[Dict[str, Any], float]:
+    """
+    Compute language modeling score (LMS) on a sample of texts.
+    Used by both prediction and classification decoder evaluation.
+
+    Args:
+        model: The LM model to evaluate (AutoModelForMaskedLM / AutoModelForCausalLM).
+        tokenizer: The tokenizer to use.
+        texts: List of texts to evaluate.
+        ignore: List of tokens to ignore during evaluation.
+        max_texts: Max number of texts; None = use all.
+        batch_size: Batch size for evaluation. Default 32.
+
+    Returns:
+        Evaluation result dict (e.g. lms, perplexity) or float.
+    """
+    limited = texts[:max_texts] if max_texts is not None else texts
+    if is_seq2seq_model(tokenizer) or is_seq2seq_model(model):
+        return evaluate_seq2seq_perplexity(
+            model,
+            tokenizer,
+            limited,
+            ignore=ignore or [],
+            batch_size=batch_size,
+        )
+    if is_decoder_only_model(tokenizer):
+        return evaluate_clm_perplexity(model, tokenizer, limited, ignore=ignore or [], batch_size=batch_size)
+    result, _ = evaluate_mlm(model, tokenizer, limited, verbose=False, ignore=ignore or [], batch_size=batch_size)
+    return result

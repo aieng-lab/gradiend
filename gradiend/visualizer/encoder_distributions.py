@@ -11,10 +11,145 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import pandas as pd
 
 from gradiend.util.paths import resolve_output_path, ARTIFACT_ENCODER_PLOT
+from gradiend.visualizer.encoder_neutral import (
+    DEFAULT_NEUTRAL_DATA_SPLIT,
+    build_multi_split_encoder_plot_frame,
+    encoder_plot_xlabel,
+)
+from gradiend.visualizer.labels import resolve_highlight_non_convergence, resolve_plot_title_with_convergence
 from gradiend.visualizer.plot_optional import _require_matplotlib, _require_seaborn
 from gradiend.util.logging import get_logger
 
 logger = get_logger(__name__)
+
+
+_SPLIT_PLOT_MODES = frozenset({"facet"})
+
+
+def _normalize_split_plot_mode(split_plot_mode: str) -> str:
+    mode = str(split_plot_mode).strip().lower()
+    if mode in {"dodge", "overlay"}:
+        logger.warning(
+            "split_plot_mode=%r is removed for multi-split encoder distributions; "
+            "using 'facet' instead.",
+            split_plot_mode,
+        )
+        return "facet"
+    if mode not in _SPLIT_PLOT_MODES:
+        raise ValueError(
+            f"split_plot_mode must be one of {sorted(_SPLIT_PLOT_MODES)}; got {split_plot_mode!r}"
+        )
+    return mode
+
+
+def _plot_encoder_distributions_by_data_split(
+    df_all: pd.DataFrame,
+    *,
+    trainer: Any,
+    _source_to_display: Any,
+    split_plot_mode: str = "facet",
+    neutral_data_split: str = DEFAULT_NEUTRAL_DATA_SPLIT,
+    include_neutral: bool = False,
+    target_and_neutral_only: bool = True,
+    training_pair: Optional[tuple] = None,
+    show: bool = True,
+    title: Union[str, bool] = True,
+    run_id: Optional[str] = None,
+    output: Optional[str] = None,
+    output_dir: Optional[str] = None,
+    figsize: Optional[Tuple[float, float]] = None,
+    img_format: str = "png",
+    dpi: Optional[int] = None,
+    cmap: str = "tab20",
+    return_fig_ax: bool = False,
+    **kwargs: Any,
+) -> Any:
+    """Violin plot with feature classes on x-axis and train/val/test splits as facets."""
+    plt = _require_matplotlib()
+    sns = _require_seaborn()
+    split_plot_mode = _normalize_split_plot_mode(split_plot_mode)
+
+    df_train = df_all[df_all["type"] == "training"].copy()
+    if df_train.empty:
+        raise ValueError("Encoder plot has no training rows for data_split comparison.")
+    if target_and_neutral_only and training_pair:
+        df_train = df_train[df_train["source_id"].isin(training_pair)].copy()
+    df_train["violin_group"] = df_train["source_id"].map(_source_to_display).astype(str)
+    df_plot, group_order, facet_split_order, dodge_hue_order, includes_neutral = (
+        build_multi_split_encoder_plot_frame(
+            df_train,
+            df_all,
+            neutral_data_split=neutral_data_split,
+            include_neutral=include_neutral,
+        )
+    )
+    x_label = encoder_plot_xlabel(includes_neutral_groups=includes_neutral)
+    width_per_group = 1.5
+    n_x_groups = max(1, len(group_order))
+    _figsize = figsize if figsize is not None else (max(6.0, width_per_group * n_x_groups), 3.5)
+    fig = None
+    if split_plot_mode == "facet":
+        n_splits = max(1, len(facet_split_order))
+        panel_group_counts = []
+        for sp in facet_split_order:
+            sub = df_plot[df_plot["data_split"] == sp]
+            panel_groups = [g for g in group_order if g in sub["violin_group"].astype(str).unique()]
+            panel_group_counts.append(max(1, len(panel_groups)))
+        total_width = max(_figsize[0], width_per_group * sum(panel_group_counts))
+        fig, axes = plt.subplots(
+            1,
+            n_splits,
+            figsize=(total_width, _figsize[1]),
+            sharey=True,
+            gridspec_kw={"width_ratios": panel_group_counts},
+        )
+        if n_splits == 1:
+            axes = [axes]
+        for ax, sp in zip(axes, facet_split_order):
+            sub = df_plot[df_plot["data_split"] == sp]
+            panel_groups = [g for g in group_order if g in sub["violin_group"].astype(str).unique()]
+            sns.violinplot(
+                data=sub,
+                x="violin_group",
+                y="encoded",
+                order=panel_groups,
+                inner="quartile",
+                ax=ax,
+                cut=0,
+            )
+            ax.set_title(str(sp))
+            ax.set_xlabel("")
+            ax.tick_params(axis="x", rotation=15 if len(panel_groups) > 3 else 0)
+        axes[0].set_ylabel("Encoded value")
+        axes[-1].set_xlabel(x_label)
+    if title is True and run_id:
+        plt.suptitle(str(run_id))
+    elif isinstance(title, str):
+        plt.suptitle(title)
+
+    out_path = output
+    if not out_path:
+        out_path = resolve_output_path(
+            getattr(trainer, "experiment_dir", None),
+            output_dir,
+            ARTIFACT_ENCODER_PLOT,
+            run_id=run_id,
+        )
+    if out_path:
+        base, _ = os.path.splitext(out_path)
+        out_path = f"{base}.{img_format}"
+        os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+        plt.savefig(out_path, format=img_format, dpi=dpi, bbox_inches="tight")
+        logger.info("Saved encoder distribution plot: %s", out_path)
+    if show:
+        plt.show()
+    if return_fig_ax and fig is not None:
+        return fig, axes
+    if fig is not None:
+        plt.close(fig)
+    elif not show:
+        plt.close()
+    return out_path or ""
 
 
 def plot_encoder_distributions(
@@ -26,8 +161,10 @@ def plot_encoder_distributions(
     title: Union[str, bool] = True,
     violin_order: Optional[List[str]] = None,
     paired_legend_labels: Optional[List[str]] = None,
+    class_label_mapping: Optional[Dict[Any, str]] = None,
     legend_name_mapping: Optional[Dict[str, str]] = None,
     legend_group_mapping: Optional[Dict[str, List[str]]] = None,
+    ignore_missing_legend_group_labels: bool = False,
     title_fontsize: Optional[float] = None,
     label_fontsize: Optional[float] = None,
     axis_label_fontsize: Optional[float] = None,
@@ -41,8 +178,13 @@ def plot_encoder_distributions(
     dpi: Optional[int] = None,
     figsize: Optional[Tuple[float, float]] = None,
     target_and_neutral_only: bool = True,
+    split_plot_mode: str = "facet",
+    neutral_data_split: str = DEFAULT_NEUTRAL_DATA_SPLIT,
+    include_neutral: bool = False,
+    highlight_non_convergence: Optional[bool] = None,
+    return_fig_ax: bool = False,
     **kwargs: Any,
-) -> str:
+) -> Any:
     """
     Plot encoder distributions as grouped split violins.
 
@@ -61,16 +203,35 @@ def plot_encoder_distributions(
                     transition(s) and neutral data only; other transitions are excluded. Uses
                     trainer.pair to determine the target transition(s). Set to False to show
                     all transitions.
+        split_plot_mode: When ``data_split`` has multiple values (``split="all"`` or a list),
+                    use ``"facet"`` to draw columns per split. Removed modes ``"overlay"``
+                    and ``"dodge"`` are accepted as aliases for ``"facet"``.
+        neutral_data_split: Split bucket for neutral encoder rows in multi-split plots
+                    (default ``"test"``). Each neutral encoder type still gets its own
+                    x-axis group and dodge/overlay hue (e.g. ``test — training masked``).
+        include_neutral: When False (default), multi-split plots show training rows only.
+                    Set True to add neutral_dataset / neutral_training_masked groups.
         violin_order: Optional ordering of violin groups on the x-axis.
         paired_legend_labels: Optional explicit ordering of raw legend labels to plot. If set,
                     the labels are paired consecutively into split violins: (0,1) -> violin 1,
                     (2,3) -> violin 2, etc. This bypasses the default inference of split halves
                     from source/target ids.
+        class_label_mapping: Optional dict mapping individual class ids to display labels before
+                    transition labels are built. For example, ``{"NM": "Masc. Nom."}`` turns
+                    ``"NM -> NF"`` into ``"Masc. Nom. -> Fem. Nom."``. When not provided, a
+                    trainer ``id2label`` mapping is used when available.
         legend_name_mapping: Optional dict mapping raw legend labels to display names.
         legend_group_mapping: Optional dict mapping a new legend label to a list of existing
                     legend labels (e.g. {"Gender swap": ["masc_nom -> fem_nom",
                     "fem_nom -> masc_nom"]}). Grouped transitions are downsampled
                     to the minimum count within the group so groups are balanced.
+        highlight_non_convergence: When True, append a non-convergence marker to the title for
+                    non-converged runs. ``None`` uses ``TrainingArguments.highlight_non_convergence``.
+        ignore_missing_legend_group_labels: If True, silently drop labels from
+                    ``legend_group_mapping`` that are not present in the plotted
+                    encoder data and skip groups that become empty. This is useful
+                    for experiment scripts that reuse a broad paper-style grouping
+                    across runs whose encoder export contains only a subset.
         title_fontsize: Font size for the title.
         label_fontsize: Font size for axis tick labels.
         axis_label_fontsize: Font size for axis labels.
@@ -83,7 +244,12 @@ def plot_encoder_distributions(
             transitions are shown).
         legend_bbox_to_anchor: (x, y) for legend when placed outside (e.g. below when >6 entries). If None and >6 entries, legend is placed below the plot.
         cmap: Matplotlib colormap name for palette (default "tab20").
+        img_format: File extension/format used when saving the figure.
+        dpi: Optional Matplotlib savefig DPI.
         figsize: Figure size (width, height) in inches. If None, uses (max(6, 1.5 * n_groups), 3).
+        return_fig_ax: If True, return ``(fig, axes)`` and leave the figure open for
+            caller-side customization.
+        **kwargs: Forwarded to ``trainer.analyze_encoder`` when ``encoder_df`` is not supplied.
 
     Returns:
         Path to saved plot PDF, or "" if nothing to plot or plot was shown only (no save path).
@@ -92,8 +258,21 @@ def plot_encoder_distributions(
     plt = _require_matplotlib()
     sns = _require_seaborn()
 
+    # Suppress noisy INFO logs from matplotlib's categorical units used when
+    # plotting string labels that are parsable as numbers or dates.
+    import logging
+    for _name in ("matplotlib.category", "matplotlib.units"):
+        logging.getLogger(_name).setLevel(logging.WARNING)
+
 
     run_id = getattr(trainer, "run_id", None)
+    highlight = resolve_highlight_non_convergence(highlight_non_convergence, trainer=trainer)
+    title = resolve_plot_title_with_convergence(
+        title,
+        trainer=trainer,
+        highlight_non_convergence=highlight,
+        default=str(run_id) if run_id else "Encoder distributions",
+    )
 
     if encoder_df is None:
         raise ValueError(
@@ -117,6 +296,62 @@ def plot_encoder_distributions(
         training_transitions.add(f"{training_pair[0]} -> {training_pair[1]}")
         training_transitions.add(f"{training_pair[1]} -> {training_pair[0]}")
 
+    # Map numeric source_id to class name (e.g. 0 -> "positive") when trainer has id2label.
+    trainer_id2label = getattr(trainer, "_id2label", None)
+    config_obj = getattr(trainer, "config", None)
+    config_id2label = getattr(config_obj, "id2label", None) if config_obj is not None else None
+    if not isinstance(trainer_id2label, dict):
+        trainer_id2label = {}
+    if not isinstance(config_id2label, dict):
+        config_id2label = {}
+    id2label = dict(config_id2label)
+    id2label.update(trainer_id2label)
+    if class_label_mapping:
+        id2label.update({k: v for k, v in class_label_mapping.items()})
+
+    def _source_to_display(s):
+        if not id2label or (isinstance(s, float) and s != s):
+            return s
+        try:
+            int_s = int(s)
+            return id2label.get(int_s, id2label.get(str(int_s), id2label.get(s, s)))
+        except (ValueError, TypeError):
+            return id2label.get(s, id2label.get(str(s), s))
+
+    if training_pair and len(training_pair) >= 2:
+        display_pair = [_source_to_display(training_pair[0]), _source_to_display(training_pair[1])]
+        training_transitions = {
+            f"{display_pair[0]} -> {display_pair[1]}",
+            f"{display_pair[1]} -> {display_pair[0]}",
+        }
+
+    df_training_probe = df_all[df_all["type"] == "training"]
+    if (
+        "data_split" in df_training_probe.columns
+        and df_training_probe["data_split"].nunique(dropna=True) > 1
+    ):
+        return _plot_encoder_distributions_by_data_split(
+            df_all,
+            trainer=trainer,
+            _source_to_display=_source_to_display,
+            split_plot_mode=split_plot_mode,
+            neutral_data_split=neutral_data_split,
+            include_neutral=include_neutral,
+            target_and_neutral_only=target_and_neutral_only,
+            training_pair=training_pair,
+            show=show,
+            title=title,
+            run_id=run_id,
+            output=output,
+            output_dir=output_dir,
+            figsize=figsize,
+            img_format=img_format,
+            dpi=dpi,
+            cmap=cmap,
+            return_fig_ax=return_fig_ax,
+            **kwargs,
+        )
+
     plot_rows = []
     df_training = df_all[df_all["type"] == "training"].copy()
     if not df_training.empty:
@@ -137,12 +372,32 @@ def plot_encoder_distributions(
             return None
 
         df_training["side"] = df_training.apply(_assign_side, axis=1)
+        unique_sources = df_training["source_id"].dropna().astype(str).unique()
+        has_identity = (
+            (df_training["source_id"].astype(str) == df_training["target_id"].astype(str)).any()
+        )
+        # Use source-only labels for binary classification (two classes, no identity).
+        # Decision is based only on training data; it does not depend on presence of
+        # neutral data or on n_plot_groups, so behavior is consistent with or without neutral.
+        use_simple_class_labels = (
+            len(unique_sources) == 2 and not has_identity and source_type == "alternative"
+        )
         if source_type == "alternative":
-            df_training["split_label"] = df_training.apply(
-                lambda r: f"{r['source_id']} -> {r['target_id']}", axis=1
-            )
+            if use_simple_class_labels:
+                df_training["split_label"] = df_training["source_id"].astype(str).map(_source_to_display)
+                df_training["hue_label"] = df_training["source_id"].astype(str).map(_source_to_display)
+                df_training["violin_group"] = df_training["split_label"].astype(str)
+                training_transitions = set(df_training["split_label"].dropna().astype(str).unique())
+            else:
+                df_training["split_label"] = df_training.apply(
+                    lambda r: f"{_source_to_display(r['source_id'])} -> {_source_to_display(r['target_id'])}", axis=1
+                )
+                df_training["violin_group"] = df_training["source_id"].map(_source_to_display).astype(str)
+                df_training["hue_label"] = df_training["target_id"].map(_source_to_display).astype(str)
             df_training["is_training_transition"] = df_training["split_label"].isin(training_transitions)
         else:
+            df_training["violin_group"] = df_training["source_id"].map(_source_to_display).astype(str)
+            df_training["hue_label"] = df_training["target_id"].map(_source_to_display).astype(str)
             df_training["is_training_transition"] = df_training["source_id"].isin(training_pair or [])
         plot_rows.append(df_training)
 
@@ -172,6 +427,9 @@ def plot_encoder_distributions(
             return label
         if g == "Neutral":
             return f"Neutral: {label}"
+        # Single class label (e.g. binary classification): show only source, not transition.
+        if g == label:
+            return g
         return f"{g} -> {label}"
 
     df_plot = pd.concat(plot_rows, ignore_index=True)
@@ -179,7 +437,12 @@ def plot_encoder_distributions(
         lambda r: _legend_label(r["violin_group"], r["hue_label"]), axis=1
     )
     if target_and_neutral_only and training_transitions:
-        keep_labels = set(training_transitions) | {
+        present_training_labels = set(
+            df_plot.loc[df_plot["type"] == "training", "legend_label"].dropna().unique().tolist()
+        )
+        matching_training_labels = present_training_labels & set(training_transitions)
+        keep_training_labels = matching_training_labels or present_training_labels
+        keep_labels = set(keep_training_labels) | {
             lbl for lbl in df_plot["legend_label"].dropna().unique().tolist()
             if isinstance(lbl, str) and lbl.startswith("Neutral:")
         }
@@ -189,10 +452,20 @@ def plot_encoder_distributions(
         present_labels = set(df_plot["legend_label"].dropna().unique().tolist())
         missing_labels = [lbl for lbl in flat_labels if lbl not in present_labels]
         if missing_labels:
-            raise ValueError(
-                "legend_group_mapping labels not present in data: %s"
-                % sorted(set(missing_labels))
-            )
+            if ignore_missing_legend_group_labels:
+                legend_group_mapping = {
+                    group: [lbl for lbl in labels if lbl in present_labels]
+                    for group, labels in legend_group_mapping.items()
+                }
+                legend_group_mapping = {
+                    group: labels for group, labels in legend_group_mapping.items() if labels
+                }
+                flat_labels = [lbl for labels in legend_group_mapping.values() for lbl in labels]
+            else:
+                raise ValueError(
+                    "legend_group_mapping labels not present in data: %s"
+                    % sorted(set(missing_labels))
+                )
 
         indices_to_keep: set = set()
         for new_label, legend_labels in legend_group_mapping.items():
@@ -294,7 +567,7 @@ def plot_encoder_distributions(
 
     _use_default_figsize = figsize is None
     _figsize = figsize if figsize is not None else (max(6, 1.5 * len(group_order)), 3)
-    plt.figure(figsize=_figsize)
+    fig = plt.figure(figsize=_figsize)
     ax = sns.violinplot(
         data=df_plot,
         x="x_cat",
@@ -322,12 +595,17 @@ def plot_encoder_distributions(
 
     # Only collapse to source class when the plot has exactly two violin groups
     # (one target pair). With 3+ groups, each violin gets its own color and
-    # the legend shows full transitions. Decision is based on encoder_df so
-    # it respects excluded classes when analysis was restricted.
+    # the legend shows full transitions. Note: with exactly two *labels*
+    # ("A -> B", "B -> A") both get pair_id 0, so n_plot_groups==1 and this
+    # collapse never ran; that case is handled earlier via use_simple_class_labels.
     n_plot_groups = len([g for g in group_order if g != "Neutral"])
 
     def _legend_group_for_half(g: str, side: str) -> str:
         label = group_side_to_label.get((g, side), "")
+        # If the stored label is already a single class name (no " -> "), use it as-is.
+        # Otherwise we'd show "0 -> positive" because g is pair_id ("0") after the violin_group remap.
+        if isinstance(label, str) and label and " -> " not in label and not label.startswith("Neutral:"):
+            return legend_label_to_group.get(label, label)
         raw = _legend_label(g, label)
         # When there are no identity transitions, no explicit grouping/ordering,
         # and only two violin groups in the plot, collapse transition labels
@@ -523,7 +801,7 @@ def plot_encoder_distributions(
             save_kwargs["dpi"] = dpi
         plt.savefig(out_path, **save_kwargs)
         logger.info("Saved encoder distribution plot: %s", out_path)
-    elif not show:
+    elif not show and not return_fig_ax:
         plt.close()
         raise ValueError(
             "No output path or experiment_dir set and show=False. "
@@ -531,5 +809,7 @@ def plot_encoder_distributions(
         )
     if show:
         plt.show()
-    plt.close()
+    if return_fig_ax:
+        return fig, ax
+    plt.close(fig)
     return out_path or ""

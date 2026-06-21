@@ -195,33 +195,42 @@ class GradiendModel(nn.Module):
         *,
         device_encoder: Optional[Union[str, torch.device]] = None,
         device_decoder: Optional[Union[str, torch.device]] = None,
+        torch_dtype: Optional[torch.dtype] = None,
     ) -> "GradiendModel":
         """
         Move encoder and decoder to the requested devices.
 
         - If device_encoder or device_decoder is provided, moves only those submodules.
         - If device is provided (and no split devices), moves both to that device.
+        - If torch_dtype is provided, converts encoder/decoder parameters to that dtype.
         - If device_encoder/device_decoder is None, leaves that submodule's placement unchanged.
         - When encoder/decoder are not yet built (lazy init), only updates target device attributes.
         """
+        if torch_dtype is not None:
+            self.torch_dtype = torch_dtype
         if device_encoder is not None or device_decoder is not None:
             if device_encoder is not None:
                 self.device_encoder = torch.device(device_encoder) if isinstance(device_encoder, str) else device_encoder
                 if self.encoder is not None:
-                    self.encoder.to(self.device_encoder)
+                    self.encoder.to(device=self.device_encoder, dtype=torch_dtype)
             if device_decoder is not None:
                 self.device_decoder = torch.device(device_decoder) if isinstance(device_decoder, str) else device_decoder
                 if self.decoder is not None:
-                    self.decoder.to(self.device_decoder)
+                    self.decoder.to(device=self.device_decoder, dtype=torch_dtype)
             return self
         if device is not None:
             dev = torch.device(device) if isinstance(device, str) else device
             self.device_encoder = dev
             self.device_decoder = dev
             if self.encoder is not None:
-                self.encoder.to(dev)
+                self.encoder.to(device=dev, dtype=torch_dtype)
             if self.decoder is not None:
-                self.decoder.to(dev)
+                self.decoder.to(device=dev, dtype=torch_dtype)
+        elif torch_dtype is not None:
+            if self.encoder is not None:
+                self.encoder.to(dtype=torch_dtype)
+            if self.decoder is not None:
+                self.decoder.to(dtype=torch_dtype)
         return self
 
     def cpu(self) -> "GradiendModel":
@@ -385,12 +394,21 @@ class GradiendModel(nn.Module):
         return idx.tolist()
 
     def _ensure_input(self, x: torch.Tensor):
-        if x.numel() != self.input_dim:
-            raise ValueError(f"Input tensor has incorrect size {x.numel()}, expected {self.input_dim}")
+        if x.dim() == 0:
+            raise ValueError(f"Input tensor must have final dimension {self.input_dim}, got scalar input")
 
-        # check if reshape is needed (e.g., from (input_dim, 1) or (1, input_dim))
-        if x.dim() > 1:
+        if x.dim() == 1:
+            if x.numel() != self.input_dim:
+                raise ValueError(f"Input tensor has incorrect size {x.numel()}, expected {self.input_dim}")
+        elif x.shape[-1] == self.input_dim:
+            pass
+        elif x.numel() == self.input_dim:
+            # Legacy convenience: accept shapes like (input_dim, 1) as one vector.
             x = x.view(-1)
+        else:
+            raise ValueError(
+                f"Input tensor has incorrect shape {tuple(x.shape)}, expected final dimension {self.input_dim}"
+            )
 
         if x.dtype != self.torch_dtype:
             x = x.to(self.torch_dtype)
@@ -421,7 +439,7 @@ class GradiendModel(nn.Module):
                 - encoded: tensor of shape (latent_dim,)
         """
         self._require_built()
-        self._ensure_input(x)
+        x = self._ensure_input(x)
 
         encoded = self.encoder(x)
         if encoded.device != self.device_decoder:

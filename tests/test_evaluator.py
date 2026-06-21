@@ -340,6 +340,33 @@ class TestEncoderEvaluator:
 
 class TestDecoderEvaluator:
     """Test DecoderEvaluator."""
+
+    @staticmethod
+    def _grid_pairs(result):
+        return {
+            key
+            for key in result["grid"].keys()
+            if key != "base"
+        }
+
+    @staticmethod
+    def _default_decoder_lrs():
+        return [
+            m * 10 ** e
+            for e in range(2, -4, -1)
+            for m in [5, 2, 1]
+        ]
+
+    @staticmethod
+    def _capture_rewrite_calls(trainer):
+        calls = []
+
+        def _rewrite(**kwargs):
+            calls.append(kwargs)
+            return trainer._model
+
+        trainer._model.rewrite_base_model = MagicMock(side_effect=_rewrite)
+        return calls
     
     def test_decoder_evaluator_creation(self):
         """Test that DecoderEvaluator can be created."""
@@ -354,17 +381,22 @@ class TestDecoderEvaluator:
         training_args.decoder_eval_max_size_neutral = 100
         trainer = MockTrainer(training_args=training_args)
         trainer._model = MockModelWithGradiend()
-        
-        # Override max_size parameters - test that they're accepted
-        result = evaluator.evaluate_decoder(
+
+        with patch.object(
             trainer,
-            max_size_training_like=50,
-            max_size_neutral=50,
-            feature_factors=[-1.0],
-            lrs=[1e-2]
-        )
-        
-        # Decoder result is flat: "grid" plus summary entries at top level
+            "_get_decoder_eval_dataframe",
+            wraps=trainer._get_decoder_eval_dataframe,
+        ) as mock_get_df:
+            result = evaluator.evaluate_decoder(
+                trainer,
+                max_size_training_like=50,
+                max_size_neutral=50,
+                feature_factors=[-1.0],
+                lrs=[1e-2],
+            )
+
+        assert mock_get_df.call_args.kwargs["max_size_training_like"] == 50
+        assert mock_get_df.call_args.kwargs["max_size_neutral"] == 50
         assert "grid" in result
     
     def test_evaluate_decoder_uses_training_args_when_not_overridden(self):
@@ -375,15 +407,20 @@ class TestDecoderEvaluator:
         training_args.decoder_eval_max_size_neutral = 100
         trainer = MockTrainer(training_args=training_args)
         trainer._model = MockModelWithGradiend()
-        
-        # Don't override parameters - should use TrainingArguments defaults
-        result = evaluator.evaluate_decoder(
+
+        with patch.object(
             trainer,
-            feature_factors=[-1.0],
-            lrs=[1e-2]
-        )
-        
-        # Decoder result is flat: "grid" plus summary entries at top level
+            "_get_decoder_eval_dataframe",
+            wraps=trainer._get_decoder_eval_dataframe,
+        ) as mock_get_df:
+            result = evaluator.evaluate_decoder(
+                trainer,
+                feature_factors=[-1.0],
+                lrs=[1e-2],
+            )
+
+        assert mock_get_df.call_args.kwargs["max_size_training_like"] == 100
+        assert mock_get_df.call_args.kwargs["max_size_neutral"] == 100
         assert "grid" in result
     
     def test_evaluate_decoder_use_cache_overwriting(self):
@@ -394,16 +431,21 @@ class TestDecoderEvaluator:
         trainer = MockTrainer(training_args=training_args)
         trainer.experiment_dir = tempfile.mkdtemp()
         trainer._model = MockModelWithGradiend()
-        
-        # Override use_cache - test that parameter is accepted
-        result = evaluator.evaluate_decoder(
+
+        with patch.object(
             trainer,
-            use_cache=False,
-            feature_factors=[-1.0],
-            lrs=[1e-2]
-        )
-        
-        # Decoder result is flat: "grid" plus summary entries at top level
+            "evaluate_base_model",
+            wraps=trainer.evaluate_base_model,
+        ) as mock_eval:
+            result = evaluator.evaluate_decoder(
+                trainer,
+                use_cache=False,
+                feature_factors=[-1.0],
+                lrs=[1e-2],
+            )
+
+        assert mock_eval.call_args_list
+        assert all(call.kwargs.get("use_cache") is False for call in mock_eval.call_args_list)
         assert "grid" in result
     
     def test_evaluate_decoder_feature_factors_default(self):
@@ -423,69 +465,66 @@ class TestDecoderEvaluator:
         assert factor == 1.0  # Should be -direction["negative"] = -(-1.0) = 1.0
     
     def test_evaluate_decoder_feature_factors_custom(self):
-        """Test that custom feature factors can be provided."""
+        """Test that custom feature factors expand the decoder grid."""
         evaluator = DecoderEvaluator()
         trainer = MockTrainer()
         trainer._model = MockModelWithGradiend()
-        
+
         custom_factors = [0.5, 1.0, 1.5]
-        
+
         result = evaluator.evaluate_decoder(
             trainer,
             feature_factors=custom_factors,
-            lrs=[1e-2]
+            lrs=[1e-2],
         )
-        
-        # Should use custom feature factors
-        assert "grid" in result
+
+        assert self._grid_pairs(result) == {(0.5, 1e-2), (1.0, 1e-2), (1.5, 1e-2)}
     
     def test_evaluate_decoder_lrs_default(self):
         """Test that default learning rates are used when not provided."""
         evaluator = DecoderEvaluator()
         trainer = MockTrainer()
         trainer._model = MockModelWithGradiend()
-        
-        # Don't provide lrs - should use defaults [1e-2, 1e-3, 1e-4, 1e-5]
-        # This creates 4 lrs * 1 feature_factor = 4 pairs to evaluate
+
         result = evaluator.evaluate_decoder(
             trainer,
-            feature_factors=[-1.0]
+            feature_factors=[-1.0],
         )
-        
-        # Decoder result is flat: "grid" plus summary entries at top level
-        assert "grid" in result
+
+        assert self._grid_pairs(result) == {(-1.0, lr) for lr in self._default_decoder_lrs()}
     
     def test_evaluate_decoder_lrs_custom(self):
         """Test that custom learning rates can be provided."""
         evaluator = DecoderEvaluator()
         trainer = MockTrainer()
         trainer._model = MockModelWithGradiend()
-        
+
         custom_lrs = [1e-1, 1e-2]
-        
+
         result = evaluator.evaluate_decoder(
             trainer,
             feature_factors=[-1.0],
-            lrs=custom_lrs
+            lrs=custom_lrs,
         )
-        
-        # Should use custom learning rates
-        assert "grid" in result
+
+        assert self._grid_pairs(result) == {(-1.0, 1e-1), (-1.0, 1e-2)}
     
     def test_evaluate_decoder_part_parameter(self):
         """Test that part parameter is passed correctly."""
         evaluator = DecoderEvaluator()
         trainer = MockTrainer()
         trainer._model = MockModelWithGradiend()
-        
+        rewrite_calls = self._capture_rewrite_calls(trainer)
+
         result = evaluator.evaluate_decoder(
             trainer,
             feature_factors=[-1.0],
             lrs=[1e-2],
-            part="decoder-weight"
+            part="decoder-weight",
         )
-        
-        # Should accept part parameter
+
+        assert rewrite_calls
+        assert all(call["part"] == "decoder-weight" for call in rewrite_calls)
         assert "grid" in result
     
     def test_evaluate_decoder_eval_batch_size(self):
@@ -493,15 +532,21 @@ class TestDecoderEvaluator:
         evaluator = DecoderEvaluator()
         trainer = MockTrainer()
         trainer._model = MockModelWithGradiend()
-        
-        result = evaluator.evaluate_decoder(
+
+        with patch.object(
             trainer,
-            feature_factors=[-1.0],
-            lrs=[1e-2],
-            eval_batch_size=32
-        )
-        
-        # Should accept eval_batch_size parameter
+            "evaluate_base_model",
+            wraps=trainer.evaluate_base_model,
+        ) as mock_eval:
+            result = evaluator.evaluate_decoder(
+                trainer,
+                feature_factors=[-1.0],
+                lrs=[1e-2],
+                eval_batch_size=32,
+            )
+
+        assert mock_eval.call_args_list
+        assert all(call.kwargs.get("eval_batch_size") == 32 for call in mock_eval.call_args_list)
         assert "grid" in result
 
     def test_default_decoder_feature_factors_fallback_to_config(self):

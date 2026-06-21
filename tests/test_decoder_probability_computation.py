@@ -1,209 +1,217 @@
 """
 Tests for decoder probability computation in evaluate_base_model.
 
-Tests that probabilities are correctly computed for target classes,
-with proper handling of counterfactual evaluation and multiple tokens per class.
+All data is built in-memory. The tests intentionally avoid external datasets or
+files so they remain stable across local and CI environments.
 """
 
-import pytest
 import pandas as pd
-import torch
-from unittest.mock import MagicMock, patch, Mock
-from typing import Dict, Any
+import pytest
 
-from gradiend.trainer.text.prediction.trainer import TextPredictionTrainer, TextPredictionConfig
-from gradiend.trainer.text.prediction.decoder_eval_utils import evaluate_probability_shift_score
+from gradiend.trainer.text.prediction.prediction_objective import PredictionObjective
+from gradiend.trainer.text.prediction.trainer import TextPredictionConfig, TextPredictionTrainer
 from tests.conftest import MockTokenizer, SimpleMockModel
 
 
-class TestEvaluateBaseModelProbabilityComputation:
-    """Test probability computation in evaluate_base_model."""
-    
-    def test_evaluate_base_model_returns_probs_dict(self):
-        """Test that evaluate_base_model returns probs dict with target class probabilities."""
-        # Create trainer with minimal config
-        config = TextPredictionConfig(
-            data=pd.DataFrame([
-                {"masked": "[MASK] here", "split": "train", "label_class": "3SG", "label": "he"},
-                {"masked": "[MASK] there", "split": "train", "label_class": "3PL", "label": "they"},
-            ]),
-            target_classes=["3SG", "3PL"],
-            decoder_eval_targets={
-                "3SG": ["he", "He"],
-                "3PL": ["they", "They"],
-            },
-            masked_col="masked",
-        )
-        trainer = TextPredictionTrainer(model="bert-base-uncased", config=config)
-        trainer._ensure_data()
-        
-        # Mock model and tokenizer
-        model = SimpleMockModel()
-        tokenizer = MockTokenizer()
-        
-        # Create training_like_df with alternative_id for counterfactual evaluation
-        training_like_df = pd.DataFrame([
+def _with_required_splits(rows):
+    """Replicate tiny rows over train/validation/test, as current trainer validation requires all three."""
+    out = []
+    for split in ("train", "validation", "test"):
+        for row in rows:
+            copied = dict(row)
+            copied["split"] = split
+            out.append(copied)
+    return pd.DataFrame(out)
+
+
+def _two_class_data(left="3SG", right="3PL", left_token="he", right_token="they"):
+    return _with_required_splits(
+        [
             {
                 "masked": "[MASK] here",
-                "label_class": "3SG",
-                "label": "he",
-                "alternative_id": "3PL",  # Counterfactual: 3SG data evaluated for 3PL
+                "label_class": left,
+                "label": left_token,
+                "alternative_class": right,
+                "alternative": right_token,
             },
             {
                 "masked": "[MASK] there",
-                "label_class": "3PL",
-                "label": "they",
-                "alternative_id": "3SG",  # Counterfactual: 3PL data evaluated for 3SG
+                "label_class": right,
+                "label": right_token,
+                "alternative_class": left,
+                "alternative": left_token,
             },
-        ])
-        
-        neutral_df = pd.DataFrame([{"text": "neutral text"}])
-        
-        # Mock evaluate_probability_shift_score to return nested structure
-        with patch('gradiend.trainer.text.prediction.trainer.evaluate_probability_shift_score') as mock_eval:
-            mock_eval.return_value = {
+        ]
+    )
+
+
+def _trainer(config):
+    trainer = TextPredictionTrainer(model="bert-base-uncased", config=config)
+    trainer._ensure_data()
+    return trainer
+
+
+class TestEvaluateBaseModelProbabilityComputation:
+    def test_evaluate_base_model_returns_probs_dict(self, monkeypatch):
+        config = TextPredictionConfig(
+            data=_two_class_data(),
+            target_classes=["3SG", "3PL"],
+            decoder_eval_targets={"3SG": ["he", "He"], "3PL": ["they", "They"]},
+            masked_col="masked",
+        )
+        trainer = _trainer(config)
+
+        calls = {}
+
+        def fake_score(self, *args, **kwargs):
+            calls["score_kwargs"] = kwargs
+            return {
                 "3SG": {"3SG": 0.8, "3PL": 0.2},
                 "3PL": {"3SG": 0.7, "3PL": 0.3},
             }
-            
-            with patch('gradiend.trainer.text.prediction.trainer.compute_lms') as mock_lms:
-                mock_lms.return_value = {"lms": 0.5}
-                
-                result = trainer.evaluate_base_model(
-                    model=model,
-                    tokenizer=tokenizer,
-                    training_like_df=training_like_df,
-                    neutral_df=neutral_df,
-                    use_cache=False,
-                )
-        
-        # Verify structure
-        assert "probs" in result
-        assert "lms" in result
-        
-        # Verify probs dict contains target classes
-        assert isinstance(result["probs"], dict)
-        assert "3SG" in result["probs"]
-        assert "3PL" in result["probs"]
-        
-        # Counterfactual: probs["3SG"] = P(3PL) on 3SG, probs["3PL"] = P(3SG) on 3PL
-        assert result["probs"]["3SG"] == 0.2
-        assert result["probs"]["3PL"] == 0.7
-        
-        # Verify LMS structure
-        assert isinstance(result["lms"], dict)
-    
-    def test_evaluate_base_model_counterfactual_evaluation(self):
-        """Test that counterfactual evaluation filters correctly when decoder_eval_prob_on_other_class=True."""
+
+        monkeypatch.setattr(PredictionObjective, "score_probability_shift", fake_score)
+        monkeypatch.setattr(PredictionObjective, "compute_lms", lambda *args, **kwargs: {"lms": 0.5})
+
+        result = trainer.evaluate_base_model(
+            model=SimpleMockModel(),
+            tokenizer=MockTokenizer(),
+            training_like_df=pd.DataFrame(
+                [
+                    {"masked": "[MASK] here", "label_class": "3SG", "alternative_id": "3PL"},
+                    {"masked": "[MASK] there", "label_class": "3PL", "alternative_id": "3SG"},
+                ]
+            ),
+            neutral_df=pd.DataFrame([{"text": "neutral text"}]),
+            use_cache=False,
+        )
+
+        assert result["probs"] == {"3SG": 0.2, "3PL": 0.7}
+        assert result["lms"] == {"lms": 0.5}
+        assert calls["score_kwargs"]["dataset_class_col"] == "label_class"
+
+    def test_evaluate_base_model_counterfactual_evaluation(self, monkeypatch):
         config = TextPredictionConfig(
-            data=pd.DataFrame([
-                {"masked": "[MASK] here", "split": "train", "label_class": "3SG", "label": "he"},
-                {"masked": "[MASK] there", "split": "train", "label_class": "3PL", "label": "they"},
-            ]),
+            data=_two_class_data(),
             target_classes=["3SG", "3PL"],
-            decoder_eval_targets={
-                "3SG": ["he"],
-                "3PL": ["they"],
-            },
-            decoder_eval_prob_on_other_class=True,  # Enable counterfactual evaluation
+            decoder_eval_targets={"3SG": ["he"], "3PL": ["they"]},
+            decoder_eval_prob_on_other_class=True,
             masked_col="masked",
         )
-        trainer = TextPredictionTrainer(model="bert-base-uncased", config=config)
-        trainer._ensure_data()
-        
-        model = SimpleMockModel()
-        tokenizer = MockTokenizer()
-        
-        # Create training_like_df with alternative_id
-        training_like_df = pd.DataFrame([
-            {
-                "masked": "[MASK] here",
-                "label_class": "3SG",
-                "alternative_id": "3PL",  # This row belongs to 3SG dataset
-            },
-            {
-                "masked": "[MASK] there",
-                "label_class": "3PL",
-                "alternative_id": "3SG",  # This row belongs to 3PL dataset
-            },
-        ])
-        
-        neutral_df = pd.DataFrame([{"text": "neutral_data"}])
-        
-        # Track calls to evaluate_probability_shift_score
-        with patch('gradiend.trainer.text.prediction.trainer.evaluate_probability_shift_score') as mock_eval:
-            mock_eval.return_value = {"3SG": {"3SG": 0.8, "3PL": 0.2}, "3PL": {"3SG": 0.6, "3PL": 0.4}}
-            
-            with patch('gradiend.trainer.text.prediction.trainer.compute_lms') as mock_lms:
-                mock_lms.return_value = {"lms": 0.5}
-                
-                result = trainer.evaluate_base_model(
-                    model=model,
-                    tokenizer=tokenizer,
-                    training_like_df=training_like_df,
-                    neutral_df=neutral_df,
-                    use_cache=False,
-                )
-            
-            # Verify evaluate_probability_shift_score was called with dataset_class_col
-            mock_eval.assert_called_once()
-            call_kwargs = mock_eval.call_args[1]
-            assert call_kwargs["dataset_class_col"] == "label_class"  # From training_like_df columns
-    
-    def test_evaluate_base_model_multiple_tokens_per_class(self):
-        """Test that multiple tokens per class are correctly summed."""
+        trainer = _trainer(config)
+
+        monkeypatch.setattr(
+            PredictionObjective,
+            "score_probability_shift",
+            lambda *args, **kwargs: {"3SG": {"3SG": 0.8, "3PL": 0.2}, "3PL": {"3SG": 0.6, "3PL": 0.4}},
+        )
+        monkeypatch.setattr(PredictionObjective, "compute_lms", lambda *args, **kwargs: {"lms": 0.5})
+
+        result = trainer.evaluate_base_model(
+            model=SimpleMockModel(),
+            tokenizer=MockTokenizer(),
+            training_like_df=pd.DataFrame(
+                [
+                    {"masked": "[MASK] here", "label_class": "3SG", "alternative_id": "3PL"},
+                    {"masked": "[MASK] there", "label_class": "3PL", "alternative_id": "3SG"},
+                ]
+            ),
+            neutral_df=pd.DataFrame([{"text": "neutral_data"}]),
+            use_cache=False,
+        )
+
+        assert result["probs"]["3SG"] == 0.2
+        assert result["probs"]["3PL"] == 0.6
+
+    def test_evaluate_base_model_multiple_tokens_per_class(self, monkeypatch):
         config = TextPredictionConfig(
-            data=pd.DataFrame([
-                {"masked": "[MASK] here", "split": "train", "label_class": "masc_nom", "label": "der"},
-                {"masked": "[MASK] there", "split": "train", "label_class": "fem_nom", "label": "die"},
-            ]),
+            data=_two_class_data("masc_nom", "fem_nom", "der", "die"),
             target_classes=["masc_nom", "fem_nom"],
-            decoder_eval_targets={
-                "masc_nom": ["der", "Der"],  # Multiple tokens per class
-                "fem_nom": ["die", "Die"],   # Multiple tokens per class
-            },
+            decoder_eval_targets={"masc_nom": ["der", "Der"], "fem_nom": ["die", "Die"]},
             masked_col="masked",
         )
-        trainer = TextPredictionTrainer(model="bert-base-uncased", config=config)
-        trainer._ensure_data()
-        
-        model = SimpleMockModel()
-        tokenizer = MockTokenizer()
-        
-        training_like_df = pd.DataFrame([
-            {"masked": "[MASK] here", "label_class": "masc_nom", "alternative_id": "fem_nom"},
-            {"masked": "[MASK] there", "label_class": "fem_nom", "alternative_id": "masc_nom"},
-        ])
-        
-        neutral_df = pd.DataFrame([{"text": "neutral_data"}])
-        
-        # Mock evaluate_probability_shift_score - returns nested structure
-        with patch('gradiend.trainer.text.prediction.trainer.evaluate_probability_shift_score') as mock_eval:
-            mock_eval.return_value = {
+        trainer = _trainer(config)
+        calls = {}
+
+        def fake_score(self, *args, **kwargs):
+            calls["targets"] = kwargs["targets"]
+            return {
                 "masc_nom": {"masc_nom": 0.8, "fem_nom": 0.2},
                 "fem_nom": {"masc_nom": 0.2, "fem_nom": 0.8},
             }
-            
-            with patch('gradiend.trainer.text.prediction.trainer.compute_lms') as mock_lms:
-                mock_lms.return_value = {"lms": 0.5}
-                
-                result = trainer.evaluate_base_model(
-                    model=model,
-                    tokenizer=tokenizer,
-                    training_like_df=training_like_df,
-                    neutral_df=neutral_df,
-                    use_cache=False,
-                )
-            
-            # Verify that evaluate_probability_shift_score received targets with multiple tokens
-            mock_eval.assert_called_once()
-            call_kwargs = mock_eval.call_args[1]
-            targets = call_kwargs["targets"]
-            assert "masc_nom" in targets
-            assert "fem_nom" in targets
-            assert len(targets["masc_nom"]) == 2  # Should have 2 tokens
-            assert len(targets["fem_nom"]) == 2   # Should have 2 tokens
-            
-            # Counterfactual: probs["masc_nom"] = P(fem_nom) on masc_nom = 0.2; probs["fem_nom"] = P(masc_nom) on fem_nom = 0.2
-            assert result["probs"]["masc_nom"] == 0.2
-            assert result["probs"]["fem_nom"] == 0.2
+
+        monkeypatch.setattr(PredictionObjective, "score_probability_shift", fake_score)
+        monkeypatch.setattr(PredictionObjective, "compute_lms", lambda *args, **kwargs: {"lms": 0.5})
+
+        result = trainer.evaluate_base_model(
+            model=SimpleMockModel(),
+            tokenizer=MockTokenizer(),
+            training_like_df=pd.DataFrame(
+                [
+                    {"masked": "[MASK] here", "label_class": "masc_nom", "alternative_id": "fem_nom"},
+                    {"masked": "[MASK] there", "label_class": "fem_nom", "alternative_id": "masc_nom"},
+                ]
+            ),
+            neutral_df=pd.DataFrame([{"text": "neutral_data"}]),
+            use_cache=False,
+        )
+
+        assert calls["targets"] == {"masc_nom": ["der", "Der"], "fem_nom": ["die", "Die"]}
+        assert result["probs"] == {"masc_nom": 0.2, "fem_nom": 0.2}
+
+    def test_explicit_decoder_targets_with_overlap_warns_not_errors(self):
+        config = TextPredictionConfig(
+            data=_two_class_data("C1", "C2", "x", "y"),
+            target_classes=["C1", "C2"],
+            decoder_eval_targets={"C1": ["x", "+"], "C2": ["+", "y"]},
+            masked_col="masked",
+        )
+        trainer = _trainer(config)
+
+        normalized = trainer._validate_explicit_decoder_eval_targets(config.decoder_eval_targets)
+
+        assert normalized["C1"] == ["x", "+"]
+        assert normalized["C2"] == ["+", "y"]
+
+    def test_explicit_decoder_targets_invalid_class_key_raises(self):
+        config = TextPredictionConfig(
+            data=_two_class_data("REAL", "OTHER", "x", "z"),
+            target_classes=["REAL", "OTHER"],
+            decoder_eval_targets={"REAL": ["x"], "TYPO": ["y"]},
+            masked_col="masked",
+        )
+        trainer = _trainer(config)
+
+        with pytest.raises(ValueError) as exc_info:
+            trainer._validate_explicit_decoder_eval_targets(config.decoder_eval_targets)
+
+        assert "TYPO" in str(exc_info.value)
+        assert "REAL" in str(exc_info.value) or "known classes" in str(exc_info.value)
+
+    def test_resolve_decoder_eval_targets_returns_tuple(self):
+        config = TextPredictionConfig(
+            data=_two_class_data("C1", "C2", "x", "y"),
+            target_classes=["C1", "C2"],
+            decoder_eval_targets={"C1": ["t1"], "C2": ["t2"]},
+            masked_col="masked",
+        )
+        trainer = _trainer(config)
+
+        targets, use_row_wise = trainer._resolve_decoder_eval_targets(training_like_df=None)
+
+        assert use_row_wise is False
+        assert targets == {"C1": ["t1"], "C2": ["t2"]}
+
+    def test_decoder_eval_targets_label_uses_row_wise_mode(self):
+        config = TextPredictionConfig(
+            data=_two_class_data("commutative", "non-commutative", "=", "!="),
+            target_classes=["commutative", "non-commutative"],
+            decoder_eval_targets="label",
+            masked_col="masked",
+        )
+        trainer = _trainer(config)
+
+        targets, use_row_wise = trainer._resolve_decoder_eval_targets(training_like_df=None)
+
+        assert targets is None
+        assert use_row_wise is True

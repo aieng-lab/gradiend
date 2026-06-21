@@ -39,6 +39,18 @@ class _MinimalHFModel(nn.Module):
         self.base_model = _MinimalBackbone(dim=dim)
 
 
+class _MinimalMultimodalHFModel(nn.Module):
+    """HF-style multimodal model with text and vision towers under the backbone."""
+
+    base_model_prefix = "model"
+
+    def __init__(self, dim=4):
+        super().__init__()
+        self.model = nn.Module()
+        self.model.language_model = _MinimalBackbone(dim=dim)
+        self.model.vision_tower = _MinimalBackbone(dim=dim)
+
+
 class TestFilterParamsByInclude:
     """Test _filter_params_by_include (exact and wildcard matching)."""
 
@@ -107,6 +119,28 @@ class TestNormalizeParamMapArg:
 
 class TestBuildGradiendFromBaseModelParams:
     """Test build_gradiend_from_base_model with params and param_map (layer selection)."""
+
+    def test_multimodal_backbone_prefers_language_model(self):
+        """Text-only GRADIEND should not include vision tower parameters."""
+        model = _MinimalMultimodalHFModel(dim=4)
+
+        backbone = get_backbone_module(model)
+        assert backbone is model.model.language_model
+
+        core, excluded = split_backbone_vs_head_params(model)
+        assert list(core.keys()) == [
+            "model.language_model.layer0.weight",
+            "model.language_model.layer0.bias",
+            "model.language_model.layer1.weight",
+            "model.language_model.layer1.bias",
+        ]
+        assert all(item["name"].startswith("model.vision_tower.") for item in excluded)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            gradiend = build_gradiend_from_base_model(model, tmpdir, latent_dim=1)
+
+        assert list(gradiend.param_map.keys()) == list(core.keys())
+        assert not any("vision_tower" in name for name in gradiend.param_map)
 
     def test_build_with_params_restricts_to_matching_layers(self):
         """params list filters backbone to matching parameter names (wildcards)."""

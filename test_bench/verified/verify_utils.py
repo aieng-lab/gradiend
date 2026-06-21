@@ -23,6 +23,7 @@ BENCH_TRAIN_CONFIG = dict(
     target="diff",
     eval_batch_size=8,
     learning_rate=1e-5,
+    fail_on_non_convergence=True,
 )
 
 # Config with pre/post pruning (for efficiency); use as much as possible per user request.

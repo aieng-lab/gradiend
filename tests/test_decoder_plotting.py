@@ -194,36 +194,72 @@ class TestPlotProbabilityShifts:
     def test_evaluate_base_model_counterfactual_p_other_on_metric_dataset(self):
         """Trainer produces probs[class] = P(other) on target_class dataset for selection."""
         pytest.importorskip("matplotlib")
+        from gradiend import TrainingArguments
         from gradiend.trainer.text.prediction.trainer import TextPredictionTrainer, TextPredictionConfig
 
         config = TextPredictionConfig(
             data=__import__("pandas").DataFrame([
-                {"masked": "[MASK] here", "split": "train", "label_class": "3SG", "label": "he"},
-                {"masked": "[MASK] there", "split": "train", "label_class": "3PL", "label": "they"},
+                {
+                    "masked": "[MASK] here",
+                    "split": "train",
+                    "label_class": "3SG",
+                    "label": "he",
+                    "alternative_class": "3PL",
+                    "alternative": "they",
+                },
+                {
+                    "masked": "[MASK] there",
+                    "split": "train",
+                    "label_class": "3PL",
+                    "label": "they",
+                    "alternative_class": "3SG",
+                    "alternative": "he",
+                },
             ]),
             target_classes=["3SG", "3PL"],
             decoder_eval_targets={"3SG": ["he"], "3PL": ["they"]},
             decoder_eval_prob_on_other_class=True,
             masked_col="masked",
         )
-        trainer = TextPredictionTrainer(model="bert-base-uncased", config=config)
+        trainer = TextPredictionTrainer(
+            model="bert-base-uncased",
+            config=config,
+            args=TrainingArguments(do_eval=False, experiment_dir=None),
+        )
         trainer._ensure_data()
 
         # probs_by_dataset[3PL][3SG] = P(3SG) on 3PL data
         # So probs["3PL"] should equal that (counterfactual for metric 3PL)
-        with patch("gradiend.trainer.text.prediction.trainer.evaluate_probability_shift_score") as mock_eval:
+        with patch(
+            "gradiend.trainer.text.prediction.prediction_objective.PredictionObjective.score_probability_shift"
+        ) as mock_eval:
             mock_eval.return_value = {
                 "3SG": {"3SG": 0.8, "3PL": 0.2},
                 "3PL": {"3SG": 0.3, "3PL": 0.7},
             }
-            with patch("gradiend.trainer.text.prediction.trainer.compute_lms", return_value={"lms": 0.5}):
+            with patch(
+                "gradiend.trainer.text.prediction.prediction_objective.PredictionObjective.compute_lms",
+                return_value={"lms": 0.5},
+            ):
                 from tests.conftest import SimpleMockModel, MockTokenizer
                 result = trainer.evaluate_base_model(
                     model=SimpleMockModel(),
                     tokenizer=MockTokenizer(),
                     training_like_df=__import__("pandas").DataFrame([
-                        {"masked": "x", "label_class": "3SG", "alternative_id": "3PL"},
-                        {"masked": "y", "label_class": "3PL", "alternative_id": "3SG"},
+                        {
+                            "masked": "x",
+                            "label_class": "3SG",
+                            "label": "he",
+                            "alternative_class": "3PL",
+                            "alternative": "they",
+                        },
+                        {
+                            "masked": "y",
+                            "label_class": "3PL",
+                            "label": "they",
+                            "alternative_class": "3SG",
+                            "alternative": "he",
+                        },
                     ]),
                     neutral_df=__import__("pandas").DataFrame([{"text": "z"}]),
                     use_cache=False,

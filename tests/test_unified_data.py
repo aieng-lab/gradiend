@@ -8,14 +8,15 @@ import pytest
 
 HAS_DATASETS = importlib.util.find_spec("datasets") is not None
 
-from gradiend.trainer.text.prediction.unified_data import (
+from gradiend.trainer.core.unified_data import (
     _load_dataframe_from_path,
     apply_factual_casing,
     merged_to_unified,
     per_class_dict_to_unified,
     resolve_dataframe,
+    resolve_training_data_path,
 )
-from gradiend.trainer.text.prediction.unified_schema import (
+from gradiend.trainer.core.unified_schema import (
     UNIFIED_ALTERNATIVE,
     UNIFIED_ALTERNATIVE_CLASS,
     UNIFIED_FACTUAL,
@@ -85,6 +86,57 @@ class TestResolveDataframe:
             assert out is None or isinstance(out, pd.DataFrame)
         except Exception:
             pass  # 404 / auth / etc. is acceptable
+
+
+class TestResolveTrainingDataPath:
+    """resolve_training_data_path loads from files or data directories."""
+
+    def _training_df(self):
+        return pd.DataFrame({
+            "masked": ["[MASK] here", "[MASK] there"],
+            "split": ["train", "train"],
+            "label_class": ["3SG", "3PL"],
+            "label": ["he", "they"],
+        })
+
+    def test_file_path_csv(self, tmp_path):
+        path = tmp_path / "training.csv"
+        self._training_df().to_csv(path, index=False)
+        out = resolve_training_data_path(path)
+        assert len(out) == 2
+        assert list(out["label_class"]) == ["3SG", "3PL"]
+
+    def test_file_path_parquet(self, tmp_path):
+        pytest.importorskip("pyarrow")
+        path = tmp_path / "training.parquet"
+        self._training_df().to_parquet(path, index=False)
+        out = resolve_training_data_path(path)
+        assert len(out) == 2
+
+    def test_directory_loads_training_csv(self, tmp_path):
+        self._training_df().to_csv(tmp_path / "training.csv", index=False)
+        out = resolve_training_data_path(tmp_path)
+        assert len(out) == 2
+
+    def test_directory_loads_training_parquet_when_no_csv(self, tmp_path):
+        pytest.importorskip("pyarrow")
+        self._training_df().to_parquet(tmp_path / "training.parquet", index=False)
+        out = resolve_training_data_path(tmp_path)
+        assert len(out) == 2
+
+    def test_directory_without_training_file_raises(self, tmp_path):
+        with pytest.raises(FileNotFoundError, match=r"training\.csv or training\.parquet"):
+            resolve_training_data_path(tmp_path)
+
+    def test_missing_file_path_raises(self, tmp_path):
+        missing = tmp_path / "training.csv"
+        with pytest.raises(FileNotFoundError, match="does not exist"):
+            resolve_training_data_path(missing)
+
+    def test_custom_training_basename(self, tmp_path):
+        self._training_df().to_csv(tmp_path / "custom_train.csv", index=False)
+        out = resolve_training_data_path(tmp_path, training_basename="custom_train")
+        assert len(out) == 2
 
 
 class TestApplyFactualCasing:

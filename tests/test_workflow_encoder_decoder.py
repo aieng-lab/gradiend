@@ -64,10 +64,13 @@ def test_standard_workflow_mlm_train_encoder_decoder(use_pre_prune):
             TextFilterConfig(targets=["he", "she", "it"], id="3SG"),
             TextFilterConfig(targets=["they"], id="3PL"),
         ],
+        min_left_context_words=0,
     )
     training = creator.generate_training_data(
         max_size_per_class=15,
         min_rows_per_class_for_split=0,
+        val_ratio=0.0,
+        test_ratio=0.2,
     )
     neutral = creator.generate_neutral_data(
         additional_excluded_words=["i", "we", "you", "he", "she", "it", "they"],

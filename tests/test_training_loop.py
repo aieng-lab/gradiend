@@ -6,6 +6,7 @@ Tests basic training flow, seed handling, and parameter passing/overwriting.
 
 import os
 import tempfile
+from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 from typing import Dict, Any
 
@@ -13,10 +14,16 @@ import pytest
 import torch
 import torch.nn as nn
 
-from gradiend.trainer.core.training import train
+from gradiend.trainer.core.training import format_non_convergence_error, train
 from gradiend.trainer.core.arguments import TrainingArguments
 from gradiend.trainer.core.dataset import GradientTrainingDataset
+from gradiend.trainer.core.stats import (
+    _best_checkpoint_step_is_after_initial,
+    _best_step_target_class_mean_product,
+    load_training_stats,
+)
 from gradiend.model import GradiendModel
+from gradiend.trainer.trainer import Trainer
 from tests.conftest import SimpleMockModel, MockTokenizer, set_seed
 
 
@@ -49,6 +56,10 @@ class MockModelWithGradiend:
         """Create output dir so training loop and tests can assume path exists."""
         os.makedirs(save_directory, exist_ok=True)
 
+    @contextmanager
+    def exclusive_base_gradient_access(self):
+        yield
+
 
 class MockTrainingData:
     """Mock training dataset."""
@@ -64,8 +75,174 @@ class MockTrainingData:
         return self.items[idx]
 
 
+class TestNonConvergenceErrorMessage:
+    def test_formatter_includes_gradiend_identity_and_seed_details(self):
+        args = TrainingArguments(
+            fail_on_non_convergence=True,
+            min_convergent_seeds=2,
+            convergent_metric="correlation",
+            convergent_score_threshold=0.8,
+            output_dir="runs/example/gradiend_a",
+        )
+        message = format_non_convergence_error(
+            actual=1,
+            min_required=2,
+            training_args=args,
+            run_id="sentiment_positive_negative",
+            model="bert-base-cased",
+            pair=("positive", "negative"),
+            seed_report=[
+                {
+                    "seed": 42,
+                    "converged": True,
+                    "convergence_metric_value": 0.83,
+                    "best_checkpoint_global_step": 100,
+                    "output_dir": "runs/example/seeds/seed_42",
+                },
+                {
+                    "seed": 43,
+                    "converged": False,
+                    "convergence_metric_value": 0.73,
+                    "best_checkpoint_global_step": 100,
+                    "output_dir": "runs/example/seeds/seed_43",
+                },
+            ],
+        )
+
+        assert "GRADIEND 'sentiment_positive_negative'" in message
+        assert "model: bert-base-cased" in message
+        assert "target pair: ('positive', 'negative')" in message
+        assert "convergence metric: correlation (threshold=0.8)" in message
+        assert "seed 43: converged=False, value=0.73" in message
+
+    def test_trainer_non_convergence_failure_uses_informative_message(self):
+        args = TrainingArguments(
+            fail_on_non_convergence=True,
+            min_convergent_seeds=2,
+            convergent_metric="correlation",
+            convergent_score_threshold=0.8,
+        )
+        with pytest.raises(RuntimeError) as excinfo:
+            Trainer._maybe_fail_on_non_convergence(
+                args,
+                convergent_count=1,
+                min_convergent=2,
+                run_id="gender_de_der_die",
+                model="google-bert/bert-base-multilingual-cased",
+                pair=("der", "die"),
+                output_dir="runs/gender_de_der_die",
+                seed_report=[
+                    {
+                        "seed": 7,
+                        "converged": False,
+                        "convergence_metric_value": 0.73262,
+                        "best_checkpoint_global_step": 150,
+                    }
+                ],
+                convergence_metric="correlation",
+                threshold=0.8,
+            )
+
+        message = str(excinfo.value)
+        assert "GRADIEND 'gender_de_der_die'" in message
+        assert "only 1 seed(s) converged, but 2 are required" in message
+        assert "seed 7: converged=False, value=0.73262" in message
+
+    def test_core_train_does_not_fail_inner_seed_when_multi_seed_not_exhausted(self, temp_dir, set_seed):
+        set_seed(42)
+        model = MockModelWithGradiend()
+        dataloader = TestFinalStepEvaluation._make_dataloader(num_samples=4)
+        training_args = TrainingArguments(
+            output_dir=temp_dir,
+            max_steps=1,
+            eval_steps=1,
+            num_train_epochs=1,
+            train_batch_size=1,
+            evaluate_fn=lambda **kwargs: {"correlation": 0.75},
+            convergent_score_threshold=0.5,
+            fail_on_non_convergence=True,
+            max_seeds=10,
+            min_convergent_seeds=2,
+        )
+
+        train(
+            model_with_gradiend=model,
+            data=dataloader,
+            training_args=training_args,
+        )
+
+        stats = load_training_stats(temp_dir)
+        assert stats["convergence_info"]["convergent_count"] == 0
+        assert stats["convergence_info"]["min_convergent_seeds"] == 2
+
+
 class TestTrainingLoop:
     """Test basic training loop functionality."""
+
+    def test_gradient_dataset_separates_base_and_gradiend_batching(self):
+        """Internal base batches should become stacked GRADIEND batches."""
+        training_data = MockTrainingData(
+            [
+                {
+                    "factual": {"input_ids": torch.arange(2 + (i % 2))},
+                    "alternative": {"input_ids": torch.arange(3 + (i % 2))},
+                    "label": float(i),
+                }
+                for i in range(8)
+            ],
+            batch_size=2,
+        )
+
+        seen_base_shapes = []
+
+        def gradient_creator(inputs):
+            seen_base_shapes.append(tuple(inputs["input_ids"].shape))
+            return torch.ones(100)
+
+        dataset = GradientTrainingDataset(
+            training_data=training_data,
+            gradient_creator=gradient_creator,
+            source="factual",
+            target="diff",
+        )
+
+        from torch.utils.data import DataLoader
+
+        batch = next(iter(DataLoader(dataset, batch_size=2)))
+
+        assert batch["source"].shape == (2, 100)
+        assert batch["target"].shape == (2, 100)
+        assert "factual" not in batch
+        assert "alternative" not in batch
+        assert len(seen_base_shapes) == 4  # factual+alternative for two GRADIEND rows
+        assert all(shape[0] == 2 for shape in seen_base_shapes)
+
+    def test_precomputed_training_dataset_matches_wrapped_dataset(self):
+        """Precomputed wrapper should yield the same rows in the same order."""
+        from gradiend.trainer.core.dataset import PreComputedTrainingDataset
+
+        class NumberDataset:
+            def __len__(self):
+                return 5
+
+            def __getitem__(self, index):
+                return {
+                    "source": torch.tensor([float(index)]),
+                    "target": torch.tensor([float(-index)]),
+                }
+
+        wrapped = PreComputedTrainingDataset(NumberDataset(), buffer_size=2)
+        rows = list(wrapped)
+
+        assert len(wrapped) == 5
+        assert [float(row["source"].item()) for row in rows] == [0, 1, 2, 3, 4]
+        assert [float(row["target"].item()) for row in rows] == [0, -1, -2, -3, -4]
+
+        from torch.utils.data import DataLoader
+
+        batch = next(iter(DataLoader(wrapped, batch_size=2)))
+        assert batch["source"].shape == (2, 1)
+        assert batch["target"].shape == (2, 1)
     
     def test_train_basic_flow(self, temp_dir, set_seed):
         """Test that basic training flow works."""
@@ -163,67 +340,54 @@ class TestTrainingLoop:
             training_args=training_args,
             learning_rate=1e-3  # Override
         )
-        
-        # Verify override worked (check that training used the overridden value)
-        # The training_args object should have been updated
+
+        stats = load_training_stats(temp_dir)
+        assert stats["training_args"]["learning_rate"] == pytest.approx(1e-3)
         assert isinstance(output_path, str)
     
-    def test_train_seed_handling(self, temp_dir):
-        """Test that seed is handled correctly during training."""
-        model1 = MockModelWithGradiend()
-        model2 = MockModelWithGradiend()
-        
-        training_data = MockTrainingData([
-            {
-                "factual": torch.randn(10),
-                "alternative": torch.randn(10),
-                "label": 1.0
-            }
-        ] * 5)
-        
-        def gradient_creator(inputs):
-            return torch.randn(100)
-        
-        dataset = GradientTrainingDataset(
-            training_data=training_data,
-            gradient_creator=gradient_creator,
-            source="factual",
-            target="diff"
-        )
-        
-        from torch.utils.data import DataLoader
-        dataloader = DataLoader(dataset, batch_size=1)
-        
-        training_args1 = TrainingArguments(
-            output_dir=os.path.join(temp_dir, "seed1"),
-            max_steps=10,
-            seed=42,
-            train_batch_size=1
-        )
-        
-        training_args2 = TrainingArguments(
-            output_dir=os.path.join(temp_dir, "seed2"),
-            max_steps=10,
-            seed=42,  # Same seed
-            train_batch_size=1
-        )
-        
-        # Train with same seed - should produce same results
-        output_path1 = train(
-            model_with_gradiend=model1,
-            data=dataloader,
-            training_args=training_args1
-        )
-        
-        output_path2 = train(
-            model_with_gradiend=model2,
-            data=dataloader,
-            training_args=training_args2
-        )
-        
-        # Both should complete successfully
-        assert isinstance(output_path1, str)
-        assert isinstance(output_path2, str)
+    def test_train_seed_handling(self, temp_dir, set_seed):
+        """Same seed should yield identical per-step loss traces."""
+        def _run_once(output_subdir: str):
+            set_seed(42)
+            model = MockModelWithGradiend()
+            training_data = MockTrainingData([
+                {
+                    "factual": torch.randn(10),
+                    "alternative": torch.randn(10),
+                    "label": 1.0
+                }
+            ] * 5)
+
+            def gradient_creator(inputs):
+                return torch.randn(100)
+
+            dataset = GradientTrainingDataset(
+                training_data=training_data,
+                gradient_creator=gradient_creator,
+                source="factual",
+                target="diff"
+            )
+
+            from torch.utils.data import DataLoader
+            dataloader = DataLoader(dataset, batch_size=1)
+
+            training_args = TrainingArguments(
+                output_dir=os.path.join(temp_dir, output_subdir),
+                max_steps=10,
+                seed=42,
+                train_batch_size=1
+            )
+
+            train(
+                model_with_gradiend=model,
+                data=dataloader,
+                training_args=training_args
+            )
+            return load_training_stats(training_args.output_dir)["losses"]
+
+        losses_a = _run_once("seed_a")
+        losses_b = _run_once("seed_b")
+        assert losses_a == losses_b
     
     def test_train_with_callbacks(self, temp_dir, set_seed):
         """Test that training works with custom callbacks."""
@@ -253,8 +417,15 @@ class TestTrainingLoop:
         dataloader = DataLoader(dataset, batch_size=1)
         
         from gradiend.trainer.core.callbacks import LoggingCallback
-        
-        custom_callback = LoggingCallback(n_loss_report=10)
+
+        logged_steps = []
+
+        class RecordingLoggingCallback(LoggingCallback):
+            def on_step_end(self, *args, **kwargs):
+                logged_steps.append(kwargs.get("step"))
+                return super().on_step_end(*args, **kwargs)
+
+        custom_callback = RecordingLoggingCallback(n_loss_report=10)
         
         training_args = TrainingArguments(
             output_dir=temp_dir,
@@ -268,8 +439,9 @@ class TestTrainingLoop:
             training_args=training_args,
             callbacks=[custom_callback]
         )
-        
+
         assert isinstance(output_path, str)
+        assert logged_steps, "Custom callback should be invoked during training"
     
     def test_train_empty_dataloader_raises_error(self, temp_dir):
         """Test that training raises error for empty dataloader."""
@@ -378,7 +550,10 @@ class TestTrainingLoop:
             learning_rate=1e-3,  # Override 1
             max_steps=20  # Override 2
         )
-        
+
+        stats = load_training_stats(temp_dir)
+        assert stats["training_args"]["learning_rate"] == pytest.approx(1e-3)
+        assert stats["training_args"]["max_steps"] == 20
         assert isinstance(output_path, str)
     
     def test_train_invalid_parameter_raises_error(self, temp_dir):
@@ -420,3 +595,179 @@ class TestTrainingLoop:
                 training_args=training_args,
                 invalid_param=123  # Invalid parameter
             )
+
+
+class TestConvergenceCriteria:
+    """Test helper logic used by convergence checks."""
+
+    def test_best_checkpoint_step_must_be_after_initial(self):
+        assert _best_checkpoint_step_is_after_initial({"global_step": 1}) is True
+        assert _best_checkpoint_step_is_after_initial({"global_step": "2"}) is True
+        assert _best_checkpoint_step_is_after_initial({"global_step": 0}) is False
+        assert _best_checkpoint_step_is_after_initial({"global_step": "0"}) is False
+        assert _best_checkpoint_step_is_after_initial({"global_step": None}) is False
+
+    def test_target_class_mean_product_ignores_identity_class(self):
+        training_stats = {
+            "mean_by_class": {
+                25: {
+                    -1.0: -0.6,
+                    0.0: 0.02,
+                    1.0: 0.8,
+                }
+            }
+        }
+        best_score_checkpoint = {"global_step": 25}
+
+        product = _best_step_target_class_mean_product(training_stats, best_score_checkpoint)
+
+        assert product is not None
+        assert product < 0
+
+    def test_target_class_mean_product_is_positive_when_signs_match(self):
+        training_stats = {
+            "mean_by_class": {
+                50: {
+                    "-1.0": 0.4,
+                    "1.0": 0.9,
+                }
+            }
+        }
+        best_score_checkpoint = {"global_step": 50}
+
+        product = _best_step_target_class_mean_product(training_stats, best_score_checkpoint)
+
+        assert product == pytest.approx(0.36)
+
+    def test_target_class_mean_product_is_none_without_exactly_two_targets(self):
+        training_stats = {
+            "mean_by_class": {
+                10: {
+                    0.0: 0.01,
+                    1.0: 0.7,
+                }
+            }
+        }
+        best_score_checkpoint = {"global_step": 10}
+
+        product = _best_step_target_class_mean_product(training_stats, best_score_checkpoint)
+
+        assert product is None
+
+
+class TestFinalStepEvaluation:
+    """Ensure the last training step is always evaluated."""
+
+    @staticmethod
+    def _score_steps(scores):
+        return {int(k) for k in scores.keys()}
+
+    @staticmethod
+    def _make_dataloader(num_samples: int = 200):
+        from torch.utils.data import DataLoader
+        from gradiend.trainer.core.dataset import GradientTrainingDataset
+
+        training_data = MockTrainingData([
+            {
+                "factual": torch.randn(10),
+                "alternative": torch.randn(10),
+                "label": 1.0,
+            }
+        ] * num_samples)
+
+        def gradient_creator(inputs):
+            return torch.randn(100)
+
+        dataset = GradientTrainingDataset(
+            training_data=training_data,
+            gradient_creator=gradient_creator,
+            source="factual",
+            target="diff",
+        )
+        return DataLoader(dataset, batch_size=1)
+
+    @pytest.mark.parametrize(
+        "max_steps,expected_final_step",
+        [
+            (500, 500),  # last step aligns with eval_steps=100 (user scenario)
+            (503, 503),  # last step does not align with eval interval
+            (497, 497),
+        ],
+    )
+    def test_train_evaluates_at_final_step(self, temp_dir, set_seed, max_steps, expected_final_step):
+        """Final global_step must appear in training scores after train() completes."""
+        set_seed(42)
+        model = MockModelWithGradiend()
+        dataloader = self._make_dataloader()
+
+        eval_calls = []
+
+        def evaluate_fn(config=None, training_stats=None, **kwargs):
+            step = training_stats.get("global_step", -1)
+            eval_calls.append(step)
+            return {"correlation": 0.5 + step * 0.001}
+
+        training_args = TrainingArguments(
+            output_dir=temp_dir,
+            max_steps=max_steps,
+            eval_steps=100,
+            num_train_epochs=3,
+            train_batch_size=1,
+            evaluate_fn=evaluate_fn,
+            do_eval=True,
+            convergent_score_threshold=None,
+        )
+
+        train(
+            model_with_gradiend=model,
+            data=dataloader,
+            training_args=training_args,
+        )
+
+        stats = load_training_stats(temp_dir)
+        scores = stats["training_stats"]["scores"]
+        score_steps = self._score_steps(scores)
+        assert expected_final_step in score_steps, (
+            f"Expected evaluation at final step {expected_final_step}, "
+            f"got eval calls at {eval_calls}, scores keys {list(scores.keys())}"
+        )
+        assert eval_calls[-1] == expected_final_step
+
+    def test_train_retries_final_eval_when_last_step_eval_fails(self, temp_dir, set_seed):
+        """If the last-step eval fails during training, run a final eval after the loop."""
+        set_seed(42)
+        model = MockModelWithGradiend()
+        dataloader = self._make_dataloader(num_samples=20)
+        attempts_at_seven = 0
+
+        def evaluate_fn(config=None, training_stats=None, **kwargs):
+            step = training_stats.get("global_step", -1)
+            nonlocal attempts_at_seven
+            if step == 7:
+                attempts_at_seven += 1
+                if attempts_at_seven == 1:
+                    return None
+            return {"correlation": 0.75}
+
+        training_args = TrainingArguments(
+            output_dir=temp_dir,
+            max_steps=7,
+            eval_steps=100,
+            num_train_epochs=1,
+            train_batch_size=1,
+            evaluate_fn=evaluate_fn,
+            do_eval=True,
+            convergent_score_threshold=None,
+        )
+
+        train(
+            model_with_gradiend=model,
+            data=dataloader,
+            training_args=training_args,
+        )
+
+        stats = load_training_stats(temp_dir)
+        scores = stats["training_stats"]["scores"]
+        assert 7 in self._score_steps(scores)
+        assert scores.get(7, scores.get("7")) == pytest.approx(0.75)
+        assert attempts_at_seven == 2

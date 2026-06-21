@@ -14,7 +14,7 @@ import pytest
 HAS_DATASETS = importlib.util.find_spec("datasets") is not None
 
 from gradiend.data.core.base_loader import resolve_base_data
-from gradiend.trainer.text.prediction.unified_data import (
+from gradiend.trainer.core.unified_data import (
     load_hf_per_class,
     resolve_dataframe,
 )
@@ -35,8 +35,8 @@ class TestResolveBaseDataHfMocked:
 
     @patch("datasets.load_dataset")
     def test_hf_id_returns_text_column_and_shuffles(self, mock_load_dataset):
-        mock_load_dataset.return_value = _mock_hf_dataset(
-            pd.DataFrame({"text": ["a", "b", "c"]})
+        mock_load_dataset.return_value = iter(
+            [{"text": "a"}, {"text": "b"}, {"text": "c"}]
         )
         texts = resolve_base_data(
             "org/dataset-id",
@@ -45,10 +45,23 @@ class TestResolveBaseDataHfMocked:
             seed=42,
         )
         mock_load_dataset.assert_called_once_with(
-            "org/dataset-id", split="train", trust_remote_code=False
+            "org/dataset-id", split="train", streaming=True
         )
         assert len(texts) == 3
         assert set(texts) == {"a", "b", "c"}
+
+    @patch("datasets.load_dataset")
+    def test_hf_id_streaming_respects_max_size(self, mock_load_dataset):
+        mock_load_dataset.return_value = iter(
+            [{"text": f"t{i}"} for i in range(20)]
+        )
+        texts = resolve_base_data(
+            "org/dataset-id",
+            text_column="text",
+            max_size=5,
+            seed=42,
+        )
+        assert len(texts) == 5
 
     @patch("datasets.load_dataset")
     def test_hf_id_with_hf_config_calls_load_dataset_with_config(self, mock_load_dataset):
@@ -62,7 +75,7 @@ class TestResolveBaseDataHfMocked:
             seed=42,
         )
         mock_load_dataset.assert_called_once_with(
-            "org/dataset", "en", split="train", trust_remote_code=False
+            "org/dataset", "en", split="train"
         )
         assert texts == ["one"]
 
@@ -98,7 +111,7 @@ class TestResolveDataframeHfMocked:
         )
         out = resolve_dataframe("org/dataset-id", split="train")
         mock_load_dataset.assert_called_once_with(
-            "org/dataset-id", split="train", trust_remote_code=True
+            "org/dataset-id", split="train"
         )
         assert out is not None
         assert len(out) == 1
@@ -137,7 +150,7 @@ class TestLoadHfPerClassMocked:
             split_col="split",
         )
         mock_load_dataset.assert_called_once_with(
-            "org/dataset", "class_a", trust_remote_code=True
+            "org/dataset", "class_a"
         )
         assert "class_a" in result
         assert len(result["class_a"]) == 1

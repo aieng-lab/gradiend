@@ -4,11 +4,15 @@
 /__pycache__
 
 logs/
-experiments/
 site/
 build/
 dist/
 runs/
+test_artifacts/
+manual_test_tmp/
+manual_test_tmp_dbg/
+experiments/gender_de
+experiments/scale_encoder_benchmark
 
 *.pdf
 *.png
@@ -24,3 +28,17 @@ test_bench/results/
 
 gradiend.egg-info/
 
+
+/data/
+
+projects/
+
+tests/__pycache__/
+
+slurm/
+
+.pytest_tmp_local/test_custom_font_from_env_path0/
+
+.pytest_tmp_local/
+
+docs/design/

@@ -195,6 +195,37 @@ def resolve_decoder_grid_cache_path(
     return os.path.join(os.path.normpath(str(experiment_dir).strip()), "decoder_grid_cache.json")
 
 
+def resolve_decoder_row_wise_csv_path(experiment_dir: Optional[str]) -> Optional[str]:
+    """Path for row-wise decoder eval scores CSV: experiment_dir/decoder_row_wise_scores.csv. None if no experiment_dir."""
+    if experiment_dir is None or not str(experiment_dir).strip():
+        return None
+    return os.path.join(os.path.normpath(str(experiment_dir).strip()), "decoder_row_wise_scores.csv")
+
+
+def resolve_annotated_data_csv_path(
+    experiment_dir: Optional[str],
+    explicit_path: Optional[str] = None,
+) -> Optional[str]:
+    """Path for annotated row-wise data CSV: experiment_dir/annotated_data.csv. None if no experiment_dir."""
+    if explicit_path is not None and str(explicit_path).strip():
+        return os.path.normpath(str(explicit_path).strip())
+    if experiment_dir is None or not str(experiment_dir).strip():
+        return None
+    return os.path.join(os.path.normpath(str(experiment_dir).strip()), "annotated_data.csv")
+
+
+def resolve_annotated_data_json_path(
+    experiment_dir: Optional[str],
+    explicit_path: Optional[str] = None,
+) -> Optional[str]:
+    """Path for annotated data summary JSON: experiment_dir/annotated_data.json. None if no experiment_dir."""
+    if explicit_path is not None and str(explicit_path).strip():
+        return os.path.normpath(str(explicit_path).strip())
+    if experiment_dir is None or not str(experiment_dir).strip():
+        return None
+    return os.path.join(os.path.normpath(str(experiment_dir).strip()), "annotated_data.json")
+
+
 def resolve_decoder_mlm_head_dir(
     experiment_dir: Optional[str],
     explicit_path: Optional[str] = None,
@@ -205,6 +236,44 @@ def resolve_decoder_mlm_head_dir(
     if experiment_dir is None or not str(experiment_dir).strip():
         return None
     return os.path.join(os.path.normpath(str(experiment_dir).strip()), "decoder_mlm_head")
+
+
+def resolve_pre_prune_cache_dir(
+    experiment_dir: Optional[str],
+    explicit_path: Optional[str] = None,
+) -> Optional[str]:
+    """Directory for ephemeral pre-prune cache: experiment_dir/cache/pre_prune. None if no experiment_dir."""
+    if explicit_path is not None and str(explicit_path).strip():
+        return os.path.normpath(str(explicit_path).strip())
+    if experiment_dir is None or not str(experiment_dir).strip():
+        return None
+    return os.path.join(os.path.normpath(str(experiment_dir).strip()), "cache", "pre_prune")
+
+
+def has_saved_pre_prune_cache(cache_dir: Optional[str]) -> bool:
+    """True when cache_dir contains keep_idx.pt and pre_prune_meta.json from a prior pre-prune run."""
+    if not cache_dir or not os.path.isdir(cache_dir):
+        return False
+    keep_path = os.path.join(cache_dir, "keep_idx.pt")
+    meta_path = os.path.join(cache_dir, "pre_prune_meta.json")
+    if not os.path.isfile(keep_path) or not os.path.isfile(meta_path):
+        return False
+    try:
+        with open(meta_path, "r", encoding="utf-8") as handle:
+            meta = json.load(handle)
+    except (json.JSONDecodeError, OSError):
+        return False
+    return isinstance(meta, dict) and "pre_prune_config" in meta and "input_dim" in meta
+
+
+def remove_pre_prune_cache(experiment_dir: Optional[str]) -> None:
+    """Remove ephemeral pre-prune cache under experiment_dir. No-op if missing."""
+    cache_dir = resolve_pre_prune_cache_dir(experiment_dir)
+    if cache_dir and os.path.isdir(cache_dir):
+        try:
+            shutil.rmtree(cache_dir)
+        except OSError:
+            pass
 
 
 def resolve_classification_head_dir(
@@ -265,6 +334,13 @@ def invalidate_experiment_caches(experiment_dir: Optional[str]) -> None:
                 shutil.rmtree(path)
             except OSError:
                 pass
+        elif name == "cache" and os.path.isdir(path):
+            pre_prune = os.path.join(path, "pre_prune")
+            if os.path.isdir(pre_prune):
+                try:
+                    shutil.rmtree(pre_prune)
+                except OSError:
+                    pass
 
 
 def resolve_output_path(
@@ -319,11 +395,8 @@ def has_saved_model(output_dir: str) -> bool:
     Return True if output_dir contains a complete saved GRADIEND model (skip training when use_cache).
 
     Requires:
-    - Weights: model.safetensors or pytorch_model.bin (as in BaseModel.save_pretrained)
-    - config.json (always written by save_pretrained; ensures it's our format)
-
-    Note: training_args.json is not used; the codebase writes training.json (optional) or embeds
-    run info in the save_pretrained(training=...) path.
+    - Weights: model.safetensors or pytorch_model.bin
+    - config.json with GRADIEND architecture metadata
     """
     if not output_dir or not os.path.exists(output_dir):
         return False
@@ -331,8 +404,64 @@ def has_saved_model(output_dir: str) -> bool:
         os.path.exists(os.path.join(output_dir, "model.safetensors"))
         or os.path.exists(os.path.join(output_dir, "pytorch_model.bin"))
     )
-    has_config = os.path.exists(os.path.join(output_dir, "config.json"))
-    return has_weights and has_config
+    cfg_path = os.path.join(output_dir, "config.json")
+    if not has_weights or not os.path.exists(cfg_path):
+        return False
+    try:
+        with open(cfg_path, "r", encoding="utf-8") as handle:
+            cfg = json.load(handle)
+    except (json.JSONDecodeError, OSError):
+        return False
+    return isinstance(cfg, dict) and "architecture" in cfg
+
+
+def has_saved_decoder_mlm_head(output_dir: str) -> bool:
+    """
+    Return True if output_dir contains a complete decoder-only MLM-head checkpoint.
+
+    This is intentionally separate from has_saved_model(): decoder-only MLM heads
+    are auxiliary Hugging Face-style checkpoints used before GRADIEND training,
+    while training_args.json belongs to saved GRADIEND models.
+    """
+    if not output_dir or not os.path.isdir(output_dir):
+        return False
+
+    cfg_path = os.path.join(output_dir, "config.json")
+    meta_path = os.path.join(output_dir, "config_mlm_head.json")
+    if not os.path.exists(cfg_path) or not os.path.exists(meta_path):
+        return False
+
+    has_weights = (
+        os.path.exists(os.path.join(output_dir, "model.safetensors"))
+        or os.path.exists(os.path.join(output_dir, "pytorch_model.bin"))
+        or os.path.exists(os.path.join(output_dir, "model", "model.safetensors"))
+        or os.path.exists(os.path.join(output_dir, "model", "pytorch_model.bin"))
+    )
+    if not has_weights:
+        return False
+
+    has_tokenizer = os.path.exists(os.path.join(output_dir, "tokenizer_config.json")) and any(
+        os.path.exists(os.path.join(output_dir, filename))
+        for filename in (
+            "tokenizer.json",
+            "vocab.txt",
+            "vocab.json",
+            "spiece.model",
+            "sentencepiece.bpe.model",
+        )
+    )
+    if not has_tokenizer:
+        return False
+
+    try:
+        with open(meta_path, "r", encoding="utf-8") as handle:
+            meta = json.load(handle)
+        with open(cfg_path, "r", encoding="utf-8") as handle:
+            cfg = json.load(handle)
+    except (json.JSONDecodeError, OSError):
+        return False
+
+    return isinstance(meta, dict) and "target_token_ids" in meta and isinstance(cfg, dict)
 
 
 def should_use_cached(path: Optional[str], use_cache: bool) -> bool:

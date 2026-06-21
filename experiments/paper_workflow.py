@@ -24,8 +24,8 @@ args = TrainingArguments(
     learning_rate=1e-5,
     experiment_dir='runs/demonstration',
     use_cache=False,
-    pre_prune_config=PrePruneConfig(n_samples=16, topk=0.01),
-    post_prune_config=PostPruneConfig(topk=0.1),
+    pre_prune_config=PrePruneConfig(n_samples=16, topk=0.1),
+    post_prune_config=PostPruneConfig(topk=0.01),
 )
 trainer = TextPredictionTrainer(
     model="bert-base-cased",

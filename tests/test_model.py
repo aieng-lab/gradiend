@@ -54,6 +54,17 @@ class TestGradiendModel:
         decoded2, encoded = model.forward(x, return_encoded=True)
         assert decoded2.shape == (100,)
         assert encoded.shape == (1,)
+
+    def test_gradiend_model_forward_batched(self, set_seed):
+        """Test GradiendModel batched forward pass."""
+        set_seed(42)
+        model = GradiendModel(input_dim=100, latent_dim=1, device=torch.device("cpu"))
+
+        x = torch.randn(4, 100)
+        decoded, encoded = model.forward(x, return_encoded=True)
+
+        assert decoded.shape == (4, 100)
+        assert encoded.shape == (4, 1)
     
     def test_gradiend_model_forward_encoder(self, set_seed):
         """Test encoder-only forward pass."""
@@ -220,7 +231,47 @@ class TestParamMappedGradiendModel:
         
         flattened = model.flatten_gradient_dict(grad_dict)
         assert flattened.shape == (input_dim,)
-    
+
+    def test_param_mapped_streaming_extract_matches_regular_extract(self, set_seed):
+        """Streaming extraction should collect the same mapped gradient entries."""
+        set_seed(42)
+        base = nn.Linear(4, 3)
+        base_stream = nn.Linear(4, 3)
+        base_stream.load_state_dict(base.state_dict())
+
+        weight_mask = torch.tensor(
+            [[True, False, True, False], [False, True, False, True], [True, True, False, False]]
+        )
+        bias_indices = torch.tensor([0, 2])
+        param_map = {
+            "weight": {"shape": tuple(base.weight.shape), "repr": "mask", "mask": weight_mask},
+            "bias": {"shape": tuple(base.bias.shape), "repr": "indices", "indices": bias_indices},
+        }
+        input_dim = int(weight_mask.sum().item() + bias_indices.numel())
+        gradiend = ParamMappedGradiendModel(input_dim=input_dim, latent_dim=1, param_map=param_map)
+
+        x = torch.randn(5, 4)
+        base.zero_grad(set_to_none=True)
+        loss = base(x).pow(2).sum()
+        loss.backward()
+        expected = gradiend.extract_gradients(base, target_device=torch.device("cpu"))
+        base.zero_grad(set_to_none=True)
+
+        base_stream.zero_grad(set_to_none=True)
+
+        def backward_fn():
+            base_stream(x).pow(2).sum().backward()
+
+        actual = gradiend.extract_gradients_streaming(
+            base_stream,
+            backward_fn,
+            target_device=torch.device("cpu"),
+        )
+
+        torch.testing.assert_close(actual, expected)
+        assert base_stream.weight.grad is None
+        assert base_stream.bias.grad is None
+
     def test_param_mapped_model_pruning_updates_map(self):
         """Test that pruning updates param_map correctly."""
         param_map = {
@@ -244,9 +295,87 @@ class TestParamMappedGradiendModel:
         assert len(pruned.param_map) == original_map_size
         assert pruned.input_dim == 30
 
+    def test_param_mapped_model_pruning_accepts_keep_idx(self):
+        """Test compact keep_idx pruning without dense importance/mask inputs."""
+        param_map = {
+            "layer1.weight": {"shape": (2, 3), "repr": "all"},
+            "layer2.weight": {"shape": (2, 2), "repr": "all"},
+        }
+        model = ParamMappedGradiendModel(input_dim=10, latent_dim=1, param_map=param_map)
+
+        pruned = model.prune(keep_idx=torch.tensor([0, 2, 6, 9]), inplace=False)
+
+        assert pruned.input_dim == 4
+
+        def selected_positions(spec):
+            if spec["repr"] == "indices":
+                return spec["indices"].tolist()
+            if spec["repr"] == "mask":
+                return spec["mask"].flatten().nonzero(as_tuple=False).flatten().tolist()
+            if spec["repr"] == "all":
+                return list(range(int(torch.tensor(spec["shape"]).prod().item())))
+            raise AssertionError(f"Unexpected repr {spec['repr']!r}")
+
+        assert selected_positions(pruned.param_map["layer1.weight"]) == [0, 2]
+        assert selected_positions(pruned.param_map["layer2.weight"]) == [0, 3]
+
 
 class TestModelWithGradiend:
     """Test ModelWithGradiend wrapper."""
+
+    def test_prune_gradiend_updates_base_requires_grad_from_param_map(self):
+        """Pruning GRADIEND must disable base gradients for fully unmapped params."""
+        from gradiend.model import ModelWithGradiend
+
+        class TinyModelWithGradiend(ModelWithGradiend):
+            def create_gradients(self, *args, **kwargs):
+                raise NotImplementedError
+
+            def _save_model(self, save_directory, **kwargs):
+                pass
+
+            @classmethod
+            def _load_model(cls, *args, **kwargs):
+                raise NotImplementedError
+
+        base = nn.Sequential(nn.Linear(3, 2), nn.Linear(2, 1))
+        param_map = {
+            "0.weight": {"shape": tuple(base[0].weight.shape), "repr": "all"},
+            "0.bias": {"shape": tuple(base[0].bias.shape), "repr": "all"},
+            "1.weight": {"shape": tuple(base[1].weight.shape), "repr": "all"},
+            "1.bias": {"shape": tuple(base[1].bias.shape), "repr": "all"},
+        }
+        gradiend = ParamMappedGradiendModel(
+            input_dim=sum(p.numel() for p in base.parameters()),
+            latent_dim=1,
+            param_map=param_map,
+        )
+        model = TinyModelWithGradiend(base, gradiend)
+
+        assert {name: p.requires_grad for name, p in model.base_model.named_parameters()} == {
+            "0.weight": True,
+            "0.bias": True,
+            "1.weight": True,
+            "1.bias": True,
+        }
+
+        # Keep only the two GRADIEND dimensions belonging to 0.bias.
+        pruned = model.prune_gradiend(keep_idx=torch.tensor([6, 7]), inplace=False)
+
+        assert pruned.gradiend.input_dim == 2
+        assert {name: p.requires_grad for name, p in pruned.base_model.named_parameters()} == {
+            "0.weight": False,
+            "0.bias": True,
+            "1.weight": False,
+            "1.bias": False,
+        }
+        # Non-inplace pruning must not mutate the source wrapper's base gradient flags.
+        assert {name: p.requires_grad for name, p in model.base_model.named_parameters()} == {
+            "0.weight": True,
+            "0.bias": True,
+            "1.weight": True,
+            "1.bias": True,
+        }
     
     def test_model_with_gradiend_creation(self, mock_model):
         """Test ModelWithGradiend wrapper creation."""
@@ -270,6 +399,34 @@ class TestModelWithGradiend:
         assert hasattr(model_with_gradiend, 'base_model')
         assert hasattr(model_with_gradiend, 'gradiend')
         assert model_with_gradiend.base_model == mock_model
+
+    def test_model_with_gradiend_passes_base_device_map(self, mock_model):
+        """HF device_map should be passed to the base loader and mark the base as sharded."""
+        from gradiend.trainer.text.prediction.model_with_gradiend import TextPredictionModelWithGradiend
+        from gradiend.trainer.text.common.model_base import TextModelWithGradiend
+        from gradiend.trainer.core.arguments import TrainingArguments
+
+        captured = {}
+
+        def mock_load_model(cls, load_directory, base_model_id=None, tokenizer=None, **kwargs):
+            captured.update(kwargs)
+            from tests.conftest import MockTokenizer
+            return mock_model, MockTokenizer()
+
+        with patch.object(TextModelWithGradiend, '_load_model', classmethod(mock_load_model)):
+            model_with_gradiend = TextPredictionModelWithGradiend.from_pretrained(
+                mock_model,
+                n_features=1,
+                training_args=TrainingArguments(
+                    base_model_device_map="auto",
+                    base_model_max_memory={0: "0GiB", 1: "70GiB"},
+                ),
+            )
+
+        assert captured["base_model_device_map"] == "auto"
+        assert captured["base_model_max_memory"] == {0: "0GiB", 1: "70GiB"}
+        assert model_with_gradiend.base_model_is_sharded is True
+        assert model_with_gradiend.base_model_device is None
     
     def test_model_with_gradiend_encode(self, mock_model, mock_tokenizer):
         """Test encoding functionality with mock base model."""
@@ -322,6 +479,51 @@ class TestModelWithGradiend:
         # Should return a model (not the same instance as base_model)
         assert rewritten_model is not None
         assert rewritten_model is not model_with_gradiend.base_model
+
+    def test_rewrite_base_model_resolves_backbone_local_param_names(self):
+        """Decoder-only wrappers may train on backbone-local names such as embed_tokens.weight."""
+        from gradiend.model import ModelWithGradiend, ParamMappedGradiendModel
+
+        class TinyDecoder(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.model = torch.nn.Module()
+                self.model.embed_tokens = torch.nn.Embedding(3, 2)
+
+        class TinyModelWithGradiend(ModelWithGradiend):
+            def create_gradients(self, *args, **kwargs):
+                raise NotImplementedError
+
+            def _save_model(self, save_directory, **kwargs):
+                raise NotImplementedError
+
+            @classmethod
+            def _load_model(cls, *args, **kwargs):
+                raise NotImplementedError
+
+        base_model = TinyDecoder()
+        before = base_model.model.embed_tokens.weight.detach().clone()
+        gradiend = ParamMappedGradiendModel(
+            input_dim=6,
+            latent_dim=1,
+            param_map={"embed_tokens.weight": {"shape": (3, 2), "repr": "all"}},
+            bias_decoder=False,
+        )
+        with torch.no_grad():
+            gradiend.decoder[0].linear.weight.fill_(1.0)
+
+        model_with_gradiend = TinyModelWithGradiend(base_model, gradiend)
+        rewritten_model = model_with_gradiend.rewrite_base_model(
+            learning_rate=0.5,
+            feature_factor=1.0,
+            part="decoder-weight",
+        )
+
+        assert torch.allclose(
+            rewritten_model.model.embed_tokens.weight,
+            before + 0.5,
+        )
+        assert torch.allclose(base_model.model.embed_tokens.weight, before)
     
     def test_model_with_gradiend_rewrite_base_model_with_different_parts(self, mock_model):
         """Test rewrite_base_model with different part options."""

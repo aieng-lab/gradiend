@@ -27,7 +27,7 @@ class DataProvider(Protocol):
 
         Args:
             tokenizer: Tokenizer for the model
-            split: Dataset split ('train', 'val', 'test')
+            split: Dataset split ('train', 'validation', 'test')
             **kwargs: Additional arguments
 
         Returns:

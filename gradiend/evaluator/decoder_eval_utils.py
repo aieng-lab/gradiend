@@ -7,6 +7,16 @@ from typing import Any, Dict
 
 
 def convert_results_to_dict(list_results):
+    """Convert serialized decoder-grid entries to a mapping keyed by candidate id.
+
+    Args:
+        list_results: List of decoder result entries. Each entry must contain an
+            ``id`` field: either ``"base"`` or a mapping with ``feature_factor``
+            and ``learning_rate``.
+
+    Returns:
+        Dict keyed by ``"base"`` or ``(feature_factor, learning_rate)``.
+    """
     dict_result = {}
     for entry in list_results:
         id = entry['id']
@@ -29,12 +39,24 @@ def convert_results_to_dict(list_results):
 
 
 def convert_results_to_list(dict_results):
+    """Convert decoder-grid mapping to the JSON-serializable list format.
+
+    Args:
+        dict_results: Mapping keyed by ``"base"`` or
+            ``(feature_factor, learning_rate)``.
+
+    Returns:
+        List of result entries with normalized ``id`` fields.
+    """
     return [{**dict_result, 'id': (key if isinstance(key, str) else {'feature_factor': key[0], 'learning_rate': key[1]})} for key, dict_result in dict_results.items()]
 
 
 def read_decoder_stats_file(stats_file: str) -> Dict[str, Any]:
     """
     Read a decoder stats JSON file and normalize the grid to a dict.
+
+    Args:
+        stats_file: Path to decoder stats JSON.
 
     Returns:
         Flat dict: summary entries at top level (e.g. "3SG", "3PL") plus "grid".

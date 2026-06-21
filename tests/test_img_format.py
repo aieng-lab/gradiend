@@ -53,6 +53,30 @@ class TestImgFormatVisualizerOutputPath:
         assert path.endswith(".png")
         assert (out_base / "plot.png").exists()
 
+    def test_plot_training_convergence_can_return_live_fig_axes_without_output(self):
+        pytest.importorskip("matplotlib")
+        import matplotlib.pyplot as plt
+
+        training_stats = {
+            "training_stats": {
+                "mean_by_class": {0: {"0": 0.1, "1": -0.1}},
+                "scores": {0: 0.5},
+            },
+            "best_score_checkpoint": {},
+        }
+        try:
+            fig, axes = plot_training_convergence(
+                training_stats=training_stats,
+                show=False,
+                return_fig_ax=True,
+            )
+            assert fig is not None
+            assert len(axes) == 2
+            axes[0].set_title("Custom title")
+            assert axes[0].get_title() == "Custom title"
+        finally:
+            plt.close("all")
+
     def test_plot_encoder_distributions_output_path_uses_img_format(self, tmp_path):
         pytest.importorskip("matplotlib")
         trainer = MagicMock()
@@ -77,6 +101,35 @@ class TestImgFormatVisualizerOutputPath:
             )
         assert path.endswith(".png")
         assert (tmp_path / "encoder.png").exists()
+
+    def test_plot_encoder_distributions_can_return_live_fig_axis_without_output(self):
+        pytest.importorskip("matplotlib")
+        import matplotlib.pyplot as plt
+
+        trainer = MagicMock()
+        trainer.run_id = "run1"
+        trainer.pair = None
+        trainer.experiment_dir = None
+        trainer.get_model = MagicMock(return_value=None)
+        encoder_df = pd.DataFrame({
+            "encoded": [0.1, -0.2, 0.2, -0.3],
+            "label": [1.0, -1.0, 1.0, -1.0],
+            "source_id": ["1", "2", "1", "2"],
+            "target_id": ["2", "1", "2", "1"],
+            "type": ["training"] * 4,
+        })
+        try:
+            fig, ax = plot_encoder_distributions(
+                trainer=trainer,
+                encoder_df=encoder_df,
+                show=False,
+                return_fig_ax=True,
+            )
+            assert fig is not None
+            ax.set_ylabel("Custom encoded")
+            assert ax.get_ylabel() == "Custom encoded"
+        finally:
+            plt.close("all")
 
 
 class TestImgFormatTrainerForwarding:

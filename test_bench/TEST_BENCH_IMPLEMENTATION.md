@@ -5,7 +5,7 @@
 The test bench has been implemented with comprehensive scenarios covering all use-cases:
 - **gender_en**: RoBERTa, DistilBERT, GPT-2 CLM
 - **gender_de**: BERT baseline (no pruning), BERT with pruning, German GPT-2 + MLM head
-- **race_religion**: DistilBERT for both race and religion bias
+- **race/religion verified workflow**: DistilBERT for both race and religion bias
 
 ## First Run: Setting Expectations
 
@@ -41,7 +41,7 @@ After reviewing the first run outputs, you can:
 - **test_gender_de_gpt2_mlm_verified**: German GPT-2 + MLM head workflow
 
 ### `test_bench/verified/test_race_religion.py`
-- **test_race_religion_distilbert_verified**: Tests both race (white/black) and religion (christian/muslim) scenarios
+- **test_train_race_religion_distilbert_verified**: Tests both race (white/black) and religion (christian/muslim) scenarios
 
 ## Running Tests
 
@@ -96,4 +96,4 @@ Example:
 | gender_de_bert_baseline | bert-base-german-cased | encoder-only | No (baseline) |
 | gender_de_bert_pruned | bert-base-german-cased | encoder-only | Yes |
 | gender_de_gpt2_mlm | dbmdz/german-gpt2 | decoder-only + MLM | Yes |
-| race_religion | distilbert-base-cased | encoder-only | Yes |
+| race/religion verified workflow | distilbert-base-cased | encoder-only | Yes |

@@ -45,7 +45,7 @@ Smoke tests write to **`runs/examples/`** only. That directory is **deleted befo
 - **Long tracebacks:** Run the bench with full tracebacks:  
   `python test_bench/run_bench.py --tb=long`
 
-- **Smoke test failures:** When an example smoke test fails (e.g. `gradiend.examples.gender_de_decoder_only`), the test writes **full stdout/stderr** to  
+- **Smoke test failures:** When an example smoke test fails (e.g. `gradiend.examples.train_gender_de_decoder_only`), the test writes **full stdout/stderr** to  
   `test_bench/results/last_failure_<module>.log`  
   so you can inspect the complete log without truncation.
 
@@ -130,7 +130,7 @@ test_bench/
 
 ## Use cases
 
-- **Example smoke tests** (`examples/`): Run all `gradiend.examples` (race_religion, gender_en, gender_de, gender_de_decoder_only) as they are; only assert they complete successfully (no metric verification). Use the examples’ own iteration counts for quick runs.
+- **Example smoke tests** (`examples/`): Run the configured `gradiend.examples` modules as they are; only assert they complete successfully (no metric verification). Use the examples’ own iteration counts for quick runs.
 - **Verified runs** (`verified/`): Run with **more iterations** (e.g. 500) than examples to ensure proper conversion; verify **correlation ≥ threshold** and **existence of files** (config.json, weights, training.json).
   - One run for **race and religion** (BERT)
   - One run for **gender EN** (RoBERTa)

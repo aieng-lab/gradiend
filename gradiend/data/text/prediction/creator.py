@@ -6,13 +6,16 @@ from __future__ import annotations
 
 import random
 from pathlib import Path
-from typing import Dict, Iterable, List, Literal, Optional, Tuple, Union
+from typing import Dict, List, Literal, Optional, Union
 
 import pandas as pd
-from tqdm import tqdm
 
 from gradiend.data.core.base_loader import resolve_base_data
-from gradiend.data.core.spacy_util import load_spacy_model
+from gradiend.data.core import (
+    SplitGroupKey,
+    normalize_split_group_key,
+    split_dataframe_per_group,
+)
 from gradiend.data.text import (
     SpacyTagSpec,
     TextFilterConfig,
@@ -22,7 +25,16 @@ from gradiend.data.text import (
 from gradiend.data.text.prediction.filter_engine import (
     filter_sentences_multi,
     mask_sentence,
-    token_matches_tags,
+)
+from gradiend.data.text.prediction.balancing import _apply_balance
+from gradiend.data.text.prediction.formats import _to_merged, _to_minimal, _to_partial_merged
+from gradiend.data.text.prediction.ids import _class_id
+from gradiend.data.text.prediction.io import _related_output_path, _save_data
+from gradiend.data.text.prediction.neutral import _filter_neutral
+from gradiend.data.text.prediction.summary import (
+    SUMMARY_LOG_CLASS_THRESHOLD,
+    SUMMARY_LOG_EXAMPLES,
+    _log_training_filter_summary,
 )
 from gradiend.util.logging import get_logger
 
@@ -31,63 +43,21 @@ logger = get_logger(__name__)
 MIN_ROWS_PER_CLASS_FOR_SPLIT = 10
 """Minimum rows per class to perform train/val/test split. Splitting fewer rows yields tiny splits (e.g. 80/10/10 of 5 rows)."""
 
-def _save_data(
-    path: str,
-    fmt: Literal["csv", "parquet", "hf"],
-    df: Optional[pd.DataFrame] = None,
-    class_dfs: Optional[Dict[str, pd.DataFrame]] = None,
-) -> None:
-    """Save data to path. For training with per_class and fmt hf, pass class_dfs to save as DatasetDict (subsets)."""
-    path_obj = Path(path)
-    path_obj.parent.mkdir(parents=True, exist_ok=True)
-
-    if fmt == "csv":
-        data = df if df is not None else (_to_merged(class_dfs) if class_dfs else None)
-        if data is not None:
-            data.to_csv(path, index=False)
-        logger.info("Wrote data to %s (csv)", path)
-        return
-    if fmt == "parquet":
-        data = df if df is not None else (_to_merged(class_dfs) if class_dfs else None)
-        if data is not None:
-            data.to_parquet(path, index=False)
-        logger.info("Wrote data to %s (parquet)", path)
-        return
-    if fmt == "hf":
-        try:
-            from datasets import Dataset, DatasetDict
-        except ImportError:
-            logger.warning(
-                "output_format='hf' requires 'datasets'. Install with: pip install datasets. Falling back to csv."
-            )
-            ext = path_obj.suffix.lower()
-            if not ext or path_obj.suffix == "":
-                path = str(path_obj.with_suffix(".csv"))
-            _save_data(path, "csv", df=df, class_dfs=class_dfs)
-            return
-        if class_dfs:
-            d = DatasetDict(
-                {cid: Dataset.from_pandas(df_c, preserve_index=False) for cid, df_c in class_dfs.items()}
-            )
-            d.save_to_disk(path)
-            logger.info("Wrote data to %s (HuggingFace DatasetDict, subsets per class)", path)
-        else:
-            data = df if df is not None else None
-            if data is not None:
-                Dataset.from_pandas(data, preserve_index=False).save_to_disk(path)
-                logger.info("Wrote data to %s (HuggingFace Dataset)", path)
-
-
-def _class_id(cfg: TextFilterConfig, index: int) -> str:
-    """Get class id from config; use id if set, else first target, else index fallback."""
-    if cfg.id is not None:
-        return cfg.id
-    first = next((t for t in cfg.targets or [] if isinstance(t, str)), None)
-    return first if first is not None else f"_class_{index}"
-
 
 class TextPredictionDataCreator:
-    """Creates training and neutral data for text prediction from base corpora."""
+    """Create masked-token text-prediction datasets from base corpora.
+
+    The creator scans text, finds configured target tokens, masks each match, and
+    produces either per-class DataFrames or a unified training table consumable by
+    :class:`~gradiend.trainer.text.prediction.trainer.TextPredictionTrainer`.
+    It can also create neutral evaluation rows by excluding all configured target
+    words and optional spaCy tag patterns.
+
+    The main public workflow is:
+    ``TextPredictionDataCreator(...).generate_training_data(...)`` and, when
+    neutral evaluation data is needed,
+    ``TextPredictionDataCreator(...).generate_neutral_data(...)``.
+    """
 
     def __init__(
         self,
@@ -96,10 +66,11 @@ class TextPredictionDataCreator:
         base_max_size: Optional[int] = None,
         split: str = "train",
         hf_config: Optional[str] = None,
-        trust_remote_code: bool = False,
+        trust_remote_code: Optional[bool] = None,
         preprocess: Optional[TextPreprocessConfig] = None,
         spacy_model: Optional[str] = None,
         feature_targets: Optional[List[TextFilterConfig]] = None,
+        min_left_context_words: int = 10,
         seed: int = 42,
         download_if_missing: bool = True,
         output_dir: Optional[str] = None,
@@ -107,6 +78,8 @@ class TextPredictionDataCreator:
         neutral_basename: str = "neutral",
         output_format: Literal["csv", "parquet", "hf"] = "csv",
         use_cache: bool = False,
+        split_group_col: Optional[str] = None,
+        split_group_key: SplitGroupKey = None,
     ) -> None:
         """Initialize with shared config for both generate methods.
 
@@ -116,10 +89,14 @@ class TextPredictionDataCreator:
             base_max_size: Cap on base data (after shuffle, before preprocessing).
             split: HF split (default "train").
             hf_config: HF dataset config/subset (e.g. "20220301.en" for wikipedia).
-            trust_remote_code: Passed to load_dataset when base_data is HF id. Default False.
+            trust_remote_code: Optional value passed to load_dataset when base_data is HF id.
+                None means do not pass the keyword.
             preprocess: Optional TextPreprocessConfig.
             spacy_model: Spacy model name (e.g. "de_core_news_sm"); lazy-loaded.
             feature_targets: List of TextFilterConfig. Each config's id (or first target) names the class.
+            min_left_context_words: Default minimum word-like strings required before a matched target.
+                Per-config overrides via TextFilterConfig.min_left_context_words are still supported.
+                Mainly useful for decoder-only models where masked targets need left context.
             seed: Random seed for shuffle and sampling.
             download_if_missing: If True, auto-download spacy model when not found.
             output_dir: If set, generate_training_data/generate_neutral_data write to this folder
@@ -130,6 +107,11 @@ class TextPredictionDataCreator:
                 "hf" requires the datasets library; falls back to csv with a warning if not installed.
             use_cache: If True and output_dir is set, generate_training_data and generate_neutral_data
                 load from existing files in output_dir when available instead of regenerating.
+            split_group_col: Column used for vocabulary-held-out splits (e.g. ``"label"`` for
+                masked target tokens). Each unique value is assigned to exactly one of
+                train/validation/test. None = random row split (legacy default).
+            split_group_key: Callable or sequence of callables applied to ``split_group_col``
+                values before grouping (e.g. ``[str.strip, str.casefold]``).
         """
         if not isinstance(text_column, str):
             raise TypeError(f"text_column must be str, got {type(text_column).__name__}")
@@ -139,10 +121,16 @@ class TextPredictionDataCreator:
             raise TypeError(f"split must be str, got {type(split).__name__}")
         if hf_config is not None and not isinstance(hf_config, str):
             raise TypeError(f"hf_config must be str or None, got {type(hf_config).__name__}")
-        if not isinstance(trust_remote_code, bool):
-            raise TypeError(f"trust_remote_code must be bool, got {type(trust_remote_code).__name__}")
+        if trust_remote_code is not None and not isinstance(trust_remote_code, bool):
+            raise TypeError(f"trust_remote_code must be bool or None, got {type(trust_remote_code).__name__}")
         if spacy_model is not None and not isinstance(spacy_model, str):
             raise TypeError(f"spacy_model must be str or None, got {type(spacy_model).__name__}")
+        if not isinstance(min_left_context_words, int):
+            raise TypeError(
+                f"min_left_context_words must be int, got {type(min_left_context_words).__name__}"
+            )
+        if min_left_context_words < 0:
+            raise ValueError(f"min_left_context_words must be >= 0, got {min_left_context_words}")
         if not isinstance(seed, int):
             raise TypeError(f"seed must be int, got {type(seed).__name__}")
         if not isinstance(download_if_missing, bool):
@@ -159,6 +147,9 @@ class TextPredictionDataCreator:
             raise TypeError(f"output_format must be 'csv', 'parquet', or 'hf', got {output_format!r}")
         if not isinstance(use_cache, bool):
             raise TypeError(f"use_cache must be bool, got {type(use_cache).__name__}")
+        if split_group_col is not None and not isinstance(split_group_col, str):
+            raise TypeError(f"split_group_col must be str or None, got {type(split_group_col).__name__}")
+        normalize_split_group_key(split_group_key)
 
         self.base_data = base_data
         self.text_column = text_column
@@ -169,6 +160,7 @@ class TextPredictionDataCreator:
         self.preprocess = preprocess
         self.spacy_model = spacy_model
         self.feature_targets = feature_targets or []
+        self.min_left_context_words = min_left_context_words
         self.seed = seed
         self.download_if_missing = download_if_missing
         self.output_dir = Path(output_dir) if output_dir else None
@@ -176,6 +168,8 @@ class TextPredictionDataCreator:
         self.neutral_basename = neutral_basename
         self.output_format = output_format
         self.use_cache = use_cache
+        self.split_group_col = split_group_col
+        self.split_group_key = split_group_key
         self._texts_cache: Optional[List[str]] = None
 
     def _resolve_output_path(self, name: Literal["training", "neutral"], explicit: Optional[str]) -> Optional[str]:
@@ -267,7 +261,7 @@ class TextPredictionDataCreator:
                 split=self.split,
                 seed=self.seed,
                 hf_config=self.hf_config if is_hf_str else None,
-                trust_remote_code=self.trust_remote_code if is_hf_str else False,
+                trust_remote_code=self.trust_remote_code if is_hf_str else None,
             )
         if base_override is not None:
             return _resolve(base_override)
@@ -288,25 +282,57 @@ class TextPredictionDataCreator:
         val_ratio: float = 0.1,
         test_ratio: float = 0.1,
         min_rows_per_class_for_split: int = MIN_ROWS_PER_CLASS_FOR_SPLIT,
+        min_rows_per_target_for_balance: int = 1,
+        raise_on_incomplete_classes: bool = False,
+        split_group_col: Optional[str] = None,
+        split_group_key: SplitGroupKey = None,
     ) -> Union[Dict[str, pd.DataFrame], pd.DataFrame]:
-        """Generate training data by filtering and masking.
+        """Generate masked training data by filtering configured target tokens.
+
+        Each returned row contains the original ``text``, a ``masked`` version,
+        the matched ``label`` token, ``token_count``, and a ``split`` column.
+        ``format="per_class"`` returns one DataFrame per feature class. The
+        ``"minimal"`` and ``"unified"`` formats return a single DataFrame; the
+        unified format contains factual/alternative columns used by GRADIEND
+        trainers.
 
         Args:
             max_size_per_class: Cap per feature class.
-            format: Return structure: "per_class" (dict), "unified", or "minimal".
+            format: Return structure: ``"per_class"`` (dict), ``"unified"``, or
+                ``"minimal"``.
             split_name: Value for split column when auto_split is not used (default "train").
-            balance: "try" (default) attempt balance, fill with abundant; False no
-                balancing; "strict" cap all to smallest. Uses TextFilterConfig.weight.
-            output: If set, save the data to this path as CSV (unified table when
-                format is "per_class", otherwise the returned DataFrame).
+            balance: "try" (default) shuffles and caps classes without changing target-token
+                counts; False disables all balancing; "strict" exactly balances target-token
+                counts within each class, using replacement for targets below
+                ``min_rows_per_target_for_balance``.
+            output: If set, save the data to this path using ``self.output_format``
+                (unified table when format is ``"per_class"``, otherwise the
+                returned DataFrame).
             train_ratio: Fraction of each class for train (default 0.8).
             val_ratio: Fraction of each class for validation (default 0.1).
             test_ratio: Fraction of each class for test (default 0.1). Must sum to 1.0 with train_ratio and val_ratio.
             min_rows_per_class_for_split: Minimum rows per class to perform train/val/test split. Splitting fewer rows
                 yields meaningless splits (e.g. 80/10/10 of 5 rows). Default 10. Set to 0 to disable this check.
+            min_rows_per_target_for_balance: Floor used by ``balance="strict"`` when balancing
+                target-token counts within a class. Sparse targets are oversampled with
+                replacement up to this count unless ``max_size_per_class`` is too small.
+            raise_on_incomplete_classes: If True, raise ValueError when non-empty classes have fewer than
+                min_rows_per_class_for_split rows. Main and incomplete-class files are still saved before raising.
+                Defaults to False, so incomplete classes are excluded from the main generated training data.
+            split_group_col: Override instance ``split_group_col`` for this call. When set (e.g. ``"label"``),
+                each unique target token is confined to a single train/validation/test split.
+            split_group_key: Override instance ``split_group_key`` (e.g. ``[str.strip, str.casefold]``).
 
         Returns:
             Per format: dict of DataFrames, or single DataFrame.
+
+        Raises:
+            ValueError: If split ratios do not sum to ``1.0``, ``format`` is
+                unknown, strict balancing is impossible for the requested cap, or
+                ``raise_on_incomplete_classes`` is True and one or more non-empty
+                classes have too few rows for splitting.
+            TypeError: If lower-level split-key normalization receives an invalid
+                ``split_group_key``.
         """
         if abs((train_ratio + val_ratio + test_ratio) - 1.0) > 1e-6:
             raise ValueError("train_ratio, val_ratio, test_ratio must sum to 1.0")
@@ -342,18 +368,26 @@ class TextPredictionDataCreator:
             max_matches_per_class=max_size_per_class,
             total_target_overall=total_target,
             stats=filter_stats,
+            min_left_context_words_default=self.min_left_context_words,
         )
+        interrupted = bool(filter_stats.get("interrupted"))
         n_processed = filter_stats.get("sentences_processed", 0)
+        sentences_when_cap = filter_stats.get("sentences_when_cap_reached") or {}
         class_dfs = {}
         stats_per_group = {cid: len(matches) for cid, matches in results_per_class.items()}
         total_so_far = sum(stats_per_group.values())
         match_rates = {}
+        log_per_class = len(stats_per_group) <= SUMMARY_LOG_CLASS_THRESHOLD
+        empty_class_ids = []
         for class_id, matches in results_per_class.items():
             n = len(matches)
-            rate = (n / n_processed) if n_processed else 0.0  # fraction of corpus that matched this class
+            # Use sentences scanned until this class hit its cap when available (more meaningful rate)
+            denom = sentences_when_cap.get(class_id) or n_processed
+            rate = (n / denom) if denom else 0.0
             match_rates[class_id] = rate
             cap_str = f"/{max_size_per_class}" if max_size_per_class is not None else ""
-            logger.info("  %s: %s%s matches (%.2f%% of sentences scanned)", class_id, n, cap_str, 100 * rate)
+            if log_per_class:
+                logger.info("  %s: %s%s matches (%.2f%% of sentences scanned)", class_id, n, cap_str, 100 * rate)
             cfg = config_by_id[class_id]
             rows = []
             for sent, spans in matches:
@@ -367,7 +401,9 @@ class TextPredictionDataCreator:
                     "token_count": len(spans),
                 })
             if not rows:
-                logger.warning(f"No matches for class '{class_id}'")
+                empty_class_ids.append(class_id)
+                if log_per_class:
+                    logger.warning(f"No matches for class '{class_id}'")
                 continue
             df = pd.DataFrame(rows)
             df["split"] = split_name
@@ -375,28 +411,33 @@ class TextPredictionDataCreator:
             class_dfs[class_id] = df
 
         if stats_per_group:
-            logger.info("Training filter stats (instances per group): %s", stats_per_group)
             if total_target is not None and total_target > 0:
                 pct = 100.0 * total_so_far / total_target
                 logger.info("Overall: %s/%s (%.1f%%)", total_so_far, total_target, pct)
-            if match_rates:
-                rates_vals = list(match_rates.values())
-                if len(set(rates_vals)) == 1:
-                    logger.info(
-                        "Match rate: %.2f%% of sentences scanned matched each class (single stream, shared denominator)",
-                        100 * rates_vals[0],
-                    )
-                else:
-                    logger.info(
-                        "Match rate per class (fraction of sentences scanned): %s",
-                        {k: f"{100 * v:.2f}%" for k, v in match_rates.items()},
-                    )
+            _log_training_filter_summary(
+                stats_per_group,
+                match_rates,
+                total_target=total_target,
+                total_so_far=total_so_far,
+                max_size_per_class=max_size_per_class,
+                n_processed=n_processed,
+            )
+        if empty_class_ids and not log_per_class:
+            logger.warning(
+                "No matches for %s/%s classes. Examples: %s",
+                len(empty_class_ids),
+                len(stats_per_group),
+                empty_class_ids[:SUMMARY_LOG_EXAMPLES],
+            )
 
-        if balance is not False:
+        if interrupted:
+            logger.warning("Skipping balancing after interrupt so only collected rows are saved.")
+        elif balance is not False:
             class_dfs = _apply_balance(
                 class_dfs,
                 max_size_per_class,
                 balance,
+                min_rows_per_target_for_balance,
                 self.feature_targets,
                 self.seed,
             )
@@ -408,19 +449,64 @@ class TextPredictionDataCreator:
                         n=max_size_per_class, random_state=self.seed
                     ).reset_index(drop=True)
 
-        _apply_auto_split(
-            class_dfs, train_ratio, val_ratio, test_ratio, self.seed,
-            min_rows_per_class=min_rows_per_class_for_split,
+        incomplete_class_dfs: Dict[str, pd.DataFrame] = {}
+        split_class_dfs = class_dfs
+        incomplete_message: Optional[str] = None
+        if (
+            not interrupted
+            and min_rows_per_class_for_split > 0
+            and class_dfs
+        ):
+            too_small = [
+                (cid, len(df))
+                for cid, df in class_dfs.items()
+                if 0 < len(df) < min_rows_per_class_for_split
+            ]
+            if too_small:
+                incomplete_ids = {cid for cid, _ in too_small}
+                incomplete_class_dfs = {
+                    cid: df.copy()
+                    for cid, df in class_dfs.items()
+                    if cid in incomplete_ids
+                }
+                split_class_dfs = {
+                    cid: df
+                    for cid, df in class_dfs.items()
+                    if cid not in incomplete_ids
+                }
+                incomplete_message = (
+                    f"Data split requires at least {min_rows_per_class_for_split} rows per class. "
+                    f"Classes with too few rows: {too_small}."
+                )
+                logger.warning(
+                    "%s Excluding these classes from the main generated training data; "
+                    "retrieved rows will be saved separately and are not used by GRADIEND training.",
+                    incomplete_message,
+                )
+
+        split_group_col = self.split_group_col if split_group_col is None else split_group_col
+        split_group_key = self.split_group_key if split_group_key is None else split_group_key
+
+        split_dataframe_per_group(
+            split_class_dfs,
+            train_ratio,
+            val_ratio,
+            test_ratio,
+            self.seed,
+            split_col="split",
+            min_rows_per_group=0,
+            split_group_col=split_group_col,
+            split_group_key=split_group_key,
         )
 
         if format == "per_class":
-            result: Union[Dict[str, pd.DataFrame], pd.DataFrame] = class_dfs
-            df_to_save = _to_merged(class_dfs)
+            result: Union[Dict[str, pd.DataFrame], pd.DataFrame] = split_class_dfs
+            df_to_save = _to_partial_merged(split_class_dfs) if interrupted or len(split_class_dfs) < 2 else _to_merged(split_class_dfs)
         elif format == "minimal":
-            result = _to_minimal(class_dfs)
+            result = _to_minimal(split_class_dfs)
             df_to_save = result
         elif format == "unified":
-            result = _to_merged(class_dfs)
+            result = _to_partial_merged(split_class_dfs) if interrupted or len(split_class_dfs) < 2 else _to_merged(split_class_dfs)
             df_to_save = result
         else:
             raise ValueError(f"format must be 'per_class', 'unified', or 'minimal'; got {format!r}")
@@ -437,7 +523,32 @@ class TextPredictionDataCreator:
                 output,
                 fmt,
                 df=df_to_save if fmt != "hf" or not isinstance(result, dict) else None,
-                class_dfs=class_dfs if fmt == "hf" and isinstance(result, dict) else None,
+                class_dfs=split_class_dfs if fmt == "hf" and isinstance(result, dict) else None,
+            )
+            if incomplete_class_dfs:
+                incomplete_output = _related_output_path(output, "incomplete_classes", fmt)
+                incomplete_df = _to_partial_merged(incomplete_class_dfs)
+                _save_data(
+                    incomplete_output,
+                    fmt,
+                    df=incomplete_df if fmt != "hf" or not isinstance(result, dict) else None,
+                    class_dfs=incomplete_class_dfs if fmt == "hf" and isinstance(result, dict) else None,
+                )
+                logger.warning(
+                    "Saved %s incomplete-class rows to %s.",
+                    len(incomplete_df),
+                    incomplete_output,
+                )
+        elif incomplete_class_dfs:
+            logger.warning(
+                "Incomplete classes were excluded from returned training data, but no output path/output_dir "
+                "was provided, so their retrieved rows were not saved."
+            )
+
+        if incomplete_message and raise_on_incomplete_classes:
+            raise ValueError(
+                f"{incomplete_message} Incomplete classes were excluded from the main data "
+                "and saved separately before raising."
             )
 
         return result
@@ -484,6 +595,10 @@ class TextPredictionDataCreator:
 
         Returns:
             DataFrame with at least "text" column.
+
+        Raises:
+            ValueError: If ``excluded_spacy_tags`` is set but no ``spacy_model``
+                was configured.
         """
         if self.use_cache and self.output_dir is not None:
             out_path = output or self._resolve_output_path("neutral", None)
@@ -504,11 +619,22 @@ class TextPredictionDataCreator:
         excluded_words = list(dict.fromkeys(target_words + extra))
         if not excluded_words and not excluded_spacy_tags:
             if max_size is not None:
-                from itertools import islice
-                neutral = list(islice(sentence_stream, max_size))
+                neutral = []
+                try:
+                    for sentence in sentence_stream:
+                        neutral.append(sentence)
+                        if len(neutral) >= max_size:
+                            break
+                except KeyboardInterrupt:
+                    logger.warning("Neutral data generation interrupted by user; keeping %s rows collected so far.", len(neutral))
                 logger.info("Neutral: no exclusion filters, stopped at max_size=%s (got %s).", max_size, len(neutral))
             else:
-                neutral = list(sentence_stream)
+                neutral = []
+                try:
+                    for sentence in sentence_stream:
+                        neutral.append(sentence)
+                except KeyboardInterrupt:
+                    logger.warning("Neutral data generation interrupted by user; keeping %s rows collected so far.", len(neutral))
                 logger.info("Neutral: no exclusion filters, kept all %s sentences.", len(neutral))
         else:
             neutral, neutral_stats = _filter_neutral(
@@ -539,233 +665,3 @@ class TextPredictionDataCreator:
             _save_data(out_path, fmt, df=df)
 
         return df
-
-
-def _apply_balance(
-    class_dfs: Dict[str, pd.DataFrame],
-    max_size_per_class: Optional[int],
-    balance: Union[bool, str],
-    feature_targets: List[TextFilterConfig],
-    seed: int,
-) -> Dict[str, pd.DataFrame]:
-    """Apply balancing: strict caps all to smallest; try does round-robin with weights then fills."""
-    if not class_dfs:
-        return class_dfs
-
-    config_by_id = {_class_id(cfg, i): cfg for i, cfg in enumerate(feature_targets)}
-    class_ids = list(class_dfs.keys())
-    weights = [
-        config_by_id[cid].weight if cid in config_by_id else 1.0
-        for cid in class_ids
-    ]
-    weights = [max(0.001, w) for w in weights]
-
-    shuffled: Dict[str, pd.DataFrame] = {}
-    for cid in class_ids:
-        df = class_dfs[cid].copy()
-        shuffled[cid] = df.sample(frac=1, random_state=seed).reset_index(drop=True)
-
-    if balance == "strict":
-        min_len = min(len(shuffled[cid]) for cid in class_ids)
-        cap = min(min_len, max_size_per_class) if max_size_per_class is not None else min_len
-        return {
-            cid: shuffled[cid].iloc[:cap].reset_index(drop=True)
-            for cid in class_ids
-        }
-
-    if balance == "try":
-        cycle = []
-        for i, cid in enumerate(class_ids):
-            n = max(1, int(round(weights[i])))
-            cycle.extend([cid] * n)
-        if not cycle:
-            cycle = class_ids
-
-        indices = {cid: 0 for cid in class_ids}
-        caps = {
-            cid: min(len(shuffled[cid]), max_size_per_class or len(shuffled[cid]))
-            for cid in class_ids
-        }
-        result_rows: Dict[str, List[dict]] = {cid: [] for cid in class_ids}
-        exhausted = set()
-        added_any = True
-        while added_any:
-            added_any = False
-            for cid in cycle:
-                if cid in exhausted:
-                    continue
-                if len(result_rows[cid]) >= caps[cid]:
-                    exhausted.add(cid)
-                    continue
-                idx = indices[cid]
-                if idx >= len(shuffled[cid]):
-                    exhausted.add(cid)
-                    continue
-                row = shuffled[cid].iloc[idx].to_dict()
-                result_rows[cid].append(row)
-                indices[cid] = idx + 1
-                added_any = True
-                if len(result_rows[cid]) >= caps[cid]:
-                    exhausted.add(cid)
-            if exhausted and len(exhausted) == len(class_ids):
-                break
-
-        return {
-            cid: pd.DataFrame(rows) if rows else pd.DataFrame()
-            for cid, rows in result_rows.items()
-        }
-
-    return class_dfs
-
-
-def _filter_neutral(
-    sentences: Union[Iterable[str], List[str]],
-    excluded_words: List[str],
-    excluded_spacy_tags: Optional[Union[SpacyTagSpec, List[SpacyTagSpec]]],
-    spacy_model: Optional[str],
-    download_if_missing: bool = False,
-    max_size: Optional[int] = None,
-) -> Tuple[List[str], Dict[str, int]]:
-    """Filter out sentences containing excluded words or spacy tags.
-
-    Consumes the sentence iterable (e.g. from iter_sentences_from_texts).
-    If max_size is set, stops after collecting that many kept sentences.
-
-    Returns:
-        (kept_sentences, stats) with stats e.g. {"kept": N, "excluded": M, "total": T}.
-    """
-    if excluded_spacy_tags is not None and spacy_model is None:
-        raise ValueError("spacy_model required when excluded_spacy_tags is set")
-
-    import re
-    word_pattern = None
-    if excluded_words:
-        word_pattern = re.compile(
-            "|".join(rf"\b{re.escape(w)}\b" for w in excluded_words),
-            re.IGNORECASE,
-        )
-
-    specs = excluded_spacy_tags
-    if specs is not None and isinstance(specs, dict):
-        specs = [specs]
-
-    from itertools import islice
-    if not excluded_words and not specs:
-        out = list(sentences) if max_size is None else list(islice(sentences, max_size))
-        return out, {"kept": len(out), "excluded": 0, "total": len(out)}
-
-    nlp = None
-    if specs:
-        nlp = load_spacy_model(spacy_model, download_if_missing=download_if_missing)
-
-    out: List[str] = []
-    excluded_count = 0
-    total_count = 0
-    it = iter(sentences)
-    pbar = tqdm(
-        it, desc="Neutral filter", unit=" sent", leave=True, position=0, dynamic_ncols=True,
-        mininterval=2.0,
-    )
-    for sent in pbar:
-        total_count += 1
-        if word_pattern and word_pattern.search(sent):
-            excluded_count += 1
-            pbar.set_postfix_str(f"kept={len(out)} | excluded={excluded_count}", refresh=False)
-            continue
-        if nlp is not None and specs:
-            doc = nlp(sent)
-            for token in doc:
-                if any(token_matches_tags(token, s) for s in specs):
-                    excluded_count += 1
-                    pbar.set_postfix_str(f"kept={len(out)} | excluded={excluded_count}", refresh=False)
-                    break
-            else:
-                out.append(sent)
-                pbar.set_postfix_str(f"kept={len(out)} | excluded={excluded_count}", refresh=False)
-                if max_size is not None and len(out) >= max_size:
-                    break
-        else:
-            out.append(sent)
-            pbar.set_postfix_str(f"kept={len(out)} | excluded={excluded_count}", refresh=False)
-            if max_size is not None and len(out) >= max_size:
-                break
-    stats = {"kept": len(out), "excluded": excluded_count, "total": total_count}
-    return out, stats
-
-
-def _apply_auto_split(
-    class_dfs: Dict[str, pd.DataFrame],
-    train_ratio: float,
-    val_ratio: float,
-    test_ratio: float,
-    seed: int,
-    min_rows_per_class: int = 0,
-) -> None:
-    """Assign train/validation/test split per class by ratio. Modifies class_dfs in place."""
-    if min_rows_per_class > 0:
-        too_small = [
-            (cid, len(df))
-            for cid, df in class_dfs.items()
-            if len(df) > 0 and len(df) < min_rows_per_class
-        ]
-        if too_small:
-            msg = (
-                f"Data split requires at least {min_rows_per_class} rows per class. "
-                f"Classes with too few rows: {too_small}. "
-                "Use more base data, increase max_size_per_class, or set min_rows_per_class_for_split=0 to disable."
-            )
-            raise ValueError(msg)
-    for class_id in list(class_dfs.keys()):
-        df = class_dfs[class_id]
-        if len(df) == 0:
-            continue
-        df = df.sample(frac=1, random_state=seed).reset_index(drop=True)
-        n = len(df)
-        n_train = max(0, int(round(n * train_ratio)))
-        n_val = max(0, int(round(n * val_ratio)))
-        n_test = n - n_train - n_val
-        if n_test < 0:
-            n_test = 0
-            n_val = n - n_train
-        splits = ["train"] * n_train + ["validation"] * n_val + ["test"] * n_test
-        df["split"] = splits[:n]
-        class_dfs[class_id] = df
-
-
-def _to_minimal(class_dfs: Dict[str, pd.DataFrame]) -> pd.DataFrame:
-    """Convert per-class to minimal (masked, label, label_class, split)."""
-    rows = []
-    for class_id, df in class_dfs.items():
-        for _, row in df.iterrows():
-            rows.append({
-                "masked": row["masked"],
-                "label": row["label"],
-                "label_class": class_id,
-                "split": row["split"],
-            })
-    return pd.DataFrame(rows)
-
-
-def _to_merged(class_dfs: Dict[str, pd.DataFrame]) -> pd.DataFrame:
-    """Build training DataFrame (factual only): masked, split, label_class, label, feature_class_id.
-
-    feature_class_id is the string id from TextFilterConfig (same as label_class per row).
-    Splits are applied per feature class in _apply_auto_split.
-    """
-    from gradiend.trainer.text.prediction.unified_data import per_class_dict_to_unified
-    from gradiend.trainer.text.prediction.unified_schema import (
-        UNIFIED_FACTUAL,
-        UNIFIED_FACTUAL_CLASS,
-    )
-
-    df = per_class_dict_to_unified(
-        class_dfs,
-        classes=list(class_dfs.keys()),
-        masked_col="masked",
-        split_col="split",
-        use_class_names_as_columns=True,
-    )
-    # Map unified schema to merged column names expected by callers
-    df = df.rename(columns={UNIFIED_FACTUAL_CLASS: "label_class", UNIFIED_FACTUAL: "label"})
-    df["feature_class_id"] = df["label_class"]
-    return df

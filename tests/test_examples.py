@@ -6,8 +6,9 @@ Also tests encoder distribution plot violin count.
 """
 
 import os
-import sys
 import importlib.util
+import ast
+import sys
 from pathlib import Path
 
 import pytest
@@ -18,15 +19,29 @@ from unittest.mock import MagicMock, patch
 from gradiend.visualizer.encoder_distributions import plot_encoder_distributions
 
 
-# Example files that should exist
-EXAMPLE_FILES = [
-    "gradiend/examples/gender_en.py",
-    "gradiend/examples/gender_de.py",
-    "gradiend/examples/gender_de_decoder_only.py",
-    "gradiend/examples/gender_de_detailed.py",
-    "gradiend/examples/race_religion.py",
-]
+EXAMPLE_FILES = sorted(
+    str(path).replace("\\", "/")
+    for path in Path("gradiend/examples").glob("*.py")
+    if path.name != "__init__.py"
+)
 
+
+def _violin_group_count(trainer, encoder_df, output_path, **plot_kwargs) -> int:
+    """Run plot_encoder_distributions and return the number of violin x-axis groups."""
+    pytest.importorskip("seaborn")
+    with patch("matplotlib.pyplot.show"), patch("matplotlib.pyplot.savefig"), patch(
+        "seaborn.violinplot"
+    ) as mock_violinplot:
+        plot_encoder_distributions(
+            trainer=trainer,
+            encoder_df=encoder_df,
+            output=output_path,
+            show=False,
+            **plot_kwargs,
+        )
+        assert mock_violinplot.called, "Expected seaborn.violinplot to be called"
+        plot_data = mock_violinplot.call_args.kwargs["data"]
+        return int(plot_data["x_cat"].nunique())
 
 class TestExampleFiles:
     """Test that example files exist and can be imported."""
@@ -53,12 +68,54 @@ class TestExampleFiles:
             pytest.fail(f"Example file {example_file} has syntax error: {e}")
         except Exception as e:
             pytest.fail(f"Error reading example file {example_file}: {e}")
+
+    @pytest.mark.parametrize("example_file", EXAMPLE_FILES)
+    def test_example_file_imports_without_running_workflow(self, example_file):
+        """Example modules should import cleanly without starting expensive workflows."""
+        module_name = f"_gradiend_example_smoke_{Path(example_file).stem}"
+        spec = importlib.util.spec_from_file_location(module_name, example_file)
+        assert spec is not None
+        assert spec.loader is not None
+
+        module = importlib.util.module_from_spec(spec)
+        old_module = sys.modules.get(module_name)
+        sys.modules[module_name] = module
+        try:
+            spec.loader.exec_module(module)
+        finally:
+            if old_module is None:
+                sys.modules.pop(module_name, None)
+            else:
+                sys.modules[module_name] = old_module
     
     def test_examples_directory_exists(self):
         """Test that examples directory exists."""
         examples_dir = Path("gradiend/examples")
         assert examples_dir.exists(), "Examples directory does not exist"
         assert examples_dir.is_dir(), "Examples path is not a directory"
+
+    @pytest.mark.parametrize("example_file", EXAMPLE_FILES)
+    def test_training_arguments_fail_on_non_convergence(self, example_file):
+        """Executable training examples must fail loudly when GRADIEND does not converge."""
+        tree = ast.parse(Path(example_file).read_text(encoding="utf-8"), filename=example_file)
+        calls = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and (
+                (isinstance(node.func, ast.Name) and node.func.id == "TrainingArguments")
+                or (isinstance(node.func, ast.Attribute) and node.func.attr == "TrainingArguments")
+            )
+        ]
+        for call in calls:
+            value = None
+            for kw in call.keywords:
+                if kw.arg == "fail_on_non_convergence":
+                    value = kw.value
+                    break
+            assert isinstance(value, ast.Constant) and value.value is True, (
+                f"{example_file}: TrainingArguments must set fail_on_non_convergence=True"
+            )
 
 
 class TestEncoderDistributionViolinCount:
@@ -87,20 +144,55 @@ class TestEncoderDistributionViolinCount:
         # Expected: 2 unique source_ids -> 2 violin groups (paired mode)
         # In paired mode with 2 labels, we get 1 violin (pair_id = 0 for both)
         expected_violin_groups = 1  # Both labels form one pair
-        
-        with patch('matplotlib.pyplot.show') as mock_show:
-            with patch('matplotlib.pyplot.savefig') as mock_savefig:
-                output_path = plot_encoder_distributions(
-                    trainer=trainer,
-                    encoder_df=encoder_df,
-                    output=os.path.join(temp_dir, "test_plot.pdf"),
-                    show=False
-                )
-                
-                # Verify plot was created
-                assert output_path != ""
-                mock_savefig.assert_called()
-    
+
+        group_count = _violin_group_count(
+            trainer,
+            encoder_df,
+            os.path.join(temp_dir, "test_plot.pdf"),
+        )
+        assert group_count == expected_violin_groups
+
+    def test_encoder_distribution_class_label_mapping_updates_transition_labels(self, temp_dir):
+        """Individual class labels can be mapped before transition legend labels are built."""
+        pytest.importorskip("matplotlib")
+        import matplotlib.pyplot as plt
+
+        trainer = MagicMock()
+        trainer.run_id = "test_run"
+        trainer.pair = ("NM", "NF")
+        trainer.get_model = MagicMock(return_value=None)
+        trainer._id2label = {}
+        trainer.config = None
+
+        encoder_df = pd.DataFrame({
+            "encoded": np.random.randn(40),
+            "label": [1.0] * 20 + [-1.0] * 20,
+            "source_id": ["NM"] * 20 + ["NF"] * 20,
+            "target_id": ["NF"] * 20 + ["NM"] * 20,
+            "type": ["training"] * 40,
+        })
+
+        with patch("matplotlib.pyplot.show"):
+            with patch("matplotlib.pyplot.close"):
+                with patch("matplotlib.pyplot.savefig"):
+                    output_path = plot_encoder_distributions(
+                        trainer=trainer,
+                        encoder_df=encoder_df,
+                        output=os.path.join(temp_dir, "mapped_labels.pdf"),
+                        class_label_mapping={"NM": "Masc. Nom.", "NF": "Fem. Nom."},
+                        show=False,
+                    )
+
+                    ax = plt.gcf().axes[0]
+                    legend = ax.get_legend()
+                    labels = [txt.get_text() for txt in legend.get_texts()]
+
+        assert output_path != ""
+        assert "Masc. Nom. -> Fem. Nom." in labels
+        assert "Fem. Nom. -> Masc. Nom." in labels
+
+
+class TestEncoderDistributionViolinVariants:
     def test_encoder_distribution_violin_count_multiple_groups(self, temp_dir):
         """Test encoder distribution with multiple violin groups."""
         pytest.importorskip("matplotlib")
@@ -121,19 +213,14 @@ class TestEncoderDistributionViolinCount:
         
         # Expected: 4 labels -> 2 pairs -> 2 violin groups
         expected_violin_groups = 2
-        
-        with patch('matplotlib.pyplot.show') as mock_show:
-            with patch('matplotlib.pyplot.savefig') as mock_savefig:
-                output_path = plot_encoder_distributions(
-                    trainer=trainer,
-                    encoder_df=encoder_df,
-                    output=os.path.join(temp_dir, "test_plot.pdf"),
-                    show=False
-                )
-                
-                assert output_path != ""
-                mock_savefig.assert_called()
-    
+
+        group_count = _violin_group_count(
+            trainer,
+            encoder_df,
+            os.path.join(temp_dir, "test_plot.pdf"),
+        )
+        assert group_count == expected_violin_groups
+
     def test_encoder_distribution_violin_count_with_neutral(self, temp_dir):
         """Test encoder distribution with neutral data."""
         pytest.importorskip("matplotlib")
@@ -148,23 +235,18 @@ class TestEncoderDistributionViolinCount:
             "label": [1.0] * 50 + [2.0] * 50 + [0.0] * 50,  # 0.0 is neutral
             "source_id": ["1"] * 50 + ["2"] * 50 + ["neutral"] * 50,
             "target_id": ["2"] * 50 + ["1"] * 50 + ["neutral"] * 50,
-            "type": ["training"] * 100 + ["neutral"] * 50,
+            "type": ["training"] * 100 + ["neutral_dataset"] * 50,
         })
         
-        # Expected: 1 training pair + 1 neutral group = 2 violin groups
+        # Expected: 1 training pair + 1 neutral x-axis group
         expected_violin_groups = 2
-        
-        with patch('matplotlib.pyplot.show') as mock_show:
-            with patch('matplotlib.pyplot.savefig') as mock_savefig:
-                output_path = plot_encoder_distributions(
-                    trainer=trainer,
-                    encoder_df=encoder_df,
-                    output=os.path.join(temp_dir, "test_plot.pdf"),
-                    show=False
-                )
-                
-                assert output_path != ""
-                mock_savefig.assert_called()
+
+        group_count = _violin_group_count(
+            trainer,
+            encoder_df,
+            os.path.join(temp_dir, "test_plot.pdf"),
+        )
+        assert group_count == expected_violin_groups
     
     def test_encoder_distribution_violin_count_with_paired_legend_labels(self, temp_dir):
         """Test encoder distribution with explicit paired_legend_labels."""
@@ -183,24 +265,19 @@ class TestEncoderDistributionViolinCount:
             "type": ["training"] * 200,
         })
         
-        # Explicit pairing: labels 0,1 -> pair 0, labels 2,3 -> pair 1
-        paired_legend_labels = ["label1", "label2", "label3", "label4"]
+        # Legend labels must match the transitions present in encoder_df.
+        paired_legend_labels = ["1 -> 2", "2 -> 1", "3 -> 4", "4 -> 3"]
         
         # Expected: 2 pairs -> 2 violin groups
         expected_violin_groups = 2
-        
-        with patch('matplotlib.pyplot.show') as mock_show:
-            with patch('matplotlib.pyplot.savefig') as mock_savefig:
-                output_path = plot_encoder_distributions(
-                    trainer=trainer,
-                    encoder_df=encoder_df,
-                    output=os.path.join(temp_dir, "test_plot.pdf"),
-                    show=False,
-                    paired_legend_labels=paired_legend_labels
-                )
-                
-                assert output_path != ""
-                mock_savefig.assert_called()
+
+        group_count = _violin_group_count(
+            trainer,
+            encoder_df,
+            os.path.join(temp_dir, "test_plot.pdf"),
+            paired_legend_labels=paired_legend_labels,
+        )
+        assert group_count == expected_violin_groups
     
     def test_encoder_distribution_violin_count_matches_data(self, temp_dir):
         """Test that violin count matches the data structure (bug-indicating test)."""
@@ -230,28 +307,10 @@ class TestEncoderDistributionViolinCount:
         
         # Expected: 6 labels -> 3 pairs -> 3 violin groups
         expected_violin_groups = 3
-        
-        with patch('matplotlib.pyplot.show') as mock_show:
-            with patch('matplotlib.pyplot.savefig') as mock_savefig:
-                # Also patch the actual plotting to verify violin count
-                with patch('seaborn.violinplot') as mock_violinplot:
-                    output_path = plot_encoder_distributions(
-                        trainer=trainer,
-                        encoder_df=encoder_df,
-                        output=os.path.join(temp_dir, "test_plot.pdf"),
-                        show=False
-                    )
-                    
-                    # Verify plot was created
-                    assert output_path != ""
-                    mock_savefig.assert_called()
-                    
-                    # Verify violinplot was called with correct data
-                    if mock_violinplot.called:
-                        call_kwargs = mock_violinplot.call_args[1]
-                        plot_data = call_kwargs.get('data')
-                        if plot_data is not None:
-                            # Check that we have the expected number of unique violin groups
-                            unique_groups = plot_data['x_cat'].nunique() if 'x_cat' in plot_data.columns else 0
-                            # The actual count should match expected (allowing for some flexibility)
-                            assert unique_groups > 0, "Should have at least one violin group"
+
+        group_count = _violin_group_count(
+            trainer,
+            encoder_df,
+            os.path.join(temp_dir, "test_plot.pdf"),
+        )
+        assert group_count == expected_violin_groups

@@ -89,7 +89,19 @@ def derive_default_feature_factor(
     Rule: feature_factor = - feature_class_encoding_direction[class_name]
     when available.
 
-    class_name is required.
+    Args:
+        trainer: Trainer-like object used as fallback for model loading and
+            class-label inference.
+        model_with_gradiend: Optional loaded model or model path. If omitted,
+            ``trainer.get_model()`` is used when available.
+        class_name: Target feature class for which the strengthening direction
+            should be derived. Required.
+
+    Returns:
+        Feature factor that pushes decoder evaluation toward ``class_name``.
+
+    Raises:
+        ValueError: If ``class_name`` is omitted or no direction can be inferred.
     """
     model = model_with_gradiend
     if model is None and hasattr(trainer, "get_model"):
@@ -126,7 +138,16 @@ def derive_feature_factor_for_class(
     model_with_gradiend: Any = None,
     class_name: Optional[str] = None,
 ) -> float:
-    """Derive feature factor for a specific class (push toward class_name)."""
+    """Derive the feature factor that pushes decoder evaluation toward one class.
+
+    Args:
+        trainer: Trainer-like object used for model and class-direction context.
+        model_with_gradiend: Optional loaded model or model path.
+        class_name: Target feature class. Required.
+
+    Returns:
+        Feature factor that strengthens ``class_name``.
+    """
     if class_name is None:
         raise ValueError("class_name is required to derive a feature factor.")
     return derive_default_feature_factor(trainer, model_with_gradiend, class_name=class_name)
@@ -136,8 +157,20 @@ def default_decoder_feature_factors(
     trainer: Any,
     model_with_gradiend: Any = None,
 ) -> List[float]:
-    """Return default feature factors for all trainer target classes (feature factor such that gradient update with
-    positive learning rate pushes toward counterfactual class)."""
+    """Return default feature factors for all trainer target classes.
+
+    Args:
+        trainer: Trainer-like object used to resolve target classes and model
+            direction metadata.
+        model_with_gradiend: Optional loaded model or model path. If omitted,
+            ``trainer.get_model()`` is used by the per-class resolver.
+
+    Returns:
+        List of feature factors, one per target class.
+
+    Raises:
+        ValueError: If target classes or feature directions cannot be inferred.
+    """
     classes = getattr(trainer, "target_classes", None)
     if not classes and hasattr(trainer, "config"):
         classes = getattr(trainer.config, "target_classes", None)
@@ -146,9 +179,9 @@ def default_decoder_feature_factors(
 
     if not classes:
         raise ValueError(
-            "classes must be provided to derive default feature factors. "
-            "Ensure target_classes are set on the trainer or config (e.g. load data via trainer.train() "
-            "or call _ensure_data_for_training before evaluate_decoder when use_cache=True)."
+            "Could not derive default feature factors automatically: target_classes are not set. "
+            "Set target_classes on TextPredictionConfig (e.g. target_classes=['class_a', 'class_b']), "
+            "or ensure your training data is loaded and contains exactly two classes so they can be inferred."
         )
 
     return [derive_feature_factor_for_class(trainer, model_with_gradiend, cls) for cls in classes]
@@ -174,6 +207,13 @@ class BaseContext:
 
 class SelectionPolicy(Protocol):
     def select(self, metric: str, candidates: Sequence[Candidate], ctx: BaseContext) -> Optional[Candidate]:
+        """Return the selected candidate for ``metric`` or ``None``.
+
+        Args:
+            metric: Metric name to optimize.
+            candidates: Candidate grid entries available for this metric.
+            ctx: Base evaluation context, currently carrying base LMS.
+        """
         ...
 
 
@@ -191,6 +231,13 @@ class LMSThresholdPolicy:
     require_base_lms: bool = True
 
     def select(self, metric: str, candidates: Sequence[Candidate], ctx: BaseContext) -> Optional[Candidate]:
+        """Select the best candidate above the LMS threshold for ``metric``.
+
+        Args:
+            metric: Metric name to optimize.
+            candidates: Candidate grid entries available for this metric.
+            ctx: Base evaluation context with ``base_lms``.
+        """
         base_lms = ctx.base_lms
         if base_lms is None:
             if self.require_base_lms:
@@ -212,6 +259,13 @@ class LMSThresholdPolicy:
 class LMSTimesMetricPolicy:
     """Pick argmax(metric * lms)."""
     def select(self, metric: str, candidates: Sequence[Candidate], ctx: BaseContext) -> Optional[Candidate]:
+        """Select the candidate maximizing ``metric * lms``.
+
+        Args:
+            metric: Metric name to optimize.
+            candidates: Candidate grid entries available for this metric.
+            ctx: Base evaluation context. Accepted for policy compatibility.
+        """
         return max(
             candidates,
             key=lambda c: c.metrics.get(metric, float("-inf")) * c.lms,
@@ -277,6 +331,22 @@ def compute_metric_summaries(
     feature_factor pushes toward the *other* class (weaken = use opposite direction).
     class_to_ff must map class_name -> feature_factor that strengthens it. The weaken
     summary selects from candidates with ff in {class_to_ff[c] for c != base_class}.
+
+    Args:
+        results: Raw decoder-grid result mapping, including a ``"base"`` entry
+            with LMS and one entry per candidate.
+        metrics: Metric names to summarize, e.g. target class ids or
+            ``"<class>_weaken"``.
+        selector: Selection policy used to choose the best candidate per metric.
+        extractor: Function converting raw results into candidates and base LMS
+            context.
+        feature_factor_from_id: Function extracting feature factor from a
+            candidate id.
+        lr_from_id: Function extracting learning rate from a candidate id.
+        empty_default_id: Fallback id used when no candidate can be selected.
+        class_to_ff: Optional mapping from class id to its strengthening feature
+            factor. Used to restrict weaken summaries to candidates that push
+            toward another class.
 
     Returns:
       {metric: {"value", "feature_factor", "learning_rate", "id", "strengthen"}}
@@ -533,7 +603,11 @@ class DecoderEvaluator:
         model_id = os.path.basename(path) if path and str(path).startswith("results/models") else path
 
         if lrs is None:
-            lrs = [1e2, 3e2, 1e1, 3e0, 1e0, 3e-1, 1e-1, 3e-2, 1e-2, 3e-3, 1e-3]
+            lrs = [
+                m * 10 ** e
+                for e in range(2, -4, -1)
+                for m in [5, 2, 1]
+            ]
 
         experiment_dir = trainer.experiment_dir
         cache_file = resolve_decoder_grid_cache_path(experiment_dir, explicit_path=output_path)
@@ -580,9 +654,14 @@ class DecoderEvaluator:
                             class_to_ff=class_to_ff,
                         )
                         if summary_key_aliases:
-                            for target_key, result_key in summary_key_aliases.items():
-                                if result_key in summary:
-                                    summary[target_key] = summary[result_key]
+                            # Copy first so we don't overwrite when target_key and result_key cross (e.g. commutative <-> non-commutative)
+                            alias_updates = {
+                                target_key: summary[result_key]
+                                for target_key, result_key in summary_key_aliases.items()
+                                if result_key in summary
+                            }
+                            for target_key, val in alias_updates.items():
+                                summary[target_key] = val
                             # Only remove internal result keys; keep keys that are also target class keys (multi-class case)
                             for k in set(summary_key_aliases.values()):
                                 if k not in summary_key_aliases:
@@ -661,17 +740,20 @@ class DecoderEvaluator:
                                 logger.warning("Error writing decoder cache %s: %s", cache_file, e)
                         plot_paths: List[str] = []
                         if hasattr(trainer, "plot_probability_shifts"):
-                            plot_keys_override = list(summary_key_aliases.keys()) if summary_key_aliases else None
-                            plot_paths = _plot_all_target_classes(
-                                trainer,
-                                summary,
-                                relevant_results,
-                                experiment_dir=getattr(trainer, "experiment_dir", None),
-                                run_id=run_id,
-                                show=show if show is not None else True,
-                                increase_target_probabilities=increase_target_probabilities,
-                                plot_keys_override=plot_keys_override,
-                            )
+                            try:
+                                plot_keys_override = list(summary_key_aliases.keys()) if summary_key_aliases else None
+                                plot_paths = _plot_all_target_classes(
+                                    trainer,
+                                    summary,
+                                    relevant_results,
+                                    experiment_dir=getattr(trainer, "experiment_dir", None),
+                                    run_id=run_id,
+                                    show=show if show is not None else True,
+                                    increase_target_probabilities=increase_target_probabilities,
+                                    plot_keys_override=plot_keys_override,
+                                )
+                            except ImportError as e:
+                                logger.warning("Skipping decoder probability-shift plots: %s", e)
                         out = {**summary, "grid": relevant_results}
                         if plot_paths:
                             out["plot_paths"] = plot_paths
@@ -795,9 +877,14 @@ class DecoderEvaluator:
             class_to_ff=class_to_ff,
         )
         if summary_key_aliases:
-            for target_key, result_key in summary_key_aliases.items():
-                if result_key in summary:
-                    summary[target_key] = summary[result_key]
+            # Copy first so we don't overwrite when target_key and result_key cross (e.g. commutative <-> non-commutative)
+            alias_updates = {
+                target_key: summary[result_key]
+                for target_key, result_key in summary_key_aliases.items()
+                if result_key in summary
+            }
+            for target_key, val in alias_updates.items():
+                summary[target_key] = val
             # Only remove internal result keys; keep keys that are also target class keys (multi-class case)
             for k in set(summary_key_aliases.values()):
                 if k not in summary_key_aliases:
@@ -864,17 +951,20 @@ class DecoderEvaluator:
                 except Exception as e:
                     logger.warning("Error writing decoder cache %s: %s", cache_file, e)
             if hasattr(trainer, "plot_probability_shifts"):
-                plot_keys_override = list(summary_key_aliases.keys()) if summary_key_aliases else None
-                plot_paths = _plot_all_target_classes(
-                    trainer,
-                    summary,
-                    relevant_results,
-                    experiment_dir=getattr(trainer, "experiment_dir", None),
-                    run_id=run_id,
-                    show=show if show is not None else True,
-                    increase_target_probabilities=increase_target_probabilities,
-                    plot_keys_override=plot_keys_override,
-                )
+                try:
+                    plot_keys_override = list(summary_key_aliases.keys()) if summary_key_aliases else None
+                    plot_paths = _plot_all_target_classes(
+                        trainer,
+                        summary,
+                        relevant_results,
+                        experiment_dir=getattr(trainer, "experiment_dir", None),
+                        run_id=run_id,
+                        show=show if show is not None else True,
+                        increase_target_probabilities=increase_target_probabilities,
+                        plot_keys_override=plot_keys_override,
+                    )
+                except ImportError as e:
+                    logger.warning("Skipping decoder probability-shift plots: %s", e)
 
         if cache_file and not plot:
             try:
@@ -933,6 +1023,10 @@ class DecoderEvaluator:
             empty_default_id: Fallback id used when no candidate is selected (for comparison with base).
                 When the selector returns None, we first try the candidate with learning_rate != 0 and smallest
                 absolute value; only if none exists do we use this default (representing the base model).
+            class_to_ff: Optional mapping from class id to the feature factor
+                that strengthens it. Used for ``*_weaken`` metrics so weakening
+                one class only considers candidates that strengthen another
+                class.
 
         Returns:
             A dict keyed by metric name with values containing selected metric

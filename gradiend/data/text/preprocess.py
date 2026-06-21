@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Callable, Iterable, Iterator, List, Optional
+from typing import Callable, Iterable, Iterator, List, Optional, Union
 
 from gradiend.data.core.spacy_util import load_spacy_model
 from gradiend.util.logging import get_logger
@@ -23,9 +23,11 @@ class TextPreprocessConfig:
     no preprocessing is applied and texts are used as-is.
 
     Attributes:
-        split_to_sentences: If ``True``, split input texts into sentences (via regex on
-            ``.!?`` or, when a spaCy model is provided, via spaCy sentencizer). If ``False``,
-            each input string is treated as one segment. Default ``False``.
+        split_to_sentences: If ``True`` or ``1``, split input texts into individual
+            sentences (via regex on ``.!?`` or, when a spaCy model is provided, via
+            spaCy sentencizer). If an integer greater than 1, join non-overlapping
+            sentence windows of that size, e.g. ``2`` yields ``(s1 s2), (s3 s4), ...``.
+            If ``False``, each input string is treated as one segment. Default ``False``.
         min_chars: Drop segments (sentences or whole texts) with strictly fewer than this
             many characters. ``None`` means no minimum. Default ``None``.
         max_chars: Drop segments with strictly more than this many characters. ``None``
@@ -36,11 +38,26 @@ class TextPreprocessConfig:
             returns ``True`` are kept. ``None`` means no custom filter. Default ``None``.
     """
 
-    split_to_sentences: bool = False
+    split_to_sentences: Union[bool, int] = False
     min_chars: Optional[int] = None
     max_chars: Optional[int] = None
     exclude_chars: Optional[str] = None
     custom_filter: Optional[Callable[[str], bool]] = field(default=None, repr=False)
+
+    def __post_init__(self) -> None:
+        value = self.split_to_sentences
+        if isinstance(value, bool):
+            return
+        if not isinstance(value, int):
+            raise TypeError(
+                "TextPreprocessConfig.split_to_sentences must be bool or int, "
+                f"got {type(value).__name__}"
+            )
+        if value < 1:
+            raise ValueError(
+                "TextPreprocessConfig.split_to_sentences integer values must be >= 1, "
+                f"got {value}"
+            )
 
 
 def preprocess_texts(
@@ -54,15 +71,16 @@ def preprocess_texts(
     If config is None or split_to_sentences is False, returns texts as-is
     (with optional length/char filtering).
 
-    When split_to_sentences is True:
+    When split_to_sentences is True or an integer:
     - If spacy_model is given: use spacy sentencizer.
     - Otherwise: use simple regex split on .!?
+    - Integer values greater than 1 yield non-overlapping sentence windows.
 
     Args:
         texts: Input text strings (paragraphs or documents).
         config: TextPreprocessConfig. If None, returns texts as-is.
         spacy_model: Spacy model name for sentencizer (e.g. "de_core_news_sm").
-            Only used when split_to_sentences=True.
+            Only used when split_to_sentences is truthy.
         download_if_missing: If True, download the spacy model if it is not found.
 
     Returns:
@@ -84,7 +102,7 @@ def preprocess_texts(
 
     out: List[str] = []
     if config.split_to_sentences:
-        sentences = _split_to_sentences(texts, spacy_model, download_if_missing)
+        sentences = _split_to_sentences(texts, spacy_model, download_if_missing, config.split_to_sentences)
     else:
         sentences = texts
 
@@ -121,12 +139,42 @@ def _split_to_sentences(
     texts: List[str],
     spacy_model: Optional[str],
     download_if_missing: bool = False,
+    window_size: Union[bool, int] = True,
 ) -> List[str]:
     """Split texts into sentences. Newlines are split first (no sentence contains \\n), then spacy or regex."""
     lines = _split_on_newlines(texts)
+    out: List[str] = []
     if spacy_model:
-        return _split_with_spacy(lines, spacy_model, download_if_missing)
-    return _split_simple(lines)
+        nlp = load_spacy_model(spacy_model, download_if_missing=download_if_missing)
+        if "sentencizer" not in nlp.pipe_names:
+            nlp.add_pipe("sentencizer")
+        for line in lines:
+            pieces = [sent.text.strip() for sent in nlp(line).sents if sent.text.strip()]
+            out.extend(_window_sentences(pieces, window_size))
+        return out
+    pattern = re.compile(r"(?<=[.!?])\s+")
+    for line in lines:
+        pieces = [p.strip() for p in pattern.split(line) if p.strip()]
+        out.extend(_window_sentences(pieces, window_size))
+    return out
+
+
+def _split_sentence_count(value: Union[bool, int]) -> int:
+    if isinstance(value, bool):
+        return 1 if value else 0
+    return int(value)
+
+
+def _window_sentences(sentences: List[str], window_size: Union[bool, int]) -> List[str]:
+    size = _split_sentence_count(window_size)
+    if size <= 1:
+        return sentences
+    out: List[str] = []
+    for i in range(0, len(sentences), size):
+        chunk = " ".join(s.strip() for s in sentences[i : i + size] if s.strip())
+        if chunk:
+            out.append(chunk)
+    return out
 
 
 def _split_simple(texts: List[str]) -> List[str]:
@@ -191,13 +239,14 @@ def iter_sentences_from_texts(
 
     If config is None: yields each non-empty stripped text as one item.
     If config.split_to_sentences is False: yields each text after filters.
-    If config.split_to_sentences is True: for each text, splits (spacy or regex)
-    and yields each sentence that passes config filters.
+    If config.split_to_sentences is True/1: for each text, splits (spacy or regex)
+    and yields each sentence that passes config filters. Integer values greater
+    than 1 yield non-overlapping sentence windows.
 
     Args:
         texts: Input text strings (documents/chunks).
         config: TextPreprocessConfig. If None, yields non-empty stripped texts.
-        spacy_model: Spacy model for sentencizer when split_to_sentences=True.
+        spacy_model: Spacy model for sentencizer when split_to_sentences is truthy.
         download_if_missing: Passed to load_spacy_model.
 
     Yields:
@@ -211,7 +260,7 @@ def iter_sentences_from_texts(
                     yield s
         return
 
-    use_spacy = config.split_to_sentences and spacy_model
+    use_spacy = bool(config.split_to_sentences) and spacy_model
     nlp = None
     if use_spacy:
         nlp = load_spacy_model(spacy_model, download_if_missing=download_if_missing)
@@ -219,6 +268,7 @@ def iter_sentences_from_texts(
             nlp.add_pipe("sentencizer")
 
     simple_pattern = re.compile(r"(?<=[.!?])\s+") if config.split_to_sentences else None
+    window_size = _split_sentence_count(config.split_to_sentences)
 
     for t in texts:
         # Split on newlines first so no sentence contains \n
@@ -230,12 +280,9 @@ def iter_sentences_from_texts(
                 continue
             if nlp is not None:
                 doc = nlp(line)
-                for sent in doc.sents:
-                    s = sent.text.strip()
-                    if s and _apply_sentence_filters(s, config):
-                        yield s
+                pieces = [sent.text.strip() for sent in doc.sents if sent.text.strip()]
             else:
-                for p in simple_pattern.split(line):
-                    p = p.strip()
-                    if p and _apply_sentence_filters(p, config):
-                        yield p
+                pieces = [p.strip() for p in simple_pattern.split(line) if p.strip()]
+            for segment in _window_sentences(pieces, window_size):
+                if _apply_sentence_filters(segment, config):
+                    yield segment

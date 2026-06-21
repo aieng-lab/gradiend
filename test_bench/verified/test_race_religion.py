@@ -38,7 +38,7 @@ def temp_output_dir():
 
 @pytest.mark.slow
 @pytest.mark.integration
-def test_race_religion_distilbert_verified(temp_output_dir):
+def test_train_race_religion_distilbert_verified(temp_output_dir):
     """Race and religion with DistilBERT; verify files and correlation."""
     if not torch.cuda.is_available():
         pytest.skip("GPU not available - test bench requires GPU for reasonable runtime")

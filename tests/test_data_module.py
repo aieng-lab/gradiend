@@ -13,7 +13,7 @@ from gradiend.data.core.base_loader import resolve_base_data
 from gradiend.data.text import TextPreprocessConfig, preprocess_texts
 from gradiend.data.text.filter_config import TextFilterConfig
 from gradiend.data.text.prediction.creator import TextPredictionDataCreator
-from gradiend.data.text.prediction.filter_engine import filter_sentences, mask_sentence
+from gradiend.data.text.prediction.filter_engine import filter_sentences, filter_sentences_multi, mask_sentence
 
 
 class TestResolveBaseData:
@@ -111,6 +111,7 @@ class TestTextPredictionDataCreator:
                 TextFilterConfig(targets=["der"]),
                 TextFilterConfig(targets=["die"]),
             ],
+            min_left_context_words=0,
             seed=42,
         )
         training = creator.generate_training_data(format="per_class", min_rows_per_class_for_split=0)
@@ -128,6 +129,7 @@ class TestTextPredictionDataCreator:
                 TextFilterConfig(targets=["der"]),
                 TextFilterConfig(targets=["die"]),
             ],
+            min_left_context_words=0,
         )
         df = creator.generate_training_data(format="minimal", min_rows_per_class_for_split=0)
         assert "masked" in df.columns
@@ -142,6 +144,7 @@ class TestTextPredictionDataCreator:
                 TextFilterConfig(targets=["der"]),
                 TextFilterConfig(targets=["die"]),
             ],
+            min_left_context_words=0,
         )
         # Target words (der, die) are auto-excluded; no additional needed
         neutral = creator.generate_neutral_data(max_size=10)
@@ -236,9 +239,47 @@ class TestFilterEngineWithMockedSpacy:
         matches = filter_sentences([sent], cfg, spacy_model="de_core_news_sm")
         assert len(matches) == 1
         _, spans = matches[0]
-        assert spans[0][2] == "Mann"
+        assert spans[0][2] == "mann"
 
-    @patch("gradiend.data.text.prediction.creator.load_spacy_model")
+    @patch("gradiend.data.text.prediction.filter_engine.load_spacy_model")
+    def test_multi_filter_runs_spacy_only_after_lexical_prefilter(self, mock_spacy_load):
+        """Multi-filter path should not call spaCy for sentences without active lexical hits."""
+        tokens = [
+            self._make_mock_token("Der", pos="DET", idx=0, morph={"Case": "Nom"}),
+            self._make_mock_token("Mann", pos="NOUN", idx=4),
+        ]
+        doc = self._make_mock_doc(tokens)
+        mock_nlp = MagicMock(return_value=doc)
+        mock_spacy_load.return_value = mock_nlp
+
+        cfg = TextFilterConfig(id="article", targets=["der"], spacy_tags={"pos": "DET", "Case": "Nom"})
+        results, stats = filter_sentences_multi(
+            ["No lexical hit here.", "Der Mann ging."],
+            [("article", cfg)],
+            spacy_model="de_core_news_sm",
+            stats={},
+        )
+
+        assert len(results["article"]) == 1
+        assert stats["sentences_processed"] == 2
+        mock_nlp.assert_called_once_with("Der Mann ging.")
+
+    @patch("gradiend.data.text.prediction.filter_engine._has_ahocorasick", return_value=False)
+    def test_many_class_filter_uses_regex_when_pyahocorasick_missing(self, _mock_has_ahocorasick):
+        configs = [
+            (f"class_{i}", TextFilterConfig(id=f"class_{i}", targets=[f"token{i}"]))
+            for i in range(25)
+        ]
+        results, _stats = filter_sentences_multi(
+            ["token3 appears.", "token24 appears.", "nothing here."],
+            configs,
+            max_matches_per_class=1,
+        )
+
+        assert len(results["class_3"]) == 1
+        assert len(results["class_24"]) == 1
+
+    @patch("gradiend.data.text.prediction.neutral.load_spacy_model")
     def test_neutral_filter_with_mocked_spacy_tags(self, mock_load_spacy_model):
         """Test generate_neutral_data with excluded_spacy_tags using mocked spacy."""
         sentences = [

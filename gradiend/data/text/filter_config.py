@@ -57,6 +57,14 @@ class TextFilterConfig:
     id: Optional[str] = None
     mask: str = "[MASK]"
     weight: float = 1.0
+    min_left_context_words: Optional[int] = None
+    """Per-config override for minimum left context (word-like strings before a match).
+
+    ``None`` inherits the default from :class:`~gradiend.data.text.prediction.creator.TextPredictionDataCreator`
+    (or ``0`` when filtering outside a creator). Mainly useful for decoder-only/causal
+    language models, where the gradient for a masked target is computed from the
+    prefix before ``[MASK]``.
+    """
 
     def __post_init__(self) -> None:
         if self.target is not None and self.targets is not None:
@@ -69,8 +77,25 @@ class TextFilterConfig:
             self.targets = []
         if not self.targets:
             raise ValueError("TextFilterConfig.targets must be non-empty")
+        if self.min_left_context_words is not None:
+            if not isinstance(self.min_left_context_words, int):
+                raise TypeError(
+                    "TextFilterConfig.min_left_context_words must be an int or None, "
+                    f"got {type(self.min_left_context_words).__name__}"
+                )
+            if self.min_left_context_words < 0:
+                raise ValueError(
+                    "TextFilterConfig.min_left_context_words must be >= 0, "
+                    f"got {self.min_left_context_words}"
+                )
         if self.id is None:
             self.id = _first_target_string(self.targets)
+
+    def effective_min_left_context_words(self, default: int = 0) -> int:
+        """Return per-config override when set, otherwise ``default``."""
+        if self.min_left_context_words is not None:
+            return self.min_left_context_words
+        return default
 
     def get_effective_tags(self, parent_tags: Optional[SpacyTagSpec] = None) -> Optional[SpacyTagSpec]:
         """Get merged spacy_tags (self + parent)."""

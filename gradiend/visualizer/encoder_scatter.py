@@ -1,17 +1,22 @@
 """
-Interactive 1D encoder scatter: jitter on x-axis, encoded value on y-axis, colored by label, with hover.
+Interactive 1D encoder scatter: categorical x-axis, encoded value on y-axis, colored by label, with hover.
 For outlier analysis in Jupyter. Uses Plotly for interaction.
 Colors match encoder distribution violins (tab20) when cmap is used.
 Colormap lookup requires matplotlib; if missing, raises ImportError with install instructions.
 """
 
 import os
-from typing import Any, List, Optional, Union
+from typing import Any, List, Optional, Sequence, Union
 
 import numpy as np
 import pandas as pd
 
 from gradiend.util.paths import resolve_output_path, ARTIFACT_ENCODER_PLOT
+from gradiend.visualizer.labels import (
+    converged_for_trainer,
+    format_label_with_convergence,
+    resolve_highlight_non_convergence,
+)
 from gradiend.visualizer.plot_optional import _require_matplotlib
 from gradiend.util.logging import get_logger
 
@@ -46,23 +51,68 @@ def _encoded_1d(encoded_cell: Any) -> Optional[float]:
     return None
 
 
-def _truncate_text_around_mask(text: str, max_chars: int = 50) -> str:
-    """Truncate text to at most max_chars, centered on first [MASK] if present."""
+def _wrap_hover_text(text: str, line_chars: int = 90) -> str:
+    if line_chars <= 0:
+        return text
+    words = str(text).split()
+    if not words:
+        return str(text)
+    lines = []
+    current = ""
+    for word in words:
+        if current and len(current) + 1 + len(word) > line_chars:
+            lines.append(current)
+            current = word
+        else:
+            current = word if not current else f"{current} {word}"
+    if current:
+        lines.append(current)
+    return "<br>".join(lines)
+
+
+def _truncate_text_around_mask(text: str, max_chars: int = 180, *, line_chars: int = 90) -> str:
+    """Truncate text to max_chars, centered on [MASK] when present, then wrap for hover."""
     if not isinstance(text, str):
         return str(text) if text is not None else ""
     if len(text) <= max_chars:
-        return text
+        return _wrap_hover_text(text, line_chars=line_chars)
     mask = "[MASK]"
     idx = text.find(mask)
     content_max = max(10, max_chars - 6)  # reserve for "..." and "..."
     if idx < 0:
-        return "..." + text[-content_max:]
+        return _wrap_hover_text(text[:content_max] + "...", line_chars=line_chars)
     half = (content_max - len(mask)) // 2
     start = max(0, idx - half)
     end = min(len(text), idx + len(mask) + (content_max - half - len(mask)))
     prefix = "..." if start > 0 else ""
     suffix = "..." if end < len(text) else ""
-    return prefix + text[start:end] + suffix
+    return _wrap_hover_text(prefix + text[start:end] + suffix, line_chars=line_chars)
+
+
+def _first_existing_column(df: pd.DataFrame, candidates: Sequence[str]) -> Optional[str]:
+    for col in candidates:
+        if col in df.columns:
+            return col
+    return None
+
+
+def _natural_category_order(values: Sequence[Any]) -> List[str]:
+    def key(value: Any) -> tuple:
+        text = str(value)
+        try:
+            return (0, float(text))
+        except ValueError:
+            pass
+        lowered = text.casefold()
+        if lowered in {"negative", "-1", "-1.0"}:
+            return (1, 0, lowered)
+        if lowered in {"neutral", "0", "0.0"}:
+            return (1, 1, lowered)
+        if lowered in {"positive", "1", "1.0"}:
+            return (1, 2, lowered)
+        return (2, lowered)
+
+    return sorted({str(v) for v in values}, key=key)
 
 
 def _stratified_subsample(
@@ -90,7 +140,8 @@ def plot_encoder_scatter(
     *,
     color_by: str = "label",
     hover_cols: Optional[List[str]] = None,
-    jitter_scale: float = 0.15,
+    x_col: Optional[str] = None,
+    label_name_mapping: Optional[dict] = None,
     max_points: Optional[int] = None,
     stratify_by: Optional[str] = None,
     cmap: str = DEFAULT_SCATTER_CMAP,
@@ -101,11 +152,13 @@ def plot_encoder_scatter(
     title: Optional[str] = None,
     height: int = 500,
     split: str = "test",
-    hover_text_max_chars: int = 50,
+    hover_text_max_chars: int = 180,
+    hover_text_line_chars: int = 90,
+    highlight_non_convergence: Optional[bool] = None,
     **kwargs: Any,
 ) -> Any:
     """
-    Interactive 1D encoder scatter: x = jitter, y = encoded value, color by label, with hover.
+    Interactive 1D encoder scatter: x = target/category, y = encoded value, color by label, with hover.
 
     For 1D encoding only. Use in Jupyter for outlier inspection (hover shows point data).
     Colors use the same cmap as encoder distribution violins (default tab20).
@@ -116,8 +169,9 @@ def plot_encoder_scatter(
         trainer: Trainer with analyze_encoder(); used when encoder_df is None.
         encoder_df: Pre-computed DataFrame with 'encoded' and 'label' (and optional 'text', etc.).
         color_by: Column name for point color (default 'label').
-        hover_cols: Columns to show on hover. Default: ['text', 'label', 'encoded', 'source_id', 'target_id', 'type'] (existing cols only).
-        jitter_scale: Scale of random jitter on x (default 0.15).
+        hover_cols: Columns to show on hover. Default includes display text, target, feature class, label, split, and type.
+        x_col: Column for the categorical x-axis. Default prefers target/factual token.
+        label_name_mapping: Optional mapping from raw color labels to display names.
         max_points: If set, show at most this many points; subsampling is stratified (see stratify_by).
         stratify_by: Column for stratified subsampling when max_points is set. Default: 'feature_class' if present, else color_by.
         cmap: Matplotlib colormap name for point colors (default 'tab20', same as encoder violins).
@@ -129,6 +183,9 @@ def plot_encoder_scatter(
         height: Figure height in pixels.
         split: Dataset split when encoder_df is None (passed to analyze_encoder).
         hover_text_max_chars: Max characters for 'text' in hover; truncated around first [MASK] with '...'. Default 50.
+        hover_text_line_chars: Approximate line length for hover-text wrapping.
+        highlight_non_convergence: When True, append a non-convergence marker to the title for
+            non-converged runs. ``None`` uses ``TrainingArguments.highlight_non_convergence``.
         **kwargs: Passed to trainer.analyze_encoder when encoder_df is None.
 
     Returns:
@@ -168,17 +225,40 @@ def plot_encoder_scatter(
         return None
     y = y_vals.tolist()
     n = len(y)
-    x_jitter = rng.uniform(-jitter_scale, jitter_scale, size=n)
 
     color_col = color_by if color_by in encoder_df.columns else "label"
     if color_col not in encoder_df.columns:
         color_col = None
     color_vals = encoder_df[color_col].astype(str).tolist() if color_col else None
 
-    default_hover = ["text", "label", "encoded", "source_id", "target_id", "type"]
+    resolved_x_col = x_col or _first_existing_column(
+        encoder_df,
+        ["target_token", "factual_token", "factual", "feature_class", "source_id", "type"],
+    )
+    if resolved_x_col is None:
+        x_vals = ["all"] * n
+    else:
+        x_vals = encoder_df[resolved_x_col].fillna("").astype(str).tolist()
+        x_vals = [value if value else "neutral" for value in x_vals]
+
+    text_col = _first_existing_column(encoder_df, ["masked", "text", "sentence"])
+    default_hover = [
+        "display_text",
+        "target_token",
+        "factual_token",
+        "factual",
+        "label",
+        "feature_class",
+        "source_id",
+        "target_id",
+        "data_split",
+        "type",
+    ]
     if hover_cols is None:
-        hover_cols = [c for c in default_hover if c in encoder_df.columns]
+        hover_cols = [c for c in default_hover if c == "display_text" or c in encoder_df.columns]
     hover_cols = [c for c in hover_cols if c in encoder_df.columns]
+    if "display_text" in (hover_cols or []) and "display_text" not in encoder_df.columns:
+        hover_cols = [c for c in hover_cols if c != "display_text"]
 
     try:
         import plotly.express as px
@@ -186,40 +266,69 @@ def plot_encoder_scatter(
         logger.warning("plotly not installed; install with pip install plotly")
         return None
 
-    df_plot = pd.DataFrame({"x_jitter": x_jitter, "encoded": y})
+    df_plot = pd.DataFrame({"target": x_vals, "encoded": y})
+    if text_col is not None:
+        df_plot["text"] = [
+            _truncate_text_around_mask(v, hover_text_max_chars, line_chars=hover_text_line_chars)
+            for v in encoder_df[text_col].tolist()
+        ]
     for c in hover_cols:
         if c != "encoded":
             vals = encoder_df[c].tolist()
             if c == "text" and hover_text_max_chars > 0:
-                vals = [_truncate_text_around_mask(v, hover_text_max_chars) for v in vals]
+                vals = [
+                    _truncate_text_around_mask(v, hover_text_max_chars, line_chars=hover_text_line_chars)
+                    for v in vals
+                ]
             df_plot[c] = vals
-    hover_data = [c for c in hover_cols if c in df_plot.columns] or None
+    hover_cols_resolved = []
+    if "text" in df_plot.columns:
+        hover_cols_resolved.append("text")
+    hover_cols_resolved.extend([c for c in hover_cols if c in df_plot.columns and c != "text"])
+    hover_data = hover_cols_resolved or None
+
+    highlight = resolve_highlight_non_convergence(highlight_non_convergence, trainer=trainer)
+    converged = converged_for_trainer(trainer) if trainer is not None else None
+    default_title = "Encoded values (1D) by label" if color_col else "Encoded values (1D)"
+    plot_title = title or default_title
+    plot_title = format_label_with_convergence(
+        plot_title,
+        converged=converged,
+        highlight_non_convergence=highlight,
+    )
 
     if color_col:
-        df_plot["color"] = color_vals
-        unique_cats = sorted(df_plot["color"].unique(), key=str)
+        df_plot["color"] = [
+            str((label_name_mapping or {}).get(value, value))
+            for value in color_vals
+        ]
+        unique_cats = _natural_category_order(df_plot["color"].unique().tolist())
         color_map = _palette_for_categories(unique_cats, cmap=cmap)
         fig = px.scatter(
             df_plot,
-            x="x_jitter",
+            x="target",
             y="encoded",
             color="color",
-            title=title or "Encoded values (1D) by label",
+            title=plot_title,
             height=height,
             hover_data=hover_data,
+            category_orders={"color": unique_cats, "target": _natural_category_order(df_plot["target"].tolist())},
             color_discrete_map=color_map if color_map else None,
         )
-        fig.update_layout(xaxis_title="jitter", yaxis_title="encoded value")
+        fig.update_traces(marker={"opacity": 0.78})
+        fig.update_layout(xaxis_title="target", yaxis_title="encoded value", legend_title_text=color_col)
     else:
         fig = px.scatter(
             df_plot,
-            x="x_jitter",
+            x="target",
             y="encoded",
-            title=title or "Encoded values (1D)",
+            title=plot_title,
             height=height,
             hover_data=hover_data,
+            category_orders={"target": _natural_category_order(df_plot["target"].tolist())},
         )
-        fig.update_layout(xaxis_title="jitter", yaxis_title="encoded value")
+        fig.update_traces(marker={"opacity": 0.78})
+        fig.update_layout(xaxis_title="target", yaxis_title="encoded value")
 
     if output_path:
         out = output_path

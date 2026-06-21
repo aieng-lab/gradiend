@@ -17,10 +17,10 @@ The method is described in detail in the paper: **[GRADIEND: Feature Learning wi
 > However, the library is designed to be modular and we plan to support more models in the future (e.g., text classification, vision, ...).
 
 Example use cases ([gradiend/examples](https://github.com/aieng-lab/gradiend/tree/main/gradiend/examples) on GitHub):
-- **[English pronouns](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/english_pronouns.ipynb)** — notebook; [script](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/english_pronouns.py)
-- **[English gender](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/gender_en.py)**
-- **[German gender–case](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/gender_de_detailed.py)**
-- **[Race and religion](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/race_religion.py)**
+- **[English pronouns](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/train_english_pronouns.ipynb)** — notebook; [script](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/train_english_pronouns.py)
+- **[English gender](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/train_gender_en.py)**
+- **[German gender–case](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/train_gender_de_detailed.py)**
+- **[Sentiment](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/train_sentiment.py)**
 
 **Links:** [GitHub](https://github.com/aieng-lab/gradiend) · [PyPI](https://pypi.org/project/gradiend/) · [arXiv (main paper)](https://arxiv.org/abs/2502.01406) · [arXiv (German articles)](https://arxiv.org/abs/2601.09313)
 

@@ -8,13 +8,61 @@ from typing import Any, List, Optional, Tuple
 import pandas as pd
 import torch
 
-from gradiend.util.logging import suppress_tokenizer_length_warning
+from gradiend.model.core.seq2seq_backbone import SEQ2SEQ_ENCODER_MLM
+from gradiend.trainer.text.prediction.seq2seq import (
+    SEQ2SEQ_DECODER_SEQUENCE_CLOZE,
+    create_seq2seq_decoder_item,
+    create_seq2seq_decoder_sequence_item,
+    create_seq2seq_mlm_item,
+    mask_placeholder_for_tokenizer,
+)
 from gradiend.trainer.text.common.dataset_base import TextBatchedDatasetBase
-from gradiend.trainer.text.prediction.unified_data import (
+from gradiend.trainer.core.unified_schema import (
     UNIFIED_ALTERNATIVE,
     UNIFIED_FACTUAL,
     UNIFIED_MASKED,
+    UNIFIED_SPLIT,
 )
+from gradiend.util import normalize_split_name
+from gradiend.util.logging import suppress_tokenizer_length_warning
+
+
+def _ids_for_text(tokenizer: Any, text: str) -> List[int]:
+    """Tokenize ``text`` without special tokens and return token ids.
+
+    Args:
+        tokenizer: Tokenizer used for encoding.
+        text: Text to tokenize.
+    """
+    return tokenizer(str(text), add_special_tokens=False)["input_ids"]
+
+
+def _continuation_ids_from_prefix(tokenizer: Any, prefix: str, continuation: str) -> List[int]:
+    """Return token ids contributed by ``continuation`` after ``prefix``.
+
+    Args:
+        tokenizer: Tokenizer used for encoding.
+        prefix: Text before the continuation.
+        continuation: Candidate continuation text.
+    """
+    prefix_ids = _ids_for_text(tokenizer, prefix)
+    full_ids = _ids_for_text(tokenizer, prefix + continuation)
+    if full_ids[: len(prefix_ids)] == prefix_ids:
+        return full_ids[len(prefix_ids) :]
+    full_ids = _ids_for_text(tokenizer, prefix + " " + continuation)
+    if full_ids[: len(prefix_ids)] == prefix_ids:
+        return full_ids[len(prefix_ids) :]
+    return _ids_for_text(tokenizer, continuation)
+
+
+def _targetable_token_text(token: str) -> str:
+    """Normalize tokenizer artifacts before testing whether a token is targetable.
+
+    Args:
+        token: Tokenizer token string.
+    """
+    token = str(token).strip()
+    return token.lstrip("#").lstrip("Ġ").lstrip("▁").strip()
 
 
 def create_masked_pair_from_text(
@@ -47,7 +95,14 @@ def create_masked_pair_from_text(
     if not tokens:
         return None
     if not is_decoder_only_model and mask_token:
-        valid_indices = [i for i, token in enumerate(tokens) if not (token.startswith("[") and token.endswith("]") or (excluded_tokens and any(excl.lower() in token.lower() for excl in excluded_tokens)))]
+        valid_indices = [
+            i for i, token in enumerate(tokens)
+            if _targetable_token_text(token)
+            and not (
+                token.startswith("[") and token.endswith("]")
+                or (excluded_tokens and any(excl.lower() in token.lower() for excl in excluded_tokens))
+            )
+        ]
         if not valid_indices:
             return None
         mask_idx = random.choice(valid_indices)
@@ -57,7 +112,14 @@ def create_masked_pair_from_text(
         return (masked_text, target_token)
     if len(tokens) < 2:
         return None
-    valid_k = [k for k in range(min_prefix_tokens, len(tokens)) if not (tokens[k].startswith("[") and tokens[k].endswith("]") or (excluded_tokens and any(excl.lower() in tokens[k].lower() for excl in excluded_tokens)))]
+    valid_k = [
+        k for k in range(min_prefix_tokens, len(tokens))
+        if _targetable_token_text(tokens[k])
+        and not (
+            tokens[k].startswith("[") and tokens[k].endswith("]")
+            or (excluded_tokens and any(excl.lower() in tokens[k].lower() for excl in excluded_tokens))
+        )
+    ]
     if not valid_k:
         return None
     split_at = random.choice(valid_k)
@@ -122,8 +184,54 @@ class TextBatchedDataset(TextBatchedDatasetBase):
         """Create a single training item: input_ids, attention_mask, labels.
 
         For decoder-only: labels at last non-pad position. For MLM: labels at mask positions.
+
+        Args:
+            text: Input text or template used for the prediction objective.
+            target: Target token/text to predict.
         """
         is_decoder_only_model = getattr(self, "is_decoder_only_model", False)
+        prediction_objective = getattr(self, "prediction_objective", None)
+        if prediction_objective == "clm_sequence_cloze":
+            if "[MASK]" not in text:
+                raise ValueError("clm_sequence_cloze training requires a [MASK] placeholder.")
+            prefix, rhs = text.split("[MASK]", 1)
+            expanded_text = text.replace("[MASK]", str(target), 1)
+            with suppress_tokenizer_length_warning():
+                encoded = self.tokenizer(expanded_text, return_tensors="pt", add_special_tokens=True, truncation=True, max_length=self.max_length, padding="max_length")
+            input_ids = encoded["input_ids"]
+            attention_mask = encoded["attention_mask"]
+            labels = torch.full_like(input_ids, -100)
+            prefix_len = len(_ids_for_text(self.tokenizer, prefix))
+            candidate_len = len(_continuation_ids_from_prefix(self.tokenizer, prefix, str(target)))
+            rhs_window = getattr(self, "rhs_window", -1)
+            valid_len = int(attention_mask.sum(dim=1)[0].item())
+            if rhs_window is None or rhs_window < 0:
+                end = valid_len
+            else:
+                end = min(valid_len, prefix_len + candidate_len + int(rhs_window))
+            start = min(prefix_len, valid_len)
+            if start < end:
+                labels[:, start:end] = input_ids[:, start:end]
+            return {"input_ids": input_ids.squeeze(0), "attention_mask": attention_mask.squeeze(0), "labels": labels.squeeze(0)}
+        is_seq2seq_model = getattr(self, "is_seq2seq_model", False)
+        if is_seq2seq_model:
+            prediction_objective = getattr(self, "prediction_objective", None)
+            common = dict(
+                masked_text=text,
+                label=str(target),
+                tokenizer=self.tokenizer,
+                base_model=getattr(self, "base_model", None),
+            )
+            if prediction_objective == SEQ2SEQ_ENCODER_MLM:
+                item = create_seq2seq_mlm_item(**common)
+            elif prediction_objective == SEQ2SEQ_DECODER_SEQUENCE_CLOZE:
+                item = create_seq2seq_decoder_sequence_item(
+                    **common,
+                    rhs_window=getattr(self, "rhs_window", -1),
+                )
+            else:
+                item = create_seq2seq_decoder_item(**common)
+            return {k: v.squeeze(0) for k, v in item.items()}
         if not is_decoder_only_model and self.mask_token and self.mask_token not in text:
             raise ValueError("Input text must contain at least one [MASK] token placeholder.")
         mask_count = 0 if is_decoder_only_model else (text.count(self.mask_token) if self.mask_token else 0)
@@ -169,11 +277,14 @@ class TextTrainingDataset(TextBatchedDataset):
         tokenizer: Any,
         batch_size: int,
         is_decoder_only_model: bool = False,
+        is_seq2seq_model: bool = False,
         max_size: Optional[int] = None,
         target_key: str = "label",
         balance_column: str = "feature_class_id",
         max_length: int = 256,
         seed: Optional[int] = None,
+        prediction_objective: Optional[str] = None,
+        rhs_window: int = -1,
     ):
         """Initialize the training dataset.
 
@@ -182,11 +293,15 @@ class TextTrainingDataset(TextBatchedDataset):
             tokenizer: Tokenizer for encoding.
             batch_size: Batch size.
             is_decoder_only_model: If True, uses decoder-only ([MASK] after prefix) format.
+            is_seq2seq_model: If True, creates encoder-decoder style inputs.
             max_size: Optional maximum number of samples.
             target_key: Key for label/target in data.
             balance_column: Column for balancing (e.g., feature_class_id).
             max_length: Maximum sequence length.
             seed: Random seed for batch ordering (default 42). Use training_args.seed for reproducibility.
+            prediction_objective: Optional prediction objective override, such as
+                cloze-sequence or seq2seq objectives.
+            rhs_window: Right-context token window for sequence-cloze objectives.
         """
         super().__init__(
             data=data,
@@ -200,16 +315,34 @@ class TextTrainingDataset(TextBatchedDataset):
         )
         self.target_key = target_key
         self.is_decoder_only_model = is_decoder_only_model
+        self.is_seq2seq_model = is_seq2seq_model
+        self.prediction_objective = prediction_objective
+        self.rhs_window = rhs_window
         if is_decoder_only_model and getattr(self.tokenizer, "pad_token", None) is None:
             eos_token = getattr(self.tokenizer, "eos_token", None)
             if eos_token is not None:
                 self.tokenizer.pad_token = eos_token
 
     def __getitem__(self, idx: int):
-        """Return a single item with factual/alternative pairs and gradient-ready structure."""
+        """Return a single item with factual/alternative pairs and gradient-ready structure.
+
+        Args:
+            idx: Row or batch index resolved by the parent batched dataset.
+        """
         entry = super().__getitem__(idx)
         template = entry[UNIFIED_MASKED]
-        input_text = template.split("[MASK]")[0] if self.is_decoder_only_model else template.replace("[MASK]", self.mask_token)
+        if self.prediction_objective == "clm_sequence_cloze":
+            input_text = template
+        elif self.prediction_objective == SEQ2SEQ_DECODER_SEQUENCE_CLOZE:
+            input_text = template
+        elif self.is_decoder_only_model:
+            input_text = template.split("[MASK]")[0] if "[MASK]" in template else template
+        elif self.is_seq2seq_model:
+            input_text = mask_placeholder_for_tokenizer(template, self.tokenizer)
+        elif self.mask_token:
+            input_text = template.replace("[MASK]", self.mask_token)
+        else:
+            input_text = template
         text = template.replace("[MASK]", entry[UNIFIED_FACTUAL])
         label = entry[self.target_key]
         try:
@@ -234,4 +367,8 @@ class TextTrainingDataset(TextBatchedDataset):
         }
         if "feature_class_id" in entry:
             out["feature_class_id"] = entry["feature_class_id"]
+        if UNIFIED_SPLIT in entry.index:
+            out["data_split"] = normalize_split_name(str(entry[UNIFIED_SPLIT]))
+        elif "split" in entry.index:
+            out["data_split"] = normalize_split_name(str(entry["split"]))
         return out

@@ -7,7 +7,7 @@ import pytest
 
 from gradiend.trainer.core.arguments import TrainingArguments
 from gradiend.trainer.text.prediction.trainer import TextPredictionConfig, TextPredictionTrainer
-from gradiend.trainer.text.prediction.unified_data import (
+from gradiend.trainer.core.unified_data import (
     UNIFIED_ALTERNATIVE,
     UNIFIED_ALTERNATIVE_CLASS,
     UNIFIED_FACTUAL,
@@ -99,6 +99,53 @@ class TestTrainerDataAsPath:
         assert trainer._combined_data is not None
         assert len(trainer._combined_data) >= 1
 
+    def test_data_as_directory_loads_training_csv(self, tmp_path):
+        _merged_factual_df().to_csv(tmp_path / "training.csv", index=False)
+        config = TextPredictionConfig(data=tmp_path, target_classes=["3SG", "3PL"])
+        trainer = TextPredictionTrainer(model="bert-base-uncased", config=config)
+        trainer._ensure_data()
+        assert trainer._combined_data is not None
+        assert len(trainer._combined_data) == 2
+
+    def test_missing_data_path_raises_file_not_found(self, tmp_path):
+        missing = tmp_path / "training.csv"
+        config = TextPredictionConfig(data=missing, target_classes=["3SG", "3PL"])
+        trainer = TextPredictionTrainer(model="bert-base-uncased", config=config)
+        with pytest.raises(FileNotFoundError, match="does not exist"):
+            trainer._ensure_data()
+
+    def test_missing_path_does_not_reach_merged_to_unified(self, tmp_path):
+        """Regression: Path must not be passed to merged_to_unified (no AttributeError on .copy)."""
+        missing = tmp_path / "training.csv"
+        config = TextPredictionConfig(data=missing, target_classes=["3SG", "3PL"])
+        trainer = TextPredictionTrainer(model="bert-base-uncased", config=config)
+        with pytest.raises(FileNotFoundError) as exc_info:
+            trainer._ensure_data()
+        assert "copy" not in str(exc_info.value)
+        assert "PosixPath" not in str(exc_info.value)
+        assert "WindowsPath" not in str(exc_info.value)
+
+    def test_empty_directory_raises_file_not_found(self, tmp_path):
+        config = TextPredictionConfig(data=tmp_path, target_classes=["3SG", "3PL"])
+        trainer = TextPredictionTrainer(model="bert-base-uncased", config=config)
+        with pytest.raises(FileNotFoundError, match=r"training\.csv or training\.parquet"):
+            trainer._ensure_data()
+
+    def test_data_as_directory_parquet(self, tmp_path):
+        pytest.importorskip("pyarrow")
+        _merged_factual_df().to_parquet(tmp_path / "training.parquet", index=False)
+        config = TextPredictionConfig(data=tmp_path, target_classes=["3SG", "3PL"])
+        trainer = TextPredictionTrainer(model="bert-base-uncased", config=config)
+        trainer._ensure_data()
+        assert trainer._combined_data is not None
+        assert len(trainer._combined_data) == 2
+
+    def test_invalid_data_type_raises_type_error(self):
+        config = TextPredictionConfig(data=[1, 2, 3], target_classes=["3SG", "3PL"])  # type: ignore[arg-type]
+        trainer = TextPredictionTrainer(model="bert-base-uncased", config=config)
+        with pytest.raises(TypeError, match="config.data"):
+            trainer._ensure_data()
+
 
 class TestTrainerDataAsDataFrame:
     """data=DataFrame (merged) builds unified data."""
@@ -160,11 +207,41 @@ class TestTrainerDataAsDict:
         assert trainer._combined_data is not None
         assert trainer.target_classes is not None
         assert set(trainer.target_classes) == {"3SG", "3PL"}
-        targets = trainer._infer_decoder_eval_targets()
+        targets, has_overlap = trainer._infer_decoder_eval_targets()
         assert targets
         assert "3SG" in targets and "3PL" in targets
+        assert has_overlap is False
         assert isinstance(targets["3SG"], list) and isinstance(targets["3PL"], list)
         assert len(targets["3SG"]) >= 1 and len(targets["3PL"]) >= 1
+
+    def test_infer_decoder_eval_targets_marks_overlapping_tokens_for_row_wise_fallback(self):
+        """Auto-inferred decoder eval targets mark overlap so decoder eval can use row-wise targets."""
+        # Both classes use the same factual token "x", which should trigger row-wise fallback.
+        class_dfs = {
+            "A": pd.DataFrame(
+                {
+                    "masked": ["[MASK] x"],
+                    "split": ["train"],
+                    "A": ["x"],
+                }
+            ),
+            "B": pd.DataFrame(
+                {
+                    "masked": ["[MASK] x"],
+                    "split": ["train"],
+                    "B": ["x"],
+                }
+            ),
+        }
+        config = TextPredictionConfig(
+            data=class_dfs,
+            use_class_names_as_columns=True,
+        )
+        trainer = TextPredictionTrainer(model="bert-base-uncased", config=config)
+        trainer._ensure_data()
+        targets, has_overlap = trainer._infer_decoder_eval_targets()
+        assert targets == {"A": ["x"], "B": ["x"]}
+        assert has_overlap is True
 
 
 class TestEvalNeutralDataAsPath:
@@ -188,7 +265,8 @@ class TestStandardPipelinePerDataFormat:
     """Standard pipeline (ensure_data → create_training_data) works for each data input format."""
 
     @pytest.fixture(scope="class")
-    def tokenizer(self):
+    @classmethod
+    def tokenizer(cls):
         """Load tokenizer once per class to avoid repeated from_pretrained (~10s each)."""
         from transformers import AutoTokenizer
         return AutoTokenizer.from_pretrained("bert-base-uncased")
@@ -285,7 +363,8 @@ class TestAddIdentityForOtherClasses:
     """Identity transitions are added only for non-target classes (all_classes \\ target_classes)."""
 
     @pytest.fixture(scope="class")
-    def tokenizer(self):
+    @classmethod
+    def tokenizer(cls):
         from transformers import AutoTokenizer
         return AutoTokenizer.from_pretrained("bert-base-uncased")
 

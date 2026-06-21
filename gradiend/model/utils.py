@@ -4,12 +4,46 @@ Utility functions for GRADIEND models.
 import json
 import logging
 import os
-from typing import Dict, Tuple, Optional, Any, Union
+from typing import Dict, Tuple, Optional, Any, Union, Set
 
 import torch
 import torch.nn as nn
+from gradiend.util.device import cuda_unusable_runtime_error, validate_cuda_usable_if_visible
 
 logger = logging.getLogger(__name__)
+
+
+def get_hf_device_map(model: Any) -> Optional[Any]:
+    """
+    Return a Hugging Face/Accelerate device map from model or common wrappers.
+
+    Accelerate stores dispatched placement on ``hf_device_map``. GRADIEND may
+    receive either the dispatched HF module directly or a lightweight wrapper
+    around it, so callers should use this helper instead of checking only the
+    top-level object.
+    """
+    seen: Set[int] = set()
+
+    def visit(obj: Any) -> Optional[Any]:
+        if obj is None:
+            return None
+        obj_id = id(obj)
+        if obj_id in seen:
+            return None
+        seen.add(obj_id)
+
+        device_map = getattr(obj, "hf_device_map", None)
+        if device_map is not None:
+            return device_map
+
+        for attr in ("base_model", "decoder", "model", "module"):
+            child = getattr(obj, attr, None)
+            child_map = visit(child)
+            if child_map is not None:
+                return child_map
+        return None
+
+    return visit(model)
 
 
 # -----------------------------
@@ -188,6 +222,36 @@ def get_activation(activation: str, encoder=False):
     return activation_fnc
 
 
+def is_seq2seq_model(model_or_tokenizer):
+    """
+    Whether the model or tokenizer is encoder-decoder (e.g. T5, BART).
+
+    Prefers ``config.is_encoder_decoder`` when available; falls back to class/name heuristics.
+    """
+    config = getattr(model_or_tokenizer, "config", None)
+    if config is not None and getattr(config, "is_encoder_decoder", False):
+        return True
+    if hasattr(model_or_tokenizer, "is_encoder_decoder"):
+        return bool(model_or_tokenizer.is_encoder_decoder)
+    cls = model_or_tokenizer.__class__.__name__.lower()
+    name = (getattr(model_or_tokenizer, "name_or_path", None) or "").lower()
+    markers = ("t5", "bart", "mbart", "pegasus", "marian", "blenderbot", "mvp", "led")
+    return any(m in cls or m in name for m in markers)
+
+
+def prediction_eval_kind(model_or_tokenizer):
+    """Return a ``prediction_objective``-aligned eval kind for decoder probability scoring."""
+    if is_seq2seq_model(model_or_tokenizer):
+        from gradiend.model.core.seq2seq_backbone import (
+            DEFAULT_SEQ2SEQ_GRADIENT_MODE,
+            resolve_seq2seq_gradient_mode,
+        )
+        return resolve_seq2seq_gradient_mode(model_or_tokenizer) or DEFAULT_SEQ2SEQ_GRADIENT_MODE
+    if is_decoder_only_model(model_or_tokenizer):
+        return "clm_next_token"
+    return "mlm_mask_token"
+
+
 def is_decoder_only_model(model_or_tokenizer):
     """
     Single place of truth: whether the model or tokenizer is decoder-only (causal LM, no [MASK]).
@@ -195,7 +259,7 @@ def is_decoder_only_model(model_or_tokenizer):
     Pass either a model or a tokenizer. Prefers tokenizer-style attributes when present.
 
     - **Tokenizer** (has ``mask_token`` or ``mask_token_id``): decoder-only if
-      ``mask_token`` is None (no [MASK] token).
+      ``mask_token`` is None (no [MASK] token), unless the model is encoder-decoder.
     - **Model** (no mask_token): decoder-only if the class name does not indicate
       MaskedLM/MLM (e.g. GPT-2, LLaMA are decoder-only; BERT with MLM head is not).
 
@@ -203,8 +267,10 @@ def is_decoder_only_model(model_or_tokenizer):
         model_or_tokenizer: A Hugging Face model or tokenizer.
 
     Returns:
-        True if decoder-only (causal LM), False if masked LM.
+        True if decoder-only (causal LM), False if masked LM or encoder-decoder.
     """
+    if is_seq2seq_model(model_or_tokenizer):
+        return False
     obj = model_or_tokenizer
     if hasattr(obj, "mask_token"):
         return getattr(obj, "mask_token", None) is None
@@ -300,10 +366,36 @@ def resolve_device_config_for_model(
     Returns:
         Tuple of (device_encoder, device_decoder, device_base_model, requires_multiple_gpus).
     """
-    cuda_count = torch.cuda.device_count()
-
     def _to_device(x):
         return torch.device(x) if isinstance(x, str) else x
+
+    def _is_cpu_device(x):
+        dev = _to_device(x)
+        return dev is not None and dev.type == "cpu"
+
+    def _is_cuda_device(x):
+        dev = _to_device(x)
+        return dev is not None and dev.type == "cuda"
+
+    def _raise_unusable_cuda(cuda_count):
+        raise cuda_unusable_runtime_error(cuda_count)
+
+    explicit_device_cpu = device is not None and _is_cpu_device(device)
+    explicit_device_cuda = device is not None and _is_cuda_device(device)
+    individual_devices = (device_encoder, device_decoder, device_base_model)
+    any_individual_cuda = any(_is_cuda_device(d) for d in individual_devices if d is not None)
+    all_provided_individual_cpu = all(
+        d is not None and _is_cpu_device(d) for d in individual_devices
+    )
+    allow_unusable_visible_cuda = explicit_device_cpu or all_provided_individual_cpu
+
+    cuda_available, cuda_count = validate_cuda_usable_if_visible(
+        allow_unusable_visible_cuda=allow_unusable_visible_cuda
+    )
+
+    if not cuda_available:
+        if explicit_device_cuda or any_individual_cuda:
+            _raise_unusable_cuda(cuda_count)
 
     # Explicit device override (e.g. device="cpu"): use for all components unless individually overridden
     if device is not None:
@@ -374,3 +466,122 @@ def resolve_device_config_for_model(
     return device_encoder, device_decoder, device_base_model, True
 
 
+
+def infer_base_model_device_map(
+    name_or_path: str,
+    *,
+    device_encoder: Any,
+    device_decoder: Any,
+    device_base_model: Any = None,
+    torch_dtype: Optional[torch.dtype] = None,
+    trust_remote_code: bool = False,
+    warn_if_unavailable: bool = True,
+) -> Optional[Dict[str, Union[int, str]]]:
+    """
+    Infer a Hugging Face/Accelerate device map for placing the base model across GPUs.
+
+    Only needed when multiple GPUs are available for the base (e.g. 3+ GPUs with split
+    encoder/decoder, or 2+ GPUs with encoder_decoder_same_device). When only one GPU is
+    available for the base, the caller should use .to(device) instead; accelerate is not required.
+
+    Returns None if device_map cannot be computed. Caller should fall back to single-device loading.
+    """
+    try:
+        from accelerate import infer_auto_device_map
+        from transformers import AutoConfig, AutoModelForCausalLM, AutoModelForMaskedLM
+    except ImportError:
+        if warn_if_unavailable:
+            logger.warning(
+                "device_map requested but accelerate is not installed. "
+                "Install with: pip install accelerate. Falling back to single-device loading."
+            )
+        else:
+            logger.debug("accelerate or transformers not available for device_map inference")
+        return None
+
+    # Build max_memory: 0 for encoder/decoder GPUs, full for the rest
+    cuda_count = torch.cuda.device_count()
+    if cuda_count == 0:
+        return None
+
+    def _gpu_index(dev: Any) -> Optional[int]:
+        if dev.type != "cuda":
+            return None
+        return dev.index if dev.index is not None else 0
+
+    reserved_indices = set()
+    for d in (device_encoder, device_decoder):
+        idx = _gpu_index(d)
+        if idx is not None:
+            reserved_indices.add(idx)
+
+    base_gpu_count = sum(1 for i in range(cuda_count) if i not in reserved_indices)
+    if base_gpu_count <= 1:
+        # Only one GPU for base: use .to(device) instead; accelerate not needed
+        return None
+
+    base_idx = _gpu_index(device_base_model)
+    if base_idx is not None and base_idx in reserved_indices:
+        if warn_if_unavailable:
+            logger.warning(
+                "device_map requested but base model shares GPU with encoder/decoder. "
+                "Using single-device loading."
+            )
+        return None
+
+    max_memory: Dict[Union[int, str], Union[int, str]] = {}
+    for i in range(cuda_count):
+        if i in reserved_indices:
+            max_memory[i] = "0MiB"
+        else:
+            try:
+                total = torch.cuda.get_device_properties(i).total_memory
+                max_memory[i] = f"{int(total * 0.95 / 1e9)}GiB"
+            except Exception:
+                logger.warning(f"Could not get total memory for cuda:{i}; Falling back to single-device loading.")
+                return None
+
+    config = AutoConfig.from_pretrained(name_or_path, trust_remote_code=trust_remote_code)
+    if hasattr(config, "init_device"):
+        config.init_device = "meta"
+    model_type = getattr(config, "model_type", "").lower()
+
+    # Create minimal model for infer_auto_device_map (meta device to avoid loading weights)
+    try:
+        if "llama" in model_type or "mistral" in model_type or "qwen" in model_type or "gpt" in model_type:
+            model = AutoModelForCausalLM.from_config(config, dtype=torch_dtype)
+        else:
+            try:
+                model = AutoModelForCausalLM.from_config(config, dtype=torch_dtype)
+            except Exception:
+                model = AutoModelForMaskedLM.from_config(config, dtype=torch_dtype)
+    except Exception as e:
+        if warn_if_unavailable:
+            logger.warning("device_map requested but could not create model from config: %s. Using single-device loading.", e)
+        else:
+            logger.debug("Could not create model from config for device_map: %s", e)
+        return None
+
+    try:
+        device_map = infer_auto_device_map(model, max_memory=max_memory)
+    except Exception as e:
+        if warn_if_unavailable:
+            logger.warning("device_map requested but infer_auto_device_map failed: %s. Using single-device loading.", e)
+        else:
+            logger.debug("infer_auto_device_map failed: %s", e)
+        return None
+
+    return device_map
+
+
+def _normalize_param_name(name: str) -> str:
+    # Remove common wrapper prefixes repeatedly
+    prefixes = ("module.", "_orig_mod.")
+    changed = True
+    while changed:
+        changed = False
+        for p in prefixes:
+            if name.startswith(p):
+                name = name[len(p):]
+                changed = True
+    return name
