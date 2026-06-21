@@ -148,8 +148,7 @@ class TestClassMergeMapCreateTrainingData:
     """create_training_data with class_merge_map yields correct labels."""
 
     @pytest.fixture(scope="class")
-    @classmethod
-    def tokenizer(cls):
+    def tokenizer(self):
         from transformers import AutoTokenizer
         return AutoTokenizer.from_pretrained("bert-base-uncased")
 

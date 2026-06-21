@@ -265,8 +265,7 @@ class TestStandardPipelinePerDataFormat:
     """Standard pipeline (ensure_data → create_training_data) works for each data input format."""
 
     @pytest.fixture(scope="class")
-    @classmethod
-    def tokenizer(cls):
+    def tokenizer(self):
         """Load tokenizer once per class to avoid repeated from_pretrained (~10s each)."""
         from transformers import AutoTokenizer
         return AutoTokenizer.from_pretrained("bert-base-uncased")
@@ -363,8 +362,7 @@ class TestAddIdentityForOtherClasses:
     """Identity transitions are added only for non-target classes (all_classes \\ target_classes)."""
 
     @pytest.fixture(scope="class")
-    @classmethod
-    def tokenizer(cls):
+    def tokenizer(self):
         from transformers import AutoTokenizer
         return AutoTokenizer.from_pretrained("bert-base-uncased")
 
