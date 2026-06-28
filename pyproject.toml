@@ -80,6 +80,7 @@ Repository = "https://github.com/aieng-lab/gradiend"
 "Bug Tracker" = "https://github.com/aieng-lab/gradiend/issues"
 
 [tool.pytest.ini_options]
+basetemp = ".pytest_tmp_local"
 markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
     "integration: marks tests as integration tests (run actual training)",
