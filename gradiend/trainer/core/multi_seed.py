@@ -31,6 +31,7 @@ MULTI_SEED_CAPABLE_METHODS: set = {
     "plot_encoder_distributions",
     "plot_encoder_scatter",
     "plot_probability_shifts",
+    "plot_encoder_strip_by_split",
 }
 
 PLOT_METHODS = frozenset({
@@ -38,9 +39,10 @@ PLOT_METHODS = frozenset({
     "plot_encoder_distributions",
     "plot_encoder_scatter",
     "plot_probability_shifts",
+    "plot_encoder_strip_by_split",
 })
 
-# Keys omitted from top-level aggregate (kept in seeds.per_seed when requested).
+# Keys omitted from scalar top-level aggregate (kept in seeds.per_seed when requested).
 EVAL_SKIP_TOP_LEVEL_KEYS = frozenset({
     "encoder_df",
     "training_rows",
@@ -49,6 +51,9 @@ EVAL_SKIP_TOP_LEVEL_KEYS = frozenset({
     "plot_path",
     "seeds",
 })
+
+# Registry-backed payloads promoted to the merged result (e.g. mean encoder_df).
+PAYLOAD_AGGREGATOR_KEYS = frozenset({"encoder_df"})
 
 # Scalar metrics aggregated with seed_aggregate / dispersion.
 EVAL_SCALAR_KEYS = frozenset({
@@ -251,6 +256,16 @@ def aggregate_eval_results(
             int(seed): results[i] for i, seed in enumerate(seed_values)
         }
     merged["seeds"] = seeds_block
+    for key in PAYLOAD_AGGREGATOR_KEYS:
+        if key not in SEED_AGGREGATOR_REGISTRY:
+            continue
+        payload_values = [
+            r.get(key)
+            for r in results
+            if isinstance(r, dict) and r.get(key) is not None
+        ]
+        if payload_values:
+            merged[key] = SEED_AGGREGATOR_REGISTRY[key](payload_values)
     return merged
 
 
@@ -295,6 +310,10 @@ def _aggregate_plot_results(
     return out
 
 
+def is_multi_seed_view(trainer: Any) -> bool:
+    return isinstance(trainer, MultiSeedTrainerView)
+
+
 def resolve_default_seed_selection(trainer: Any, seed_selection: Optional[str] = None) -> str:
     """Resolve default seed selection for suite/comparison calls.
 
@@ -307,10 +326,47 @@ def resolve_default_seed_selection(trainer: Any, seed_selection: Optional[str] =
         if selected not in VALID_SELECTIONS:
             raise ValueError(f"seed_selection must be one of {sorted(VALID_SELECTIONS)}, got {seed_selection!r}")
         return selected
+    if is_multi_seed_view(trainer):
+        return trainer.selection
     args = getattr(trainer, "_training_args", None) or getattr(trainer, "training_args", None)
     if args is not None and getattr(args, "analyze_seed_stability", False):
         return "all_convergent"
     return "best"
+
+
+def resolve_seed_selection_for_trainers(
+    trainers: Dict[str, Any],
+    seed_selection: Optional[str] = None,
+) -> str:
+    """Resolve seed selection for a trainer mapping (suite/comparison plots).
+
+    When ``seed_selection`` is omitted, any child with
+    ``analyze_seed_stability=True`` switches the whole comparison to
+    ``all_convergent`` (same rule as :meth:`TrainerSuite._resolve_suite_seed_selection`).
+    """
+    if seed_selection is not None:
+        selected = str(seed_selection).strip().lower()
+        if selected not in VALID_SELECTIONS:
+            raise ValueError(f"seed_selection must be one of {sorted(VALID_SELECTIONS)}, got {seed_selection!r}")
+        return selected
+    for trainer in trainers.values():
+        if resolve_default_seed_selection(trainer, None) != "best":
+            return "all_convergent"
+    return "best"
+
+
+def resolve_dispersion_for_trainers(
+    trainers: Dict[str, Any],
+    dispersion: Optional[str] = None,
+) -> str:
+    """Resolve dispersion metadata for trainer-dict comparison plots."""
+    if dispersion is not None:
+        return str(dispersion).strip().lower()
+    for trainer in trainers.values():
+        args = getattr(trainer, "_training_args", None) or getattr(trainer, "training_args", None)
+        if args is not None and getattr(args, "analyze_seed_stability", False):
+            return "std"
+    return "none"
 
 
 def load_seed_model_group(
@@ -470,11 +526,36 @@ class MultiSeedTrainerView:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
+    def _seed_run_metadata(self, seed_value: int) -> Dict[str, Any]:
+        if not hasattr(self._trainer, "get_seed_report"):
+            return {}
+        report = self._trainer.get_seed_report()
+        runs = report.get("runs", []) if isinstance(report, dict) else []
+        if not isinstance(runs, list):
+            return {}
+        for run in runs:
+            if isinstance(run, dict) and run.get("seed") == int(seed_value):
+                return run
+        return {}
+
+    def _prepare_seed_data(self, seed_value: int) -> None:
+        refresh_splits = getattr(self._trainer, "_refresh_data_splits_for_seed", None)
+        args = getattr(self._trainer, "_training_args", None) or getattr(self._trainer, "training_args", None)
+        if callable(refresh_splits) and args is not None:
+            metadata = self._seed_run_metadata(seed_value)
+            refresh_splits(
+                int(seed_value),
+                args,
+                split_cycle_index=metadata.get("split_cycle_index"),
+                split_cycle_length=metadata.get("split_cycle_length"),
+            )
+
     def _run_for_seeds(self, method_name: str, fn: Callable[..., Any], /, **kwargs: Any) -> Any:
         if len(self._entries) == 1:
             seed_val, seed_path = self._entries[0]
             model = self._load_seed_model(seed_path)
             try:
+                self._prepare_seed_data(seed_val)
                 with _seed_execution_context(self._trainer, seed_path, model):
                     single = fn(**kwargs)
             finally:
@@ -512,6 +593,7 @@ class MultiSeedTrainerView:
         for seed_val, seed_path in self._entries:
             model = self._load_seed_model(seed_path)
             try:
+                self._prepare_seed_data(seed_val)
                 with _seed_execution_context(self._trainer, seed_path, model):
                     results.append(fn(**kwargs))
                 seed_values.append(int(seed_val))
@@ -615,6 +697,104 @@ class MultiSeedTrainerView:
         """
         return self._bind_method("evaluate_decoder")(**kwargs)
 
+    def plot_encoder_by_target(self, **kwargs: Any) -> Dict[str, Any]:
+        """Create one held-out-target encoder plot with one row per selected seed.
+
+        The default selection is ``"all_convergent"``, so this method naturally
+        focuses the target-word analysis on convergent checkpoints.
+        """
+        import pandas as pd
+
+        from gradiend.visualizer.encoder_by_target import plot_encoder_by_target_seed_grid
+
+        plot_kwargs = {
+            key: kwargs.pop(key)
+            for key in list(kwargs)
+            if key
+            in {
+                "target_col",
+                "class_col",
+                "hue_col",
+                "class_order",
+                "output",
+                "output_dir",
+                "experiment_dir",
+                "show",
+                "figsize",
+                "jitter",
+                "point_size",
+                "title",
+                "plot_style",
+                "interactive",
+                "height",
+                "error_stat",
+                "show_seed_points",
+                "error_group_by_split",
+                "combine_seed_rows",
+            }
+        }
+        eval_kwargs = dict(kwargs)
+        eval_kwargs.setdefault("split", "all")
+        eval_kwargs.setdefault("max_size", None)
+        eval_kwargs.setdefault("use_cache", True)
+        eval_kwargs["return_df"] = True
+        eval_kwargs["plot"] = False
+
+        frames: List[Any] = []
+        seed_values: List[int] = []
+        for seed_val, seed_path in self._entries:
+            model = self._load_seed_model(seed_path)
+            try:
+                self._prepare_seed_data(seed_val)
+                with _seed_execution_context(self._trainer, seed_path, model):
+                    result = self._trainer.evaluate_encoder(**eval_kwargs)
+                frame = result.get("encoder_df") if isinstance(result, dict) else None
+                if frame is not None and not frame.empty:
+                    frame = frame.copy()
+                    frame["seed"] = int(seed_val)
+                    frames.append(frame)
+                    seed_values.append(int(seed_val))
+            finally:
+                self._cleanup_model(model)
+
+        if not frames:
+            return {
+                "path": None,
+                "seeds": {
+                    "n": 0,
+                    "values": [],
+                    "selection": self.selection,
+                    "aggregate": self.aggregate,
+                    "dispersion": self.dispersion,
+                },
+            }
+
+        encoder_df = pd.concat(frames, ignore_index=True)
+        id2label = dict(getattr(self._trainer, "_id2label", None) or {})
+        config_obj = getattr(self._trainer, "config", None)
+        config_map = getattr(config_obj, "id2label", None) if config_obj is not None else None
+        if isinstance(config_map, dict):
+            id2label.update(config_map)
+        if "class_order" not in plot_kwargs:
+            pair = getattr(self._trainer, "pair", None)
+            if pair:
+                plot_kwargs["class_order"] = list(pair)
+        path = plot_encoder_by_target_seed_grid(
+            encoder_df,
+            id2label=id2label or None,
+            **plot_kwargs,
+        )
+        return {
+            "path": path,
+            "seeds": {
+                "n": len(seed_values),
+                "values": seed_values,
+                "selection": self.selection,
+                "aggregate": self.aggregate,
+                "dispersion": self.dispersion,
+            },
+        }
+
     def plot_training_convergence(self, **kwargs: Any) -> Dict[str, Any]:
         """Create training-convergence plots for each selected seed.
 
@@ -672,6 +852,59 @@ class MultiSeedTrainerView:
                 self._shared_tokenizer = first.tokenizer
         return models
 
+    def get_model(
+        self,
+        use_cache: Optional[bool] = None,
+        *,
+        load_directory: Optional[Any] = None,
+        gradiend_only: bool = False,
+        **kwargs: Any,
+    ) -> Any:
+        """Load the selected seed checkpoint(s) for analysis or comparison.
+
+        A single checkpoint returns the model directly. Multiple checkpoints
+        return a :class:`~gradiend.trainer.core.seed_models.SeedModelGroup` for
+        use with similarity / top-k overlap matrix builders.
+        """
+        from gradiend.trainer.core.seed_models import SeedModelGroup
+
+        if load_directory is not None:
+            return self._trainer.get_model(
+                use_cache=use_cache,
+                load_directory=load_directory,
+                **kwargs,
+            )
+        if len(self._entries) <= 1:
+            seed_path = self._entries[0][1]
+            if gradiend_only:
+                from gradiend.trainer.suite.definitions import _load_gradiend_only_model
+
+                return _load_gradiend_only_model(seed_path, device="cpu")
+            return self._load_seed_model(seed_path)
+
+        if gradiend_only:
+            from gradiend.trainer.suite.definitions import _load_gradiend_only_model
+
+            models = [
+                _load_gradiend_only_model(path, device="cpu")
+                for _, path in self._entries
+            ]
+        else:
+            models = self.load_models()
+        return SeedModelGroup(
+            models,
+            selection=self.selection,
+            aggregate=self.aggregate,
+            dispersion=self.dispersion,
+            seed_values=self.seed_values(),
+        )
+
+    def multi_seed(self, **kwargs: Any) -> "MultiSeedTrainerView":
+        """Re-wrap the inner trainer (replaces view options when kwargs are passed)."""
+        if kwargs:
+            return self._trainer.multi_seed(**kwargs)
+        return self
+
     def __getattr__(self, name: str) -> Any:
         if name.startswith("_"):
             raise AttributeError(name)
@@ -696,3 +929,8 @@ def multi_seed_capable(method: Callable[..., Any]) -> Callable[..., Any]:
     """Decorator marking a Trainer method as supported by MultiSeedTrainerView."""
     MULTI_SEED_CAPABLE_METHODS.add(method.__name__)
     return method
+
+
+from gradiend.comparison.encoder_aggregation import aggregate_encoder_dataframes_registry
+
+register_seed_aggregator("encoder_df", aggregate_encoder_dataframes_registry)

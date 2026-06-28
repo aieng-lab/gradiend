@@ -178,26 +178,10 @@ class TrainerSuite(ABC):
         self._shared_model_key = unique_keys[0]
 
     def _resolve_suite_seed_selection(self, seed_selection: Optional[str]) -> str:
-        if seed_selection is not None:
-            selected = str(seed_selection).strip().lower()
-            if selected not in {"best", "all_convergent", "all_tried"}:
-                raise ValueError(
-                    f"seed_selection must be one of ['best', 'all_convergent', 'all_tried'], got {seed_selection!r}"
-                )
-            return selected
-        for trainer in self.trainers.values():
-            if resolve_default_seed_selection(trainer, None) != "best":
-                return "all_convergent"
-        return "best"
+        return resolve_seed_selection_for_trainers(self.trainers, seed_selection)
 
     def _resolve_suite_dispersion(self, dispersion: Optional[str]) -> str:
-        if dispersion is not None:
-            return str(dispersion).strip().lower()
-        for trainer in self.trainers.values():
-            args = getattr(trainer, "_training_args", None) or getattr(trainer, "training_args", None)
-            if args is not None and getattr(args, "analyze_seed_stability", False):
-                return "std"
-        return "none"
+        return resolve_dispersion_for_trainers(self.trainers, dispersion)
 
     def _build_child_trainer(self, *, definition: SuitePairDefinition, child_id: str) -> Trainer:
         child_kwargs = dict(self._trainer_kwargs)
@@ -208,6 +192,8 @@ class TrainerSuite(ABC):
         if "config" in child_kwargs and child_kwargs["config"] is not None:
             cfg = copy.copy(child_kwargs["config"])
             setattr(cfg, "target_classes", list(definition.target_classes))
+            if getattr(cfg, "all_classes", None) is None:
+                setattr(cfg, "all_classes", list(self.target_classes))
             setattr(cfg, "class_merge_map", merge_map)
             setattr(cfg, "class_merge_transition_groups", transition_groups)
             setattr(cfg, "run_id", self._child_run_id(child_id))
@@ -215,9 +201,20 @@ class TrainerSuite(ABC):
         else:
             child_kwargs["class_merge_map"] = merge_map
             child_kwargs["class_merge_transition_groups"] = transition_groups
+            child_kwargs.setdefault("all_classes", list(self.target_classes))
         child_kwargs["target_classes"] = list(definition.target_classes)
         child_kwargs["run_id"] = self._child_run_id(child_id)
+        child_kwargs = self._prepare_child_trainer_kwargs(child_kwargs, definition=definition, child_id=child_id)
         return self.trainer_cls(*self._trainer_args, **child_kwargs)
+
+    def _prepare_child_trainer_kwargs(
+        self,
+        child_kwargs: Dict[str, Any],
+        *,
+        definition: SuitePairDefinition,
+        child_id: str,
+    ) -> Dict[str, Any]:
+        return child_kwargs
 
     def _build_annotation_trainer(self) -> Trainer:
         annotation_kwargs = dict(self._trainer_kwargs)
@@ -425,6 +422,10 @@ class TrainerSuite(ABC):
                                 "Retry with retain_models_in_memory=False or call clear_model_cache() "
                                 "before loading additional models."
                             ) from e
+                    if not used_cache:
+                        wrapped = enter_analysis_mode(trainer)
+                        if wrapped is not trainer:
+                            self.trainers[child_id] = wrapped
             except torch.OutOfMemoryError as exc:
                 raise self._suite_oom_error(method_name, child_id) from exc
             except Exception:
@@ -552,6 +553,7 @@ class TrainerSuite(ABC):
         load_missing: bool = True,
         use_cache: bool = True,
         seed_selection: Optional[str] = None,
+        gradiend_only: bool = False,
     ) -> Dict[str, Any]:
         """Load suite child models for comparison or plotting.
 
@@ -560,47 +562,47 @@ class TrainerSuite(ABC):
             load_missing: If True, load models not already retained in memory.
             use_cache: Forwarded to child model loading.
             seed_selection: Optional seed selection for multi-seed child runs.
+            gradiend_only: If True, load only saved GRADIEND weights/mapping and
+                skip the Hugging Face base model. Use this for weight-space
+                comparisons that do not run model forwards.
         """
         effective_labels = self._effective_label_mapping(label_mapping, include_defaults=False)
         models: Dict[str, Any] = {}
+        logger.info(
+            "Loading %s suite model(s) for comparison%s.",
+            len(self.trainers),
+            " as GRADIEND-only weights" if gradiend_only else "",
+        )
         for child_id, trainer in self.trainers.items():
             label = effective_labels.get(child_id, child_id)
             resolved_selection = resolve_default_seed_selection(trainer, seed_selection)
-            if resolved_selection == "best":
-                model = self._models.get(child_id)
-                if model is None and load_missing:
-                    load_kwargs: Dict[str, Any] = {}
-                    if self._shared_base_model is not None:
-                        load_kwargs["base_model"] = self._shared_base_model
-                    if self._shared_tokenizer is not None:
-                        load_kwargs["tokenizer"] = self._shared_tokenizer
-                    model = trainer.get_model(use_cache=use_cache, **load_kwargs)
-                    if self.retain_models_in_memory:
-                        try:
-                            model = self._retain_model(child_id, trainer)
-                        except (RuntimeError, MemoryError) as e:
-                            raise RuntimeError(
-                                "TrainerSuite failed to keep all models in memory while loading them. "
-                                "Retry with retain_models_in_memory=False."
-                            ) from e
-                    elif self.model_device == "cpu" and hasattr(model, "cpu"):
-                        model = model.cpu()
-                if model is not None:
-                    models[label] = model
-                continue
-
-            grouped_models, self._shared_base_model, self._shared_tokenizer = load_seed_model_group(
+            model_value, self._shared_base_model, self._shared_tokenizer = models_for_comparison(
                 trainer,
-                selection=resolved_selection,
+                seed_selection=resolved_selection,
+                gradiend_only=gradiend_only,
+                use_cache=use_cache,
                 shared_base_model=self._shared_base_model,
                 shared_tokenizer=self._shared_tokenizer,
             )
-            if self.model_device == "cpu":
-                grouped_models = [m.cpu() if hasattr(m, "cpu") else m for m in grouped_models]
-            elif self.model_device == "cuda":
-                grouped_models = [m.cuda() if hasattr(m, "cuda") else m for m in grouped_models]
-            if grouped_models:
-                models[label] = grouped_models
+            if model_value is None:
+                continue
+            if self.model_device == "cpu" and not gradiend_only:
+                from gradiend.trainer.core.seed_models import SeedModelGroup
+
+                if isinstance(model_value, SeedModelGroup):
+                    model_value = SeedModelGroup(
+                        [m.cpu() if hasattr(m, "cpu") else m for m in model_value.models],
+                        selection=model_value.selection,
+                        aggregate=model_value.aggregate,
+                        dispersion=model_value.dispersion,
+                        seed_values=model_value.seed_values,
+                    )
+                elif isinstance(model_value, list):
+                    model_value = [m.cpu() if hasattr(m, "cpu") else m for m in model_value]
+                elif hasattr(model_value, "cpu"):
+                    model_value = model_value.cpu()
+            models[label] = model_value
+        logger.info("Loaded %s suite model entry/entries for comparison.", len(models))
         return models
 
     def compute_similarity_matrix(
@@ -622,6 +624,7 @@ class TrainerSuite(ABC):
             label_mapping=label_mapping,
             use_cache=use_cache,
             seed_selection=seed_selection,
+            gradiend_only=True,
         )
         return compute_similarity_matrix(models, **kwargs)
 
@@ -643,6 +646,7 @@ class TrainerSuite(ABC):
             label_mapping=label_mapping,
             use_cache=use_cache,
             seed_selection=kwargs.pop("seed_selection", None),
+            gradiend_only=True,
         )
         return compute_grouped_similarity_matrices(models, **kwargs)
 
@@ -715,8 +719,8 @@ class TrainerSuite(ABC):
             **plot_kwargs: Forwarded to comparison heatmap plotting.
         """
         raise NotImplementedError(
-            "plot_cross_encoding_heatmap is only available for positive-pair suites. "
-            "Use PositiveTrainerSuite for true/false-style pair semantics."
+            "plot_cross_encoding_heatmap is only available on PositiveTrainerSuite "
+            "and SymmetricTrainerSuite."
         )
 
     def plot_similarity_heatmap(
@@ -741,6 +745,7 @@ class TrainerSuite(ABC):
             label_mapping=effective_labels,
             use_cache=use_cache,
             seed_selection=kwargs.pop("seed_selection", None),
+            gradiend_only=True,
         )
         import gradiend.trainer.suite as suite_api
 
@@ -772,6 +777,7 @@ class TrainerSuite(ABC):
             label_mapping=effective_labels,
             use_cache=use_cache,
             seed_selection=kwargs.pop("seed_selection", None),
+            gradiend_only=True,
         )
         return plot_topk_overlap_heatmap(
             models,

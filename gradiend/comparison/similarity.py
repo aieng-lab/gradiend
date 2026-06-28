@@ -18,6 +18,10 @@ from gradiend.comparison.common import (
     _validate_topk_optional,
     _normalize_model_groups,
 )
+from gradiend.util.logging import get_logger
+
+
+logger = get_logger(__name__)
 
 
 def _resolve_overlap_fraction(size_a: int, size_b: int, inter: int) -> float:
@@ -95,6 +99,84 @@ def _extract_sparse_blocks(
         "param_names": param_names,
         "total_base_size": total_base_size,
     }
+
+
+def _extract_aligned_flat_vector(
+    model: object,
+    *,
+    part: str,
+    topk: Optional[Union[int, float]] = None,
+) -> Dict[str, Any]:
+    if not hasattr(model, "gradiend"):
+        raise TypeError("Similarity measures require models with a .gradiend attribute")
+
+    gradiend = model.gradiend
+    gradiend._require_built()
+    base_map = gradiend._get_base_global_index_map().detach().cpu()
+    if topk is None:
+        local_idx = torch.arange(int(gradiend.input_dim), dtype=torch.long, device=base_map.device)
+    else:
+        local_idx = torch.as_tensor(gradiend.get_topk_weights(part=part, topk=topk), dtype=torch.long, device=base_map.device)
+    base_indices = base_map.index_select(0, local_idx)
+
+    with torch.no_grad():
+        if part == "encoder-weight":
+            weight = gradiend.encoder[0].linear.weight.detach().cpu()
+            selected = weight.index_select(1, local_idx).transpose(0, 1).contiguous()
+            block_dim = int(weight.shape[0])
+            flat = selected.flatten()
+        elif part == "decoder-weight":
+            weight = gradiend.decoder[0].linear.weight.detach().cpu()
+            selected = weight.index_select(0, local_idx).contiguous()
+            block_dim = int(weight.shape[1])
+            flat = selected.flatten()
+        elif part in {"decoder-bias", "decoder-sum"}:
+            vec = gradiend.get_update_vector(part=part).detach().cpu()
+            block_dim = 1
+            flat = vec.index_select(0, local_idx).contiguous().flatten()
+        else:
+            raise ValueError(
+                "Supported parts are 'encoder-weight', 'decoder-weight', 'decoder-bias', and 'decoder-sum'"
+            )
+
+    return {
+        "base_indices": base_indices,
+        "flat": flat.to(dtype=torch.float32),
+        "block_dim": block_dim,
+        "resolved_topk": int(local_idx.numel()),
+    }
+
+
+def _compute_aligned_cosine_like_matrix(
+    extracted: Dict[str, Dict[str, Any]],
+    *,
+    take_abs: bool,
+) -> Optional[List[List[float]]]:
+    model_ids = list(extracted.keys())
+    if not model_ids:
+        return None
+    reference_indices = extracted[model_ids[0]]["base_indices"]
+    reference_size = int(extracted[model_ids[0]]["flat"].numel())
+    for mid in model_ids[1:]:
+        current = extracted[mid]
+        if int(current["flat"].numel()) != reference_size:
+            return None
+        if not torch.equal(reference_indices, current["base_indices"]):
+            return None
+
+    stacked = torch.stack([extracted[mid]["flat"] for mid in model_ids], dim=0)
+    norms = torch.linalg.vector_norm(stacked, dim=1)
+    safe_norms = norms.clone()
+    safe_norms[safe_norms == 0.0] = 1.0
+    normalized = stacked / safe_norms.unsqueeze(1)
+    sim = normalized @ normalized.t()
+    zero_mask = norms == 0.0
+    if bool(zero_mask.any()):
+        sim[zero_mask, :] = 0.0
+        sim[:, zero_mask] = 0.0
+    if take_abs:
+        sim = sim.abs()
+    return sim.cpu().tolist()
 
 
 def _extract_importance_by_index(
@@ -253,21 +335,47 @@ def _compute_topk_overlap_similarity_matrix(models: Dict[str, object], *, part: 
 
 
 def _compute_cosine_like_matrix(models: Dict[str, object], *, part: str, topk: Optional[Union[int, float]], take_abs: bool, measure_name: str) -> Dict[str, Any]:
-    extracted = {mid: _extract_sparse_blocks(model, part=part, topk=topk) for mid, model in models.items()}
+    logger.info(
+        "Computing %s similarity matrix for %s models (part=%s, topk=%s).",
+        measure_name,
+        len(models),
+        part,
+        "all" if topk is None else topk,
+    )
+    aligned_extracted: Dict[str, Dict[str, Any]] = {}
+    for idx, (mid, model) in enumerate(models.items(), start=1):
+        logger.info("Extracting %s vector %s/%s: %s", measure_name, idx, len(models), mid)
+        aligned_extracted[mid] = _extract_aligned_flat_vector(model, part=part, topk=topk)
+    matrix = _compute_aligned_cosine_like_matrix(aligned_extracted, take_abs=take_abs)
     model_ids = list(models.keys())
-    matrix = [[0.0] * len(model_ids) for _ in range(len(model_ids))]
-    for i, mi in enumerate(model_ids):
-        for j, mj in enumerate(model_ids):
-            score = _cosine_from_blocks(extracted[mi]["blocks"], extracted[mj]["blocks"])
-            matrix[i][j] = abs(score) if take_abs else score
+    if matrix is None:
+        logger.info("Selected coordinates are not identically aligned; falling back to sparse cosine computation.")
+        extracted = {mid: _extract_sparse_blocks(model, part=part, topk=topk) for mid, model in models.items()}
+        matrix = [[0.0] * len(model_ids) for _ in range(len(model_ids))]
+        total_pairs = len(model_ids) * len(model_ids)
+        done_pairs = 0
+        for i, mi in enumerate(model_ids):
+            for j, mj in enumerate(model_ids):
+                score = _cosine_from_blocks(extracted[mi]["blocks"], extracted[mj]["blocks"])
+                matrix[i][j] = abs(score) if take_abs else score
+                done_pairs += 1
+                if done_pairs == 1 or done_pairs == total_pairs or done_pairs % max(1, total_pairs // 10) == 0:
+                    logger.info("Computed %s/%s %s similarity cells.", done_pairs, total_pairs, measure_name)
+        resolved_topk = {mid: int(extracted[mid]["resolved_topk"]) for mid in model_ids}
+        block_dim = int(next(iter(extracted.values()))["block_dim"])
+    else:
+        logger.info("Using aligned-vector cosine path for %s similarity.", measure_name)
+        resolved_topk = {mid: int(aligned_extracted[mid]["resolved_topk"]) for mid in model_ids}
+        block_dim = int(next(iter(aligned_extracted.values()))["block_dim"])
+    logger.info("Finished %s similarity matrix.", measure_name)
     return {
         "measure": measure_name,
         "model_ids": model_ids,
         "matrix": matrix,
         "part": part,
         "topk": topk,
-        "resolved_topk": {mid: int(extracted[mid]["resolved_topk"]) for mid in model_ids},
-        "block_dim": int(next(iter(extracted.values()))["block_dim"]),
+        "resolved_topk": resolved_topk,
+        "block_dim": block_dim,
     }
 
 

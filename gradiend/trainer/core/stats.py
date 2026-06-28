@@ -43,10 +43,17 @@ def _best_step_abs_mean_by_type(
     Return abs_mean_by_type at the best checkpoint step (type -> value).
     training_stats["abs_mean_by_type"] is step -> { type -> value }; we slice at best step.
     """
+    direct = best_score_checkpoint.get("abs_mean_by_type")
+    if isinstance(direct, dict):
+        return {k: float(v) for k, v in direct.items() if isinstance(v, (int, float))}
+
+    abs_hist = training_stats.get("abs_mean_by_type")
+    if isinstance(abs_hist, dict) and any(isinstance(v, (int, float)) for v in abs_hist.values()):
+        return {k: float(v) for k, v in abs_hist.items() if isinstance(v, (int, float))}
+
     best_step = best_score_checkpoint.get("global_step")
     if best_step is None:
         return {}
-    abs_hist = training_stats.get("abs_mean_by_type")
     if not isinstance(abs_hist, dict):
         return {}
     # Steps may be stored as int (in-memory) or str (after JSON round-trip)
@@ -91,6 +98,39 @@ def _best_step_mean_by_class(
     if isinstance(at_step, dict):
         return {k: float(v) for k, v in at_step.items() if isinstance(v, (int, float))}
     return {}
+
+
+def _nonzero_target_class_abs_means(mean_by_class: Dict[Any, float]) -> List[float]:
+    """Absolute mean encoded values for non-zero (non-neutral) target classes."""
+    abs_means: List[float] = []
+    for label, mean_value in mean_by_class.items():
+        try:
+            numeric_label = float(label)
+        except (TypeError, ValueError):
+            continue
+        if numeric_label == 0.0:
+            continue
+        abs_means.append(abs(float(mean_value)))
+    return abs_means
+
+
+def _best_step_min_target_class_abs_mean(
+    training_stats: Dict[str, Any],
+    best_score_checkpoint: Dict[str, Any],
+) -> Optional[float]:
+    """
+    Return the minimum |mean encoded value| among non-zero target classes at the best checkpoint.
+
+    Identity / neutral class 0 is ignored. Returns None when no non-zero target classes
+    are available at the best step.
+    """
+    mean_by_class = _best_step_mean_by_class(training_stats, best_score_checkpoint)
+    if not mean_by_class:
+        return None
+    abs_means = _nonzero_target_class_abs_means(mean_by_class)
+    if not abs_means:
+        return None
+    return min(abs_means)
 
 
 def _best_step_target_class_mean_product(
@@ -248,6 +288,7 @@ def write_training_stats(
     losses: Optional[list] = None,
     convergence_info: Optional[Dict[str, Any]] = None,
     seed_stability: Optional[Dict[str, Any]] = None,
+    cache_fingerprint: Optional[Dict[str, Any]] = None,
 ) -> str:
     """
     Write full training run info to output_dir/training.json.
@@ -293,6 +334,13 @@ def write_training_stats(
         run_info["convergence_info"] = convergence_info
     if seed_stability is not None:
         run_info["seed_stability"] = seed_stability
+    from gradiend.trainer.core.cache_policy import resolve_cache_fingerprint_for_write
+
+    run_info["cache_fingerprint"] = resolve_cache_fingerprint_for_write(
+        output_dir,
+        training_args,
+        cache_fingerprint=cache_fingerprint,
+    )
     os.makedirs(output_dir, exist_ok=True)
     with open(path, "w") as f:
         json.dump(to_jsonable(run_info), f, indent=2)

@@ -16,6 +16,17 @@ from gradiend.util.logging import get_logger
 
 logger = get_logger(__name__)
 
+# Legacy HF dataset IDs (no namespace) that moved under an org namespace.
+HF_DATASET_ALIASES: dict[str, str] = {
+    "tweet_eval": "cardiffnlp/tweet_eval",
+}
+
+
+def normalize_hf_dataset_id(dataset_id: str) -> str:
+    """Map legacy Hugging Face dataset IDs to their current namespace/name."""
+    return HF_DATASET_ALIASES.get(dataset_id, dataset_id)
+
+
 # Hugging Face datasets >= 4 removed trust_remote_code and loading-script datasets.
 _DATASETS_V4_OR_NEWER: Optional[bool] = None
 
@@ -142,6 +153,7 @@ def _load_from_string_source(
         trust_remote_code=trust_remote_code,
         streaming=use_streaming,
     )
+    source = normalize_hf_dataset_id(source)
     if hf_config is not None:
         ds = load_dataset(source, hf_config, **load_kwargs)
     else:

@@ -5,6 +5,10 @@ This demonstrates how to use TextPredictionTrainer for gender debiasing with nam
 Names are augmented once before training/evaluation (10 names per template per gender)
 instead of using complicated data augmentation at training time.
 
+Set ``DECODER_ONLY = True`` in the ``__main__`` block (or pass ``--decoder-only``) to run
+the same workflow on GPT-2 with ``prediction_objective="clm_next_token"`` — the minimal
+decoder-only next-token path (no auxiliary MLM head). See ``docs/guides/decoder-only.md``.
+
 This example showcases custom decoder evaluation: it overrides evaluate_base_model
 to use GENTypes-based name-prediction metrics (paper-style BPI, FPI, MPI; see
 https://arxiv.org/abs/2502.01406). Custom metrics are exposed via a summary_extractor
@@ -390,12 +394,36 @@ def compute_gender_metrics(results):
 
 
 if __name__ == "__main__":
+    import argparse
+
     from gradiend import TrainingArguments
 
-    model_name = "distilbert-base-cased"
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--decoder-only",
+        action="store_true",
+        help='Use GPT-2 with prediction_objective="clm_next_token" (no MLM head).',
+    )
+    cli_args = parser.parse_args()
+
+    # Simple module flag; CLI --decoder-only overrides when passed.
+    DECODER_ONLY = False
+    decoder_only = cli_args.decoder_only or DECODER_ONLY
+
+    if decoder_only:
+        model_name = "gpt2"
+        experiment_dir = "runs/examples/gender_en_decoder_only"
+        prediction_objective = "clm_next_token"
+        train_batch_size = 8
+    else:
+        model_name = "distilbert-base-cased"
+        experiment_dir = "runs/examples/gender_en"
+        prediction_objective = "auto"
+        train_batch_size = 32
+
     args = TrainingArguments(
-        experiment_dir="runs/examples/gender_en",
-        train_batch_size=32,
+        experiment_dir=experiment_dir,
+        train_batch_size=train_batch_size,
         encoder_eval_max_size=10,
         eval_steps=25,
         num_train_epochs=1,
@@ -406,9 +434,11 @@ if __name__ == "__main__":
         learning_rate=1e-4,
         use_cache=True,
         fail_on_non_convergence=True,
+        prediction_objective=prediction_objective,
     )
 
-    print("=== Gender English Demo ===")
+    mode_label = "decoder-only (clm_next_token)" if decoder_only else "encoder MLM"
+    print(f"=== Gender English Demo ({mode_label}) ===")
     trainer = build_gender_trainer(model=model_name, names_per_template=4, args=args)
     print(f"Run: {trainer.run_id}, samples: {len(trainer.combined_data)}")
 

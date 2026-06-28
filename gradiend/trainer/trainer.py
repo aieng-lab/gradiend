@@ -22,6 +22,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from gradiend import ModelWithGradiend
+from gradiend.model._source_target import sync_model_source_target_from_training_args
 from gradiend.util.paths import resolve_encoder_plot_path
 from gradiend.trainer.core.feature_definition import FeatureLearningDefinition, _resolve_encoder_df
 from gradiend.util.paths import (
@@ -42,6 +43,7 @@ from gradiend.trainer.core.annotation import TrainerAnnotationMixin
 from gradiend.trainer.core.training import format_non_convergence_error, train as core_train
 from gradiend.trainer.factory import create_model_with_gradiend
 from gradiend.trainer.core.arguments import TrainingArguments
+from gradiend.trainer.core.config import validate_source_target
 from gradiend.trainer.core.cache_policy import (
     should_reuse_seed_training_cache,
     should_reuse_training_cache,
@@ -485,6 +487,7 @@ class Trainer(TrainerAnnotationMixin, FeatureLearningDefinition):
         load_directory = load_directory if load_directory is not None else kwargs.pop("load_directory", None)
         # Return in-memory model when set (e.g. during training), unless loading from a specific path
         if load_directory is None and self._model_instance is not None:
+            sync_model_source_target_from_training_args(self._model_instance, self._training_args)
             return self._model_instance
         # Pass definition so models get pair/classes when loading
         kwargs.setdefault("definition", self)
@@ -494,6 +497,7 @@ class Trainer(TrainerAnnotationMixin, FeatureLearningDefinition):
                 kwargs.setdefault("trust_remote_code", getattr(self._training_args, "trust_remote_code", False))
         load_directory = load_directory if load_directory is not None else self.model_path
         model = super().create_model_with_gradiend(load_directory, **kwargs)
+        sync_model_source_target_from_training_args(model, self._training_args)
         # Always cache in memory; use_cache elsewhere is for disk/output only
         self._model_instance = model
         self._model_manually_unloaded = False
@@ -547,6 +551,8 @@ class Trainer(TrainerAnnotationMixin, FeatureLearningDefinition):
         if self._model_instance is not None:
             return
         if not self._model_manually_unloaded:
+            return
+        if getattr(self, "_suppress_expected_reload_warning", False):
             return
         logger.warning(
             "The in-memory model was released via unload_model(). Evaluation will reload the "
@@ -839,7 +845,11 @@ class Trainer(TrainerAnnotationMixin, FeatureLearningDefinition):
 
     def _pre_prune_cache_dir(self, args: Optional[Any] = None) -> Optional[str]:
         training_args = args if args is not None else self._training_args
-        experiment_dir = getattr(training_args, "experiment_dir", None) if training_args is not None else None
+        experiment_dir = None
+        if training_args is not None:
+            experiment_dir = self._resolve_experiment_dir(
+                getattr(training_args, "experiment_dir", None)
+            )
         if experiment_dir is None:
             experiment_dir = self.experiment_dir
         return resolve_pre_prune_cache_dir(experiment_dir)
@@ -880,11 +890,17 @@ class Trainer(TrainerAnnotationMixin, FeatureLearningDefinition):
             )
 
     def _cleanup_pre_prune_cache(self, args: Optional[Any] = None) -> None:
+        """Remove ephemeral pre-prune cache under experiment_dir after train() finishes."""
         training_args = args if args is not None else self._training_args
-        if training_args is None or not getattr(training_args, "reuse_pre_prune", False):
-            return
-        experiment_dir = getattr(training_args, "experiment_dir", None) or self.experiment_dir
-        remove_pre_prune_cache(experiment_dir)
+        experiment_dir = None
+        if training_args is not None:
+            experiment_dir = self._resolve_experiment_dir(
+                getattr(training_args, "experiment_dir", None)
+            )
+        if experiment_dir is None:
+            experiment_dir = self.experiment_dir
+        if remove_pre_prune_cache(experiment_dir):
+            logger.info("Removed ephemeral pre-prune cache under %s", experiment_dir)
 
     def post_prune(self, post_cfg: Optional[Any] = None) -> "Trainer":
         """
@@ -925,6 +941,7 @@ class Trainer(TrainerAnnotationMixin, FeatureLearningDefinition):
         plot_mean_by_class: bool = True,
         plot_mean_by_feature_class: Optional[bool] = None,
         plot_correlation: bool = True,
+        class_spread: Optional[Literal["minmax", "iqr", "ci95"]] = None,
         output: Optional[str] = None,
         show: bool = True,
         title: Union[str, bool] = True,
@@ -943,6 +960,10 @@ class Trainer(TrainerAnnotationMixin, FeatureLearningDefinition):
             plot_mean_by_feature_class: Plot means grouped by feature class.
                 ``None`` lets the visualizer decide from available statistics.
             plot_correlation: Plot correlation over training steps.
+            class_spread: Optional spread band behind class means.
+                ``"minmax"`` shades min-max encoded values, ``"iqr"`` shades Q1-Q3,
+                ``"ci95"`` shades mean +/- 1.96 standard errors,
+                and ``None`` disables spread shading.
             output: Optional explicit output file path.
             show: Whether to display the figure interactively.
             title: Plot title. ``True`` uses the default title, ``False`` omits it.
@@ -957,6 +978,7 @@ class Trainer(TrainerAnnotationMixin, FeatureLearningDefinition):
             plot_mean_by_class=plot_mean_by_class,
             plot_mean_by_feature_class=plot_mean_by_feature_class,
             plot_correlation=plot_correlation,
+            class_spread=class_spread,
             output=output,
             show=show,
             title=title,
@@ -1005,6 +1027,7 @@ class Trainer(TrainerAnnotationMixin, FeatureLearningDefinition):
             config.use_cache,
             output_dir,
             min_convergent_seeds=int(getattr(config, "min_convergent_seeds", 1) or 1),
+            training_args=config,
         ):
             logger.info(
                 "GRADIEND model already exists at %s and satisfies use_cache=%r; skipping training. "
@@ -1044,6 +1067,8 @@ class Trainer(TrainerAnnotationMixin, FeatureLearningDefinition):
                 )
         else:
             model_with_gradiend = model
+
+        sync_model_source_target_from_training_args(model_with_gradiend, config)
 
         # Store model instance so get_model() returns the training model during training
         self._model_instance = model_with_gradiend
@@ -1286,6 +1311,7 @@ class Trainer(TrainerAnnotationMixin, FeatureLearningDefinition):
             args.use_cache,
             output_dir,
             min_convergent_seeds=int(getattr(args, "min_convergent_seeds", 1) or 1),
+            training_args=args,
         ):
             logger.info(
                 "GRADIEND model already exists at %s and satisfies use_cache=%r; skipping training. "
@@ -1458,476 +1484,588 @@ class Trainer(TrainerAnnotationMixin, FeatureLearningDefinition):
 
         # Multi-seed training loop
         if getattr(args, "max_seeds", 1) > 1:
-            if not exp_dir:
-                seed_runs_dir = args.seed_runs_dir or tempfile.mkdtemp(prefix="gradiend_seeds_")
-            else:
-                seed_runs_dir = args.seed_runs_dir or os.path.join(exp_dir, "seeds")
-            os.makedirs(seed_runs_dir, exist_ok=True)
-
-            if args.seed is None:
-                seeds = list(range(args.max_seeds))
-            else:
-                seeds = [int(args.seed) + i for i in range(args.max_seeds)]
-
-            convergent_metric = (args.convergent_metric or ("loss" if args.supervised_decoder else "correlation")).lower()
-            threshold = args.convergent_score_threshold
-            min_convergent = args.min_convergent_seeds
-            convergent_count = 0
-            # Use dedicated seed-selection eval cap when set, otherwise fall back to encoder_eval_max_size
-            seed_selection_eval_max_size = getattr(args, "seed_selection_eval_max_size", None)
-            if seed_selection_eval_max_size is None:
-                seed_selection_eval_max_size = getattr(args, "encoder_eval_max_size", None)
-
-            if not isinstance(model, str):
-                model_path = getattr(model, "name_or_path", None)
-                if not model_path:
-                    raise ValueError("Multi-seed training requires a model path (string) or a model with name_or_path.")
-                model_for_runs = model_path
-            else:
-                model_for_runs = model
-            # Resolve to custom prediction head (e.g. decoder MLM head) BEFORE experiment_dir override
-            load_model_path = (
-                self.resolve_model_path(model_for_runs) if isinstance(model_for_runs, str) else model_for_runs
-            )
-
-            best_seed = None
-            best_score = None
-            seed_results: Dict[int, str] = {}
-            seed_report: List[Dict[str, Any]] = []
-            early_stop_reason: Optional[str] = None
-
-            def _clear_seed_gpu_state() -> None:
-                self._model_instance = None
-                self._evaluator = None
-                gc.collect()
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-
-            for seed_value in seeds:
-                _set_seed(seed_value)
-                refresh_splits = getattr(self, "_refresh_data_splits_for_seed", None)
-                if callable(refresh_splits):
-                    refresh_splits(seed_value, args)
-                seed_dir = os.path.join(seed_runs_dir, f"seed_{seed_value}")
-                seed_output_dir = seed_dir
-                os.makedirs(seed_output_dir, exist_ok=True)
-
-                used_cache = False
-                trained = False
-                model_instance = None
-                if should_reuse_seed_training_cache(args.use_cache, seed_output_dir):
-                    logger.info(
-                        "Seed %s: convergent cached model found at %s; skipping training.",
-                        seed_value,
-                        seed_output_dir,
-                    )
-                    out_path = seed_output_dir
-                    used_cache = True
+            try:
+                if not exp_dir:
+                    seed_runs_dir = args.seed_runs_dir or tempfile.mkdtemp(prefix="gradiend_seeds_")
                 else:
-                    logger.info("Seed %s: starting training with output_dir=%s", seed_value, seed_output_dir)
-                    model_instance = load_model_path
-                    if args.pre_prune_config is not None:
-                        try:
-                            with RuntimeMonitor.from_training_args(args, seed_output_dir) as runtime_monitor:
-                                self._runtime_monitor = runtime_monitor
-                                runtime_monitor.mark("trainer:seed:pre_prune:start", seed=seed_value)
-                                getattr(self, "_ensure_data_for_training", lambda: None)()
-                                runtime_monitor.mark("trainer:seed:create_model_with_gradiend:start", seed=seed_value)
-                                model_instance = create_model_with_gradiend(
-                                    load_model_path,
-                                    feature_definition=self,
-                                    model_class=model_with_gradiend_cls,
-                                    training_args=args,
-                                    trust_remote_code=getattr(args, "trust_remote_code", False),
-                                )
-                                runtime_monitor.mark(
-                                    "trainer:seed:create_model_with_gradiend:done",
-                                    seed=seed_value,
-                                    input_dim=int(getattr(getattr(model_instance, "gradiend", None), "input_dim", 0) or 0),
-                                    base_model_is_sharded=bool(getattr(model_instance, "base_model_is_sharded", False)),
-                                )
-                                max_size = args.train_max_size
-                                training_data = self.create_training_data(model_instance, batch_size=1, max_size=max_size)
-                                runtime_monitor.mark("trainer:seed:pre_prune:create_training_data:done", seed=seed_value, size=len(training_data))
-                                model_instance = pre_prune_with_cache(
-                                    model_instance,
-                                    training_data,
-                                    args.pre_prune_config,
-                                    definition=self,
-                                    cache_dir=resolve_pre_prune_cache_dir(exp_dir),
-                                    reuse_cache=bool(getattr(args, "reuse_pre_prune", False)),
-                                    inplace=True,
-                                    runtime_monitor=runtime_monitor,
-                                )
-                                runtime_monitor.mark("trainer:seed:pre_prune:done", seed=seed_value)
-                                self._runtime_monitor = None
-                        except BaseException as exc:
-                            self._runtime_monitor = None
-                            if is_cuda_oom_error(exc):
-                                self._write_cuda_oom_log(f"train:seed_{seed_value}:pre_prune", exc, root=seed_output_dir)
-                            model_instance = None
-                            _clear_seed_gpu_state()
-                            raise
-                    # Temporarily override experiment_dir to seed-specific directory to avoid cache collisions
-                    original_experiment_dir = args.experiment_dir
-                    original_fail_on_non_convergence = args.fail_on_non_convergence
-                    args.experiment_dir = seed_output_dir
-                    args.fail_on_non_convergence = False
-                    try:
-                        try:
-                            with RuntimeMonitor.from_training_args(args, seed_output_dir) as runtime_monitor:
-                                self._runtime_monitor = runtime_monitor
-                                runtime_monitor.mark("trainer:seed:train:start", seed=seed_value)
-                                out_path = self._train(
-                                    output_dir=seed_output_dir,
-                                    args=args,
-                                    model=model_instance,
-                                    model_with_gradiend_cls=model_with_gradiend_cls,
-                                    callbacks=callbacks,
-                                    runtime_monitor=runtime_monitor,
-                                )
-                                runtime_monitor.mark("trainer:seed:train:done", seed=seed_value, output_dir=out_path)
-                        except BaseException as exc:
-                            if is_cuda_oom_error(exc):
-                                self._write_cuda_oom_log(f"train:seed_{seed_value}", exc, root=seed_output_dir)
-                            model_instance = None
-                            _clear_seed_gpu_state()
-                            raise
-                    finally:
-                        # Restore original experiment_dir
-                        args.experiment_dir = original_experiment_dir
-                        args.fail_on_non_convergence = original_fail_on_non_convergence
-                        self._runtime_monitor = None
-                    trained = True
-                    if args.post_prune_config is not None:
-                        logger.info("Seed %s: running post-prune after training ...", seed_value)
-                        seed_model = self.get_model(load_directory=out_path, use_cache=False)
-                        seed_model = _post_prune(seed_model, args.post_prune_config)
-                        seed_model.save_pretrained(out_path)
-                        logger.info("Seed %s: saved post-pruned model to %s", seed_value, out_path)
-                        seed_model = None
+                    seed_runs_dir = args.seed_runs_dir or os.path.join(exp_dir, "seeds")
+                os.makedirs(seed_runs_dir, exist_ok=True)
 
-                # The next seed reloads a fresh base model; release all seed-local model references first.
-                model_instance = None
-                _clear_seed_gpu_state()
+                if args.seed is None:
+                    seeds = list(range(args.max_seeds))
+                else:
+                    seeds = [int(args.seed) + i for i in range(args.max_seeds)]
 
-                seed_results[seed_value] = out_path
-                stats = self.get_training_stats(out_path)
-                score = _best_score_from_stats(stats)
+                convergent_metric = (args.convergent_metric or ("loss" if args.supervised_decoder else "correlation")).lower()
+                threshold = args.convergent_score_threshold
+                min_convergent = args.min_convergent_seeds
+                convergent_count = 0
+                # Use dedicated seed-selection eval cap when set, otherwise fall back to encoder_eval_max_size
+                seed_selection_eval_max_size = getattr(args, "seed_selection_eval_max_size", None)
+                if seed_selection_eval_max_size is None:
+                    seed_selection_eval_max_size = getattr(args, "encoder_eval_max_size", None)
 
-                prev_model_arg = self._model_arg
-                prev_model_instance = self._model_instance
-                eval_corr = None
-                eval_result = None
-                # Optionally skip expensive full validation eval:
-                # - never needed for loss-based convergence (convergent_metric == "loss")
-                # - can be skipped when training_score (score) is clearly below threshold
-                # - skip when we already have a convergent seed (no need to recompute encoder analysis)
-                run_full_eval = convergent_metric != "loss"
+                if not isinstance(model, str):
+                    model_path = getattr(model, "name_or_path", None)
+                    if not model_path:
+                        raise ValueError("Multi-seed training requires a model path (string) or a model with name_or_path.")
+                    model_for_runs = model_path
+                else:
+                    model_for_runs = model
+                # Resolve to custom prediction head (e.g. decoder MLM head) BEFORE experiment_dir override
+                load_model_path = (
+                    self.resolve_model_path(model_for_runs) if isinstance(model_for_runs, str) else model_for_runs
+                )
+
+                best_seed = None
+                best_score = None
+                seed_results: Dict[int, str] = {}
+                seed_report: List[Dict[str, Any]] = []
+                early_stop_reason: Optional[str] = None
+                split_cycle_length: Optional[int] = None
+                split_cycle_queue: Optional[List[int]] = None
                 if (
-                    run_full_eval
-                    and threshold is not None
-                    and isinstance(score, (int, float))
-                    and score < threshold
+                    getattr(args, "split_resplit_per_seed", False)
+                    and getattr(args, "split_resplit_strategy", "random") == "balanced_cycle"
                 ):
-                    run_full_eval = False
-                if run_full_eval and seed_value != seeds[0] and convergent_count >= 1:
-                    run_full_eval = False
-                try:
-                    self._model_arg = out_path
+                    split_cycle_length = int(min_convergent or args.max_seeds or 1)
+                    split_cycle_queue = list(range(split_cycle_length))
+
+                def _clear_seed_gpu_state() -> None:
                     self._model_instance = None
-                    if run_full_eval:
-                        eval_result = self.evaluate_encoder(
-                            split=self.resolve_split_for_role("eval"),
-                            max_size=seed_selection_eval_max_size,
-                            use_cache=False,
+                    self._evaluator = None
+                    gc.collect()
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+
+                for seed_value in seeds:
+                    split_cycle_index = None
+                    if split_cycle_queue:
+                        split_cycle_index = split_cycle_queue.pop(0)
+                    _set_seed(seed_value)
+                    refresh_splits = getattr(self, "_refresh_data_splits_for_seed", None)
+                    if callable(refresh_splits):
+                        refresh_splits(
+                            seed_value,
+                            args,
+                            split_cycle_index=split_cycle_index,
+                            split_cycle_length=split_cycle_length,
                         )
-                        if isinstance(eval_result, dict):
-                            eval_corr = eval_result.get("correlation")
-                            if not isinstance(eval_corr, (int, float)):
-                                eval_corr = None
-                except Exception as e:
-                    if is_cuda_oom_error(e):
-                        self._write_cuda_oom_log(f"evaluate_encoder:seed_{seed_value}", e, root=out_path)
-                    logger.warning("Seed %s: full validation encoder eval failed: %s", seed_value, e)
-                finally:
-                    self._model_arg = prev_model_arg
-                    # Don't restore _model_instance in multi-seed: keep it cleared to free GPU memory
-                    if getattr(args, "max_seeds", 1) <= 1:
-                        self._model_instance = prev_model_instance
+                    seed_dir = os.path.join(seed_runs_dir, f"seed_{seed_value}")
+                    seed_output_dir = seed_dir
+                    os.makedirs(seed_output_dir, exist_ok=True)
+
+                    used_cache = False
+                    trained = False
+                    model_instance = None
+                    if should_reuse_seed_training_cache(args.use_cache, seed_output_dir, training_args=args):
+                        logger.info(
+                            "Seed %s: convergent cached model found at %s; skipping training.",
+                            seed_value,
+                            seed_output_dir,
+                        )
+                        out_path = seed_output_dir
+                        used_cache = True
                     else:
-                        self._model_instance = None
-                    prev_model_instance = None
+                        logger.info("Seed %s: starting training with output_dir=%s", seed_value, seed_output_dir)
+                        model_instance = load_model_path
+                        if args.pre_prune_config is not None:
+                            try:
+                                with RuntimeMonitor.from_training_args(args, seed_output_dir) as runtime_monitor:
+                                    self._runtime_monitor = runtime_monitor
+                                    runtime_monitor.mark("trainer:seed:pre_prune:start", seed=seed_value)
+                                    getattr(self, "_ensure_data_for_training", lambda: None)()
+                                    runtime_monitor.mark("trainer:seed:create_model_with_gradiend:start", seed=seed_value)
+                                    model_instance = create_model_with_gradiend(
+                                        load_model_path,
+                                        feature_definition=self,
+                                        model_class=model_with_gradiend_cls,
+                                        training_args=args,
+                                        trust_remote_code=getattr(args, "trust_remote_code", False),
+                                    )
+                                    runtime_monitor.mark(
+                                        "trainer:seed:create_model_with_gradiend:done",
+                                        seed=seed_value,
+                                        input_dim=int(getattr(getattr(model_instance, "gradiend", None), "input_dim", 0) or 0),
+                                        base_model_is_sharded=bool(getattr(model_instance, "base_model_is_sharded", False)),
+                                    )
+                                    max_size = args.train_max_size
+                                    training_data = self.create_training_data(model_instance, batch_size=1, max_size=max_size)
+                                    runtime_monitor.mark("trainer:seed:pre_prune:create_training_data:done", seed=seed_value, size=len(training_data))
+                                    model_instance = pre_prune_with_cache(
+                                        model_instance,
+                                        training_data,
+                                        args.pre_prune_config,
+                                        definition=self,
+                                        cache_dir=resolve_pre_prune_cache_dir(exp_dir),
+                                        reuse_cache=bool(getattr(args, "reuse_pre_prune", False)),
+                                        inplace=True,
+                                        runtime_monitor=runtime_monitor,
+                                    )
+                                    runtime_monitor.mark("trainer:seed:pre_prune:done", seed=seed_value)
+                                    self._runtime_monitor = None
+                            except BaseException as exc:
+                                self._runtime_monitor = None
+                                if is_cuda_oom_error(exc):
+                                    self._write_cuda_oom_log(f"train:seed_{seed_value}:pre_prune", exc, root=seed_output_dir)
+                                model_instance = None
+                                _clear_seed_gpu_state()
+                                raise
+                        # Temporarily override experiment_dir to seed-specific directory to avoid cache collisions
+                        original_experiment_dir = args.experiment_dir
+                        original_fail_on_non_convergence = args.fail_on_non_convergence
+                        args.experiment_dir = seed_output_dir
+                        args.fail_on_non_convergence = False
+                        try:
+                            try:
+                                with RuntimeMonitor.from_training_args(args, seed_output_dir) as runtime_monitor:
+                                    self._runtime_monitor = runtime_monitor
+                                    runtime_monitor.mark("trainer:seed:train:start", seed=seed_value)
+                                    out_path = self._train(
+                                        output_dir=seed_output_dir,
+                                        args=args,
+                                        model=model_instance,
+                                        model_with_gradiend_cls=model_with_gradiend_cls,
+                                        callbacks=callbacks,
+                                        runtime_monitor=runtime_monitor,
+                                    )
+                                    runtime_monitor.mark("trainer:seed:train:done", seed=seed_value, output_dir=out_path)
+                            except BaseException as exc:
+                                if is_cuda_oom_error(exc):
+                                    self._write_cuda_oom_log(f"train:seed_{seed_value}", exc, root=seed_output_dir)
+                                model_instance = None
+                                _clear_seed_gpu_state()
+                                raise
+                        finally:
+                            # Restore original experiment_dir
+                            args.experiment_dir = original_experiment_dir
+                            args.fail_on_non_convergence = original_fail_on_non_convergence
+                            self._runtime_monitor = None
+                        trained = True
+                        if args.post_prune_config is not None:
+                            logger.info("Seed %s: running post-prune after training ...", seed_value)
+                            seed_model = self.get_model(load_directory=out_path, use_cache=False)
+                            seed_model = _post_prune(seed_model, args.post_prune_config)
+                            seed_model.save_pretrained(out_path)
+                            logger.info("Seed %s: saved post-pruned model to %s", seed_value, out_path)
+                            seed_model = None
+
+                    # The next seed reloads a fresh base model; release all seed-local model references first.
+                    model_instance = None
                     _clear_seed_gpu_state()
 
-                selection_score = eval_corr if eval_corr is not None else score
+                    seed_results[seed_value] = out_path
+                    stats = self.get_training_stats(out_path)
+                    score = _best_score_from_stats(stats)
 
-                metric_val = None
-                if stats:
-                    bsc = stats.get("best_score_checkpoint") or {}
-                    if convergent_metric == "loss":
-                        metric_val = bsc.get("loss")
-                        if metric_val is None:
-                            metric_val = (stats.get("training_stats") or {}).get("loss")
-                    else:
-                        metric_val = bsc.get("correlation")
-                        if metric_val is None:
-                            metric_val = (stats.get("training_stats") or {}).get("correlation")
-
-                converged = False
-                best_step_ok = trainer_stats._best_checkpoint_step_is_after_initial(bsc if stats else {})
-                sign_ok = True
-                target_mean_product = None
-                if isinstance(metric_val, (int, float)):
-                    if convergent_metric == "loss":
-                        if best_step_ok and metric_val <= threshold:
-                            convergent_count += 1
-                            converged = True
-                    else:
-                        target_mean_product = trainer_stats._best_step_target_class_mean_product(
-                            (stats or {}).get("training_stats") or {},
-                            (stats or {}).get("best_score_checkpoint") or {},
-                        )
-                        # When convergent_mean_by_class_threshold is set, require abs_mean_by_type['training'] >= that value.
-                        # When it is None, or when the metric was not recorded (abs_training_mean is None), use only correlation.
-                        abs_training_mean = (stats.get("abs_mean_by_type") or {}).get("training")
-                        mean_ok = (
-                            args.convergent_mean_by_class_threshold is None
-                            or abs_training_mean is None
-                            or (isinstance(abs_training_mean, (int, float)) and abs_training_mean >= args.convergent_mean_by_class_threshold)
-                        )
-                        sign_ok = isinstance(target_mean_product, (int, float)) and target_mean_product < 0
-                        if best_step_ok and metric_val >= threshold and mean_ok and sign_ok:
-                            convergent_count += 1
-                            converged = True
-
-                seed_report.append(
-                    {
-                        "seed": seed_value,
-                        "output_dir": out_path,
-                        "trained": trained,
-                        "used_cache": used_cache,
-                        "training_score": score,
-                        "eval_correlation": eval_corr,
-                        "selection_score": selection_score,
-                        "convergence_metric": convergent_metric,
-                        "convergence_metric_value": metric_val,
-                        "best_checkpoint_global_step": bsc.get("global_step") if stats else None,
-                        "threshold": threshold,
-                        "converged": converged,
-                    }
-                )
-                # Per-seed summary: path, converged, reason, convergent count / min required, max seeds
-                conv_status = "Yes" if converged else "No"
-                reason = ""
-                if convergent_metric == "loss":
-                    reason = f"loss={metric_val}" if isinstance(metric_val, (int, float)) else "no metric"
-                else:
-                    reason = f"{convergent_metric}={metric_val:.4f}" if isinstance(metric_val, (int, float)) else "no metric"
-                    if not converged and isinstance(metric_val, (int, float)) and threshold is not None:
-                        if not best_step_ok:
-                            reason += f" (best checkpoint global_step={bsc.get('global_step')}; requires > 0)"
-                        elif metric_val < threshold:
-                            reason += f" (below threshold {threshold:.4f})"
-                        elif not sign_ok:
-                            if isinstance(target_mean_product, (int, float)):
-                                reason += f" (target-class mean sign criterion not met; product={target_mean_product:.4f})"
-                            else:
-                                reason += " (target-class mean sign criterion unavailable)"
-                        else:
-                            reason += " (mean-by-class criterion not met)"
-                min_req = min_convergent if min_convergent is not None else "—"
-                logger.info(
-                    "Finished seed %s (%s). Converged: %s (%s). Convergent: %s / min_required: %s, max_seeds: %s.",
-                    seed_value,
-                    out_path,
-                    conv_status,
-                    reason,
-                    convergent_count,
-                    min_req,
-                    args.max_seeds,
-                )
-
-                if min_convergent is not None and convergent_count >= min_convergent:
-                    if convergent_metric == "loss":
-                        logger.info(
-                            "Convergence reached: %s seeds meet loss threshold %.4f.",
-                            convergent_count,
-                            float(threshold),
-                        )
-                    else:
-                        mean_thr = args.convergent_mean_by_class_threshold
-                        if mean_thr is not None:
-                            logger.info(
-                                "Convergence reached: %s seeds meet correlation threshold %.4f and "
-                                "abs_mean_by_class threshold %.4f.",
-                                convergent_count,
-                                float(threshold),
-                                float(mean_thr),
+                    prev_model_arg = self._model_arg
+                    prev_model_instance = self._model_instance
+                    eval_corr = None
+                    eval_result = None
+                    # Optionally skip expensive full validation eval:
+                    # - never needed for loss-based convergence (convergent_metric == "loss")
+                    # - can be skipped when training_score (score) is clearly below threshold
+                    # - skip when we already have a convergent seed (no need to recompute encoder analysis)
+                    run_full_eval = convergent_metric != "loss"
+                    if (
+                        run_full_eval
+                        and threshold is not None
+                        and isinstance(score, (int, float))
+                        and score < threshold
+                    ):
+                        run_full_eval = False
+                    if run_full_eval and seed_value != seeds[0] and convergent_count >= 1:
+                        run_full_eval = False
+                    try:
+                        self._model_arg = out_path
+                        self._model_instance = None
+                        if run_full_eval:
+                            eval_result = self.evaluate_encoder(
+                                split=self.resolve_split_for_role("eval"),
+                                max_size=seed_selection_eval_max_size,
+                                use_cache=False,
                             )
+                            if isinstance(eval_result, dict):
+                                eval_corr = eval_result.get("correlation")
+                                if not isinstance(eval_corr, (int, float)):
+                                    eval_corr = None
+                    except Exception as e:
+                        if is_cuda_oom_error(e):
+                            self._write_cuda_oom_log(f"evaluate_encoder:seed_{seed_value}", e, root=out_path)
+                        logger.warning("Seed %s: full validation encoder eval failed: %s", seed_value, e)
+                    finally:
+                        self._model_arg = prev_model_arg
+                        # Don't restore _model_instance in multi-seed: keep it cleared to free GPU memory
+                        if getattr(args, "max_seeds", 1) <= 1:
+                            self._model_instance = prev_model_instance
                         else:
-                            logger.info(
-                                "Convergence reached: %s seeds meet correlation threshold %.4f and opposite-sign target-class means.",
-                                convergent_count,
-                                float(threshold),
+                            self._model_instance = None
+                        prev_model_instance = None
+                        _clear_seed_gpu_state()
+
+                    selection_score = eval_corr if eval_corr is not None else score
+
+                    metric_val = None
+                    if stats:
+                        bsc = stats.get("best_score_checkpoint") or {}
+                        if convergent_metric == "loss":
+                            metric_val = bsc.get("loss")
+                            if metric_val is None:
+                                metric_val = (stats.get("training_stats") or {}).get("loss")
+                        else:
+                            metric_val = bsc.get("correlation")
+                            if metric_val is None:
+                                metric_val = (stats.get("training_stats") or {}).get("correlation")
+
+                    converged = False
+                    best_step_ok = trainer_stats._best_checkpoint_step_is_after_initial(bsc if stats else {})
+                    sign_ok = True
+                    target_mean_product = None
+                    min_target_class_abs_mean = None
+                    if isinstance(metric_val, (int, float)):
+                        if convergent_metric == "loss":
+                            if best_step_ok and metric_val <= threshold:
+                                convergent_count += 1
+                                converged = True
+                        else:
+                            target_mean_product = trainer_stats._best_step_target_class_mean_product(
+                                (stats or {}).get("training_stats") or {},
+                                (stats or {}).get("best_score_checkpoint") or {},
                             )
-                    early_stop_reason = (
-                        f"min_convergent_seeds reached: {convergent_count} >= {min_convergent} "
-                        f"with metric={convergent_metric} threshold={threshold}"
+                            if args.convergent_mean_by_class_threshold is not None:
+                                min_target_class_abs_mean = trainer_stats._best_step_min_target_class_abs_mean(
+                                    (stats or {}).get("training_stats") or {},
+                                    (stats or {}).get("best_score_checkpoint") or {},
+                                )
+                            mean_ok = (
+                                args.convergent_mean_by_class_threshold is None
+                                or (
+                                    isinstance(min_target_class_abs_mean, (int, float))
+                                    and min_target_class_abs_mean >= args.convergent_mean_by_class_threshold
+                                )
+                            )
+                            sign_ok = isinstance(target_mean_product, (int, float)) and target_mean_product < 0
+                            if best_step_ok and metric_val >= threshold and mean_ok and sign_ok:
+                                convergent_count += 1
+                                converged = True
+
+                    seed_report.append(
+                        {
+                            "seed": seed_value,
+                            "output_dir": out_path,
+                            "trained": trained,
+                            "used_cache": used_cache,
+                            "training_score": score,
+                            "eval_correlation": eval_corr,
+                            "selection_score": selection_score,
+                            "convergence_metric": convergent_metric,
+                            "convergence_metric_value": metric_val,
+                            "best_checkpoint_global_step": bsc.get("global_step") if stats else None,
+                            "threshold": threshold,
+                            "convergent_mean_by_class_threshold": args.convergent_mean_by_class_threshold,
+                            "convergent_min_target_class_abs_mean": min_target_class_abs_mean,
+                            "converged": converged,
+                            "split_cycle_index": split_cycle_index,
+                            "split_cycle_length": split_cycle_length,
+                        }
                     )
+                    if (
+                        split_cycle_queue is not None
+                        and split_cycle_index is not None
+                        and not converged
+                        and (min_convergent is None or convergent_count < min_convergent)
+                    ):
+                        split_cycle_queue.append(split_cycle_index)
+                    # Per-seed summary: path, converged, reason, convergent count / min required, max seeds
+                    conv_status = "Yes" if converged else "No"
+                    reason = ""
+                    if convergent_metric == "loss":
+                        reason = f"loss={metric_val}" if isinstance(metric_val, (int, float)) else "no metric"
+                    else:
+                        reason = f"{convergent_metric}={metric_val:.4f}" if isinstance(metric_val, (int, float)) else "no metric"
+                        if not converged and isinstance(metric_val, (int, float)) and threshold is not None:
+                            if not best_step_ok:
+                                reason += f" (best checkpoint global_step={bsc.get('global_step')}; requires > 0)"
+                            elif metric_val < threshold:
+                                reason += f" (below threshold {threshold:.4f})"
+                            elif not sign_ok:
+                                if isinstance(target_mean_product, (int, float)):
+                                    reason += f" (target-class mean sign criterion not met; product={target_mean_product:.4f})"
+                                else:
+                                    reason += " (target-class mean sign criterion unavailable)"
+                            elif not mean_ok:
+                                if isinstance(min_target_class_abs_mean, (int, float)) and args.convergent_mean_by_class_threshold is not None:
+                                    reason += (
+                                        f" (min |mean| among target classes={min_target_class_abs_mean:.4f} "
+                                        f"< {args.convergent_mean_by_class_threshold:.4f})"
+                                    )
+                                else:
+                                    reason += " (per-class mean criterion not met)"
+                    min_req = min_convergent if min_convergent is not None else "—"
+                    logger.info(
+                        "Finished seed %s (%s). Converged: %s (%s). Convergent: %s / min_required: %s, max_seeds: %s.",
+                        seed_value,
+                        out_path,
+                        conv_status,
+                        reason,
+                        convergent_count,
+                        min_req,
+                        args.max_seeds,
+                    )
+
+                    if min_convergent is not None and convergent_count >= min_convergent:
+                        if convergent_metric == "loss":
+                            logger.info(
+                                "Convergence reached: %s seeds meet loss threshold %.4f.",
+                                convergent_count,
+                                float(threshold),
+                            )
+                        else:
+                            mean_thr = args.convergent_mean_by_class_threshold
+                            if mean_thr is not None:
+                                logger.info(
+                                    "Convergence reached: %s seeds meet correlation threshold %.4f and "
+                                    "per-class |mean| threshold %.4f.",
+                                    convergent_count,
+                                    float(threshold),
+                                    float(mean_thr),
+                                )
+                            else:
+                                logger.info(
+                                    "Convergence reached: %s seeds meet correlation threshold %.4f and opposite-sign target-class means.",
+                                    convergent_count,
+                                    float(threshold),
+                                )
+                        early_stop_reason = (
+                            f"min_convergent_seeds reached: {convergent_count} >= {min_convergent} "
+                            f"with metric={convergent_metric} threshold={threshold}"
+                        )
+                        eval_result = None
+                        _clear_seed_gpu_state()
+                        break
+
+                    # Release GPU memory before loading next seed to avoid accumulation
                     eval_result = None
                     _clear_seed_gpu_state()
-                    break
 
-                # Release GPU memory before loading next seed to avoid accumulation
-                eval_result = None
-                _clear_seed_gpu_state()
+                selected_run, selected_score, selection_strategy = _select_best_seed_run(
+                    seed_report,
+                    convergence_metric=convergent_metric,
+                )
+                if selected_run is not None:
+                    best_seed = int(selected_run["seed"])
+                    best_score = selected_score
 
-            selected_run, selected_score, selection_strategy = _select_best_seed_run(
-                seed_report,
-                convergence_metric=convergent_metric,
-            )
-            if selected_run is not None:
-                best_seed = int(selected_run["seed"])
-                best_score = selected_score
+                if best_seed is None:
+                    raise RuntimeError("Multi-seed training finished, but no valid training stats were found.")
 
-            if best_seed is None:
-                raise RuntimeError("Multi-seed training finished, but no valid training stats were found.")
+                convergent_seeds = [
+                    int(run["seed"])
+                    for run in seed_report
+                    if bool(run.get("converged"))
+                ]
+                seed_stability = _compute_seed_topk_stability(
+                    convergent_seed_values=convergent_seeds,
+                    seed_results_by_seed=seed_results,
+                )
+                if seed_stability and seed_stability.get("computed"):
+                    logger.info(
+                        "Top-k stability across convergent seeds (%s, topk=%s): mean_overlap=%.4f, "
+                        "min=%.4f, max=%.4f, intersection=%s, union=%s.",
+                        args.seed_stability_part,
+                        args.seed_stability_topk,
+                        float(seed_stability.get("mean_pairwise_overlap_fraction", 0.0)),
+                        float(seed_stability.get("min_pairwise_overlap_fraction", 0.0)),
+                        float(seed_stability.get("max_pairwise_overlap_fraction", 0.0)),
+                        int(seed_stability.get("intersection_size", 0)),
+                        int(seed_stability.get("union_size", 0)),
+                    )
 
-            convergent_seeds = [
-                int(run["seed"])
-                for run in seed_report
-                if bool(run.get("converged"))
-            ]
-            seed_stability = _compute_seed_topk_stability(
-                convergent_seed_values=convergent_seeds,
-                seed_results_by_seed=seed_results,
-            )
-            if seed_stability and seed_stability.get("computed"):
-                logger.info(
-                    "Top-k stability across convergent seeds (%s, topk=%s): mean_overlap=%.4f, "
-                    "min=%.4f, max=%.4f, intersection=%s, union=%s.",
-                    args.seed_stability_part,
-                    args.seed_stability_topk,
-                    float(seed_stability.get("mean_pairwise_overlap_fraction", 0.0)),
-                    float(seed_stability.get("min_pairwise_overlap_fraction", 0.0)),
-                    float(seed_stability.get("max_pairwise_overlap_fraction", 0.0)),
-                    int(seed_stability.get("intersection_size", 0)),
-                    int(seed_stability.get("union_size", 0)),
+                report = {
+                    "convergence_metric": convergent_metric,
+                    "threshold": threshold,
+                    "convergent_mean_by_class_threshold": args.convergent_mean_by_class_threshold,
+                    "min_convergent_seeds": min_convergent,
+                    "max_seeds": args.max_seeds,
+                    "seeds_tried": [r.get("seed") for r in seed_report],
+                    "convergent_count": convergent_count,
+                    "convergent_seeds": convergent_seeds,
+                    "best_seed": best_seed,
+                    "best_selection_score": best_score,
+                    "best_seed_selection_strategy": selection_strategy,
+                    "early_stop_reason": early_stop_reason,
+                    "runs": seed_report,
+                }
+                if seed_stability is not None:
+                    report["topk_stability"] = seed_stability
+                try:
+                    report_path = os.path.join(seed_runs_dir, "seed_report.json")
+                    with open(report_path, "w") as f:
+                        json.dump(report, f, indent=2)
+                    if not is_under_temp_dir(report_path):
+                        logger.info("Wrote seed report to %s", report_path)
+                except Exception as e:
+                    logger.warning("Failed to write seed report: %s", e)
+
+                best_path = seed_results[best_seed]
+                if os.path.exists(output_dir):
+                    shutil.rmtree(output_dir)
+                shutil.copytree(best_path, output_dir)
+                if not is_under_temp_dir(output_dir):
+                    logger.info("Selected best seed=%s -> %s", best_seed, output_dir)
+
+                # Clear cached model so the next get_model() loads from output_dir (the selected best seed).
+                # That first load is then cached; subsequent get_model() calls reuse the same instance.
+                self._model_arg = output_dir
+                self._model_instance = None
+
+                # Check convergence and warn if non-convergent
+                if convergent_count == 0 and min_convergent is not None and min_convergent > 0:
+                    logger.warning(
+                        "Multi-seed training completed but no seeds converged: "
+                        "convergent_count=0 (required: %s) for metric=%s threshold=%.4f. "
+                        "Model may not have reached the convergence threshold during training.",
+                        min_convergent,
+                        convergent_metric,
+                        threshold if threshold is not None else 0.0,
+                    )
+
+                self._maybe_fail_on_non_convergence(
+                    args,
+                    convergent_count=convergent_count,
+                    min_convergent=min_convergent,
+                    run_id=self.run_id,
+                    model=model_for_runs,
+                    pair=getattr(self, "pair", None),
+                    output_dir=output_dir,
+                    seed_report=seed_report,
+                    convergence_metric=convergent_metric,
+                    threshold=threshold,
                 )
 
-            report = {
-                "convergence_metric": convergent_metric,
-                "threshold": threshold,
-                "min_convergent_seeds": min_convergent,
-                "max_seeds": args.max_seeds,
-                "seeds_tried": [r.get("seed") for r in seed_report],
-                "convergent_count": convergent_count,
-                "convergent_seeds": convergent_seeds,
-                "best_seed": best_seed,
-                "best_selection_score": best_score,
-                "best_seed_selection_strategy": selection_strategy,
-                "early_stop_reason": early_stop_reason,
-                "runs": seed_report,
-            }
-            if seed_stability is not None:
-                report["topk_stability"] = seed_stability
-            try:
-                report_path = os.path.join(seed_runs_dir, "seed_report.json")
-                with open(report_path, "w") as f:
-                    json.dump(report, f, indent=2)
-                if not is_under_temp_dir(report_path):
-                    logger.info("Wrote seed report to %s", report_path)
-            except Exception as e:
-                logger.warning("Failed to write seed report: %s", e)
+                if getattr(args, "analyze_seed_stability", False):
+                    if min_convergent is not None and convergent_count < min_convergent:
+                        raise RuntimeError(
+                            f"analyze_seed_stability=True requires at least {min_convergent} convergent "
+                            f"seed(s), but only {convergent_count} converged. "
+                            f"Increase max_seeds, relax convergent_score_threshold, or set "
+                            f"analyze_seed_stability=False."
+                        )
+                    if min_convergent == 1:
+                        logger.warning(_ANALYZE_SEED_STABILITY_MIN_ONE_WARNING)
 
-            best_path = seed_results[best_seed]
-            if os.path.exists(output_dir):
-                shutil.rmtree(output_dir)
-            shutil.copytree(best_path, output_dir)
-            if not is_under_temp_dir(output_dir):
-                logger.info("Selected best seed=%s -> %s", best_seed, output_dir)
-
-            # Clear cached model so the next get_model() loads from output_dir (the selected best seed).
-            # That first load is then cached; subsequent get_model() calls reuse the same instance.
-            self._model_arg = output_dir
-            self._model_instance = None
-
-            # Check convergence and warn if non-convergent
-            if convergent_count == 0 and min_convergent is not None and min_convergent > 0:
-                logger.warning(
-                    "Multi-seed training completed but no seeds converged: "
-                    "convergent_count=0 (required: %s) for metric=%s threshold=%.4f. "
-                    "Model may not have reached the convergence threshold during training.",
-                    min_convergent,
-                    convergent_metric,
-                    threshold if threshold is not None else 0.0,
+                # Update training.json in output_dir with convergence info
+                best_run = next(
+                    (run for run in seed_report if int(run.get("seed", -1)) == int(best_seed)),
+                    None,
                 )
+                convergence_info = {
+                    "converged": convergent_count > 0 if min_convergent is not None and min_convergent > 0 else True,
+                    "convergent_count": convergent_count,
+                    "min_convergent_seeds": min_convergent,
+                    "convergence_metric": convergent_metric,
+                    "threshold": threshold,
+                    "convergent_mean_by_class_threshold": args.convergent_mean_by_class_threshold,
+                    "convergent_min_target_class_abs_mean": (
+                        best_run.get("convergent_min_target_class_abs_mean") if isinstance(best_run, dict) else None
+                    ),
+                }
+                if seed_stability is not None:
+                    convergence_info["topk_stability"] = seed_stability
+                try:
+                    stats = trainer_stats.load_training_stats(output_dir)
+                    if stats:
+                        trainer_stats.write_training_stats(
+                            output_dir,
+                            training_stats=stats.get("training_stats", {}),
+                            best_score_checkpoint=stats.get("best_score_checkpoint", {}),
+                            training_args=stats.get("training_args", {}),
+                            time_stats=stats.get("time"),
+                            losses=stats.get("losses"),
+                            convergence_info=convergence_info,
+                            seed_stability=seed_stability,
+                        )
+                except Exception as e:
+                    logger.debug("Could not update convergence_info in training.json: %s", e)
 
-            self._maybe_fail_on_non_convergence(
-                args,
-                convergent_count=convergent_count,
-                min_convergent=min_convergent,
-                run_id=self.run_id,
-                model=model_for_runs,
-                pair=getattr(self, "pair", None),
-                output_dir=output_dir,
-                seed_report=seed_report,
-                convergence_metric=convergent_metric,
-                threshold=threshold,
-            )
-
-            if getattr(args, "analyze_seed_stability", False):
-                if min_convergent is not None and convergent_count < min_convergent:
-                    raise RuntimeError(
-                        f"analyze_seed_stability=True requires at least {min_convergent} convergent "
-                        f"seed(s), but only {convergent_count} converged. "
-                        f"Increase max_seeds, relax convergent_score_threshold, or set "
-                        f"analyze_seed_stability=False."
-                    )
-                if min_convergent == 1:
-                    logger.warning(_ANALYZE_SEED_STABILITY_MIN_ONE_WARNING)
-
-            # Update training.json in output_dir with convergence info
-            convergence_info = {
-                "converged": convergent_count > 0 if min_convergent is not None and min_convergent > 0 else True,
-                "convergent_count": convergent_count,
-                "min_convergent_seeds": min_convergent,
-                "convergence_metric": convergent_metric,
-                "threshold": threshold,
-            }
-            if seed_stability is not None:
-                convergence_info["topk_stability"] = seed_stability
-            try:
-                stats = trainer_stats.load_training_stats(output_dir)
-                if stats:
-                    trainer_stats.write_training_stats(
-                        output_dir,
-                        training_stats=stats.get("training_stats", {}),
-                        best_score_checkpoint=stats.get("best_score_checkpoint", {}),
-                        training_args=stats.get("training_args", {}),
-                        time_stats=stats.get("time"),
-                        losses=stats.get("losses"),
-                        convergence_info=convergence_info,
-                        seed_stability=seed_stability,
-                    )
-            except Exception as e:
-                logger.debug("Could not update convergence_info in training.json: %s", e)
-
-            saved_seed_runs = str(getattr(args, "saved_seed_runs", "best_only")).strip().lower()
-            convergent_seed_set = {int(seed) for seed in convergent_seeds}
-            if saved_seed_runs == "best_only":
-                for seed_value, seed_path in seed_results.items():
-                    _cleanup_seed_model_files(seed_path)
-            elif saved_seed_runs == "all_convergent":
-                for seed_value, seed_path in seed_results.items():
-                    if int(seed_value) not in convergent_seed_set:
+                saved_seed_runs = str(getattr(args, "saved_seed_runs", "best_only")).strip().lower()
+                convergent_seed_set = {int(seed) for seed in convergent_seeds}
+                if saved_seed_runs == "best_only":
+                    for seed_value, seed_path in seed_results.items():
                         _cleanup_seed_model_files(seed_path)
-            elif saved_seed_runs != "all_tried":
-                raise ValueError(
-                    "saved_seed_runs must be 'best_only', 'all_convergent', or 'all_tried', "
-                    f"got {saved_seed_runs!r}"
-                )
+                elif saved_seed_runs == "all_convergent":
+                    for seed_value, seed_path in seed_results.items():
+                        if int(seed_value) not in convergent_seed_set:
+                            _cleanup_seed_model_files(seed_path)
+                elif saved_seed_runs != "all_tried":
+                    raise ValueError(
+                        "saved_seed_runs must be 'best_only', 'all_convergent', or 'all_tried', "
+                        f"got {saved_seed_runs!r}"
+                    )
+
+                # Auto-save convergence plot when experiment_dir is set
+                if exp_dir:
+                    try:
+                        path = self.plot_training_convergence(show=False, experiment_dir=exp_dir)
+                        if path:
+                            logger.info("Saved training convergence plot: %s", path)
+                    except Exception as e:
+                        logger.warning("Failed to save training convergence plot: %s", e)
+
+                return self
+            finally:
+                self._cleanup_pre_prune_cache(args)
+
+        try:
+            if args.seed is not None:
+                _set_seed(int(args.seed))
+
+            try:
+                with RuntimeMonitor.from_training_args(args, output_dir) as runtime_monitor:
+                    self._runtime_monitor = runtime_monitor
+                    runtime_monitor.mark("trainer:train:start", output_dir=output_dir)
+                    logger.info(f"Starting GRADIEND training with output_dir={output_dir}")
+
+                    if getattr(args, "pre_prune_config", None) is not None:
+                        runtime_monitor.mark("trainer:pre_prune:start")
+                        self.pre_prune(inplace=True)
+                        runtime_monitor.mark("trainer:pre_prune:done")
+                        model = self._model_arg
+
+                    out_path = self._train(
+                        output_dir=output_dir,
+                        args=args,
+                        model=model,
+                        model_with_gradiend_cls=model_with_gradiend_cls,
+                        callbacks=callbacks,
+                        runtime_monitor=runtime_monitor,
+                    )
+                    runtime_monitor.mark("trainer:train:done", output_dir=out_path)
+                    self._model_arg = out_path
+                    # Keep selected model in memory so immediate evaluation uses the chosen checkpoint.
+                    try:
+                        runtime_monitor.mark("trainer:reload_selected_model:start", output_dir=out_path)
+                        self._model_instance = self.get_model(load_directory=out_path, use_cache=False)
+                        runtime_monitor.mark("trainer:reload_selected_model:done", output_dir=out_path)
+                    except Exception as e:
+                        logger.warning("Could not load selected model into memory from %s: %s", out_path, e)
+                        runtime_monitor.mark("trainer:reload_selected_model:failed", output_dir=out_path, error=str(e))
+                        self._model_instance = None
+
+                    if getattr(args, "post_prune_config", None) is not None:
+                        runtime_monitor.mark("trainer:post_prune:start")
+                        logger.info("Post-prune config set: running post-prune after training ...")
+                        self.post_prune()
+                        # Persist pruned model in place to the same output directory
+                        self.get_model().save_pretrained(out_path)
+                        logger.info("Saved post-pruned model to %s", out_path)
+                        runtime_monitor.mark("trainer:post_prune:done", output_dir=out_path)
+                    self._runtime_monitor = None
+            except BaseException as exc:
+                self._runtime_monitor = None
+                if is_cuda_oom_error(exc):
+                    self._write_cuda_oom_log("train", exc, root=output_dir)
+                raise
 
             # Auto-save convergence plot when experiment_dir is set
             if exp_dir:
@@ -1938,70 +2076,9 @@ class Trainer(TrainerAnnotationMixin, FeatureLearningDefinition):
                 except Exception as e:
                     logger.warning("Failed to save training convergence plot: %s", e)
 
-            self._cleanup_pre_prune_cache(args)
             return self
-
-        if args.seed is not None:
-            _set_seed(int(args.seed))
-
-        try:
-            with RuntimeMonitor.from_training_args(args, output_dir) as runtime_monitor:
-                self._runtime_monitor = runtime_monitor
-                runtime_monitor.mark("trainer:train:start", output_dir=output_dir)
-                logger.info(f"Starting GRADIEND training with output_dir={output_dir}")
-
-                if getattr(args, "pre_prune_config", None) is not None:
-                    runtime_monitor.mark("trainer:pre_prune:start")
-                    self.pre_prune(inplace=True)
-                    runtime_monitor.mark("trainer:pre_prune:done")
-                    model = self._model_arg
-
-                out_path = self._train(
-                    output_dir=output_dir,
-                    args=args,
-                    model=model,
-                    model_with_gradiend_cls=model_with_gradiend_cls,
-                    callbacks=callbacks,
-                    runtime_monitor=runtime_monitor,
-                )
-                runtime_monitor.mark("trainer:train:done", output_dir=out_path)
-                self._model_arg = out_path
-                # Keep selected model in memory so immediate evaluation uses the chosen checkpoint.
-                try:
-                    runtime_monitor.mark("trainer:reload_selected_model:start", output_dir=out_path)
-                    self._model_instance = self.get_model(load_directory=out_path, use_cache=False)
-                    runtime_monitor.mark("trainer:reload_selected_model:done", output_dir=out_path)
-                except Exception as e:
-                    logger.warning("Could not load selected model into memory from %s: %s", out_path, e)
-                    runtime_monitor.mark("trainer:reload_selected_model:failed", output_dir=out_path, error=str(e))
-                    self._model_instance = None
-
-                if getattr(args, "post_prune_config", None) is not None:
-                    runtime_monitor.mark("trainer:post_prune:start")
-                    logger.info("Post-prune config set: running post-prune after training ...")
-                    self.post_prune()
-                    # Persist pruned model in place to the same output directory
-                    self.get_model().save_pretrained(out_path)
-                    logger.info("Saved post-pruned model to %s", out_path)
-                    runtime_monitor.mark("trainer:post_prune:done", output_dir=out_path)
-                self._runtime_monitor = None
-        except BaseException as exc:
-            self._runtime_monitor = None
-            if is_cuda_oom_error(exc):
-                self._write_cuda_oom_log("train", exc, root=output_dir)
-            raise
-
-        # Auto-save convergence plot when experiment_dir is set
-        if exp_dir:
-            try:
-                path = self.plot_training_convergence(show=False, experiment_dir=exp_dir)
-                if path:
-                    logger.info("Saved training convergence plot: %s", path)
-            except Exception as e:
-                logger.warning("Failed to save training convergence plot: %s", e)
-
-        self._cleanup_pre_prune_cache(args)
-        return self
+        finally:
+            self._cleanup_pre_prune_cache(args)
 
     def post_training(self, model_with_gradiend, **kwargs):
         """
@@ -2282,6 +2359,7 @@ class Trainer(TrainerAnnotationMixin, FeatureLearningDefinition):
         increase_target_probabilities: bool = True,
         plot: bool = False,
         show: Optional[bool] = None,
+        plot_kwargs: Optional[Dict[str, Any]] = None,
         decoder_lms_mode: Optional[str] = None,
         device: Optional[Any] = None,
     ) -> Dict[str, Any]:
@@ -2325,6 +2403,9 @@ class Trainer(TrainerAnnotationMixin, FeatureLearningDefinition):
                 then create decoder plots.
             show: Controls whether plots are shown when plot=True. If True, display plots; if False,
                 only save them. When None and plot=True, defaults to True.
+            plot_kwargs: Optional dict of options forwarded to plot_probability_shifts when
+                plot=True. E.g. plot_kwargs=dict(figsize=(5, 3), show=False). The ``show`` argument
+                overrides plot_kwargs[\"show\"] when set.
             decoder_lms_mode: Optional override for classification decoder LMS. One of "lm", "classification_accuracy",
                 or "both". If None, uses trainer config (e.g. TextClassificationConfig.decoder_lms_mode).
                 Ignored for non-classification trainers.
@@ -2397,6 +2478,7 @@ class Trainer(TrainerAnnotationMixin, FeatureLearningDefinition):
                         increase_target_probabilities=increase_target_probabilities,
                         plot=plot,
                         show=show,
+                        plot_kwargs=plot_kwargs,
                         model_with_gradiend=eval_model,
                     )
                     runtime_monitor.mark("trainer:evaluate_decoder:done")
@@ -2445,7 +2527,7 @@ class Trainer(TrainerAnnotationMixin, FeatureLearningDefinition):
                 ``"all"``, or a sequence such as ``["train", "test"]``. Multiple splits
                 are encoded together and tagged with ``data_split`` for plots and metrics.
             source: Source type for gradient creation. If None, uses default from training args
-                or "factual". Options: "factual", "counterfactual", etc.
+                or "factual". Options: "factual", "alternative", "diff".
             max_size: Maximum number of samples per variant to encode. If None, uses
                 encoder_eval_max_size from training args.
             neutral_data_df: Optional DataFrame with neutral examples (neutral_dataset variant).
@@ -2508,10 +2590,9 @@ class Trainer(TrainerAnnotationMixin, FeatureLearningDefinition):
             raise TypeError(f"return_df must be bool, got {type(return_df).__name__}")
         if not isinstance(plot, bool):
             raise TypeError(f"plot must be bool, got {type(plot).__name__}")
-        if use_cache is not None and not isinstance(use_cache, bool):
-            raise TypeError(f"use_cache must be bool or None, got {type(use_cache).__name__}")
-        if use_cache is None:
-            use_cache = self._resolve_artifact_use_cache(fallback=False)
+        use_cache = self._resolve_artifact_use_cache(use_cache, fallback=False)
+        if source is not None:
+            validate_source_target("source", source)
 
         resolved_encoder_df = _resolve_encoder_df(encoder_df)
         if resolved_encoder_df is not None:
@@ -2657,6 +2738,10 @@ class Trainer(TrainerAnnotationMixin, FeatureLearningDefinition):
         (strengthening vs weakening). This method applies the selected config: by default it strengthens
         the given target class(es); use increase_target_probabilities=False to apply the weakening config
         instead (evaluate_decoder currently only produces strengthen summaries).
+
+        ``learning_rate`` and ``feature_factor`` from decoder results (and probability-shift plots)
+        are passed through unchanged to :meth:`ModelWithGradiend.rewrite_base_model` for every
+        encoder source.
 
         Accepts/loads internally the cached decoder results when experiment_dir is set. Optionally saves
         the rewritten model(s) to disk if output_dir is provided.

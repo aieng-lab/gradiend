@@ -3,9 +3,11 @@
 import json
 import os
 import shutil
+import tempfile
 from unittest.mock import MagicMock, patch
 
 import pytest
+import pandas as pd
 
 from gradiend.trainer.core.arguments import TrainingArguments
 from gradiend.trainer.core.multi_seed import (
@@ -13,18 +15,15 @@ from gradiend.trainer.core.multi_seed import (
     aggregate_eval_results,
     load_seed_model_group,
     resolve_default_seed_selection,
+    resolve_dispersion_for_trainers,
     resolve_seed_run_entries,
+    resolve_seed_selection_for_trainers,
 )
 from tests.test_trainer_model import MockTrainerForTest
 
 
 def _local_temp(name: str) -> str:
-    root = os.path.join(os.getcwd(), "test_artifacts")
-    os.makedirs(root, exist_ok=True)
-    path = os.path.join(root, name)
-    shutil.rmtree(path, ignore_errors=True)
-    os.makedirs(path, exist_ok=True)
-    return path
+    return tempfile.mkdtemp(prefix=f"{name}_")
 
 
 def _write_seed_report(base_dir: str, runs: list) -> None:
@@ -138,6 +137,113 @@ class TestMultiSeedTrainerView:
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
+    def test_evaluate_encoder_aggregates_encoder_df(self):
+        temp_dir = _local_temp("multi_seed_encoder_df")
+        try:
+            seed_a = os.path.join(temp_dir, "seed_10")
+            seed_b = os.path.join(temp_dir, "seed_11")
+            os.makedirs(seed_a)
+            os.makedirs(seed_b)
+            _write_seed_report(
+                temp_dir,
+                [
+                    {"seed": 10, "output_dir": seed_a, "converged": True},
+                    {"seed": 11, "output_dir": seed_b, "converged": True},
+                ],
+            )
+            trainer = MockTrainerForTest(
+                model=os.path.join(temp_dir, "model"),
+                args=TrainingArguments(experiment_dir=temp_dir, analyze_seed_stability=True),
+            )
+
+            calls = {"n": 0}
+
+            def _fake_evaluate_encoder(**kwargs):
+                calls["n"] += 1
+                value = 1.0 if calls["n"] == 1 else 0.0
+                return {
+                    "correlation": 0.5,
+                    "encoder_df": pd.DataFrame(
+                        [
+                            {
+                                "masked": "m",
+                                "factual_id": "A",
+                                "target_id": "B",
+                                "encoded": value,
+                            }
+                        ]
+                    ),
+                }
+
+            with patch.object(trainer, "evaluate_encoder", side_effect=_fake_evaluate_encoder):
+                with patch.object(
+                    trainer,
+                    "load_model",
+                    return_value=MagicMock(base_model=MagicMock(), tokenizer=MagicMock()),
+                ):
+                    result = trainer.multi_seed().evaluate_encoder(split="test", return_df=True)
+
+            assert "encoder_df" in result
+            assert float(result["encoder_df"].iloc[0]["encoded"]) == pytest.approx(0.5)
+            assert result["seeds"]["n"] == 2
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_evaluate_encoder_refreshes_recorded_split_cycle_slots(self):
+        temp_dir = _local_temp("multi_seed_split_cycle_slots")
+        try:
+            seed_a = os.path.join(temp_dir, "seed_10")
+            seed_b = os.path.join(temp_dir, "seed_13")
+            os.makedirs(seed_a)
+            os.makedirs(seed_b)
+            _write_seed_report(
+                temp_dir,
+                [
+                    {
+                        "seed": 10,
+                        "output_dir": seed_a,
+                        "converged": True,
+                        "split_cycle_index": 1,
+                        "split_cycle_length": 3,
+                    },
+                    {
+                        "seed": 13,
+                        "output_dir": seed_b,
+                        "converged": True,
+                        "split_cycle_index": 0,
+                        "split_cycle_length": 3,
+                    },
+                ],
+            )
+            trainer = MockTrainerForTest(
+                model=os.path.join(temp_dir, "model"),
+                args=TrainingArguments(
+                    experiment_dir=temp_dir,
+                    split_resplit_per_seed=True,
+                    split_resplit_strategy="balanced_cycle",
+                ),
+            )
+            refresh_calls = []
+
+            def _fake_refresh(seed_value, args, **kwargs):
+                refresh_calls.append((seed_value, kwargs))
+
+            with patch.object(trainer, "_refresh_data_splits_for_seed", side_effect=_fake_refresh, create=True):
+                with patch.object(trainer, "evaluate_encoder", return_value={"correlation": 0.8}):
+                    with patch.object(
+                        trainer,
+                        "load_model",
+                        return_value=MagicMock(base_model=MagicMock(), tokenizer=MagicMock()),
+                    ):
+                        trainer.multi_seed().evaluate_encoder(split="test")
+
+            assert refresh_calls == [
+                (10, {"split_cycle_index": 1, "split_cycle_length": 3}),
+                (13, {"split_cycle_index": 0, "split_cycle_length": 3}),
+            ]
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
     def test_plot_runs_per_seed(self):
         temp_dir = _local_temp("multi_seed_plot")
         try:
@@ -173,6 +279,59 @@ class TestMultiSeedTrainerView:
             assert result["paths"] == ["/plots/a.png", "/plots/b.png"]
             assert result["path"] == "/plots/a.png"
             assert result["seeds"]["n"] == 2
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_plot_encoder_by_target_defaults_to_encoder_cache(self):
+        temp_dir = _local_temp("multi_seed_target_plot_cache")
+        try:
+            seed_a = os.path.join(temp_dir, "seed_10")
+            seed_b = os.path.join(temp_dir, "seed_11")
+            os.makedirs(seed_a)
+            os.makedirs(seed_b)
+            _write_seed_report(
+                temp_dir,
+                [
+                    {"seed": 10, "output_dir": seed_a, "converged": True},
+                    {"seed": 11, "output_dir": seed_b, "converged": True},
+                ],
+            )
+            trainer = MockTrainerForTest(
+                model=os.path.join(temp_dir, "model"),
+                args=TrainingArguments(experiment_dir=temp_dir, use_cache="only_convergent"),
+            )
+            calls = []
+
+            def _fake_evaluate_encoder(**kwargs):
+                calls.append(kwargs)
+                import pandas as pd
+
+                return {
+                    "encoder_df": pd.DataFrame(
+                        {
+                            "encoded": [0.9],
+                            "source_id": ["positive"],
+                            "source_token": ["good"],
+                            "type": ["training"],
+                            "data_split": ["train"],
+                        }
+                    )
+                }
+
+            with patch.object(trainer, "evaluate_encoder", side_effect=_fake_evaluate_encoder):
+                with patch.object(
+                    trainer,
+                    "load_model",
+                    return_value=MagicMock(base_model=MagicMock(), tokenizer=MagicMock()),
+                ):
+                    result = trainer.multi_seed().plot_encoder_by_target(
+                        output=os.path.join(temp_dir, "target_plot.pdf"),
+                        show=False,
+                    )
+
+            assert result["path"]
+            assert calls
+            assert all(call["use_cache"] is True for call in calls)
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
@@ -329,6 +488,42 @@ class TestResolveDefaultSeedSelection:
                 args=TrainingArguments(experiment_dir=temp_dir),
             )
             assert resolve_default_seed_selection(trainer, None) == "best"
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_trainer_dict_defaults_to_best_without_stability(self):
+        temp_dir = _local_temp("trainer_dict_seed_selection_best")
+        try:
+            trainers = {
+                "a": MockTrainerForTest(
+                    model=os.path.join(temp_dir, "a"),
+                    args=TrainingArguments(experiment_dir=temp_dir),
+                ),
+                "b": MockTrainerForTest(
+                    model=os.path.join(temp_dir, "b"),
+                    args=TrainingArguments(experiment_dir=temp_dir),
+                ),
+            }
+            assert resolve_seed_selection_for_trainers(trainers, None) == "best"
+            assert resolve_dispersion_for_trainers(trainers, None) == "none"
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_trainer_dict_switches_when_any_child_requests_stability(self):
+        temp_dir = _local_temp("trainer_dict_seed_selection_stability")
+        try:
+            trainers = {
+                "stable": MockTrainerForTest(
+                    model=os.path.join(temp_dir, "stable"),
+                    args=TrainingArguments(experiment_dir=temp_dir, analyze_seed_stability=True),
+                ),
+                "plain": MockTrainerForTest(
+                    model=os.path.join(temp_dir, "plain"),
+                    args=TrainingArguments(experiment_dir=temp_dir),
+                ),
+            }
+            assert resolve_seed_selection_for_trainers(trainers, None) == "all_convergent"
+            assert resolve_dispersion_for_trainers(trainers, None) == "std"
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 

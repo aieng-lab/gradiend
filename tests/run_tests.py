@@ -10,6 +10,7 @@ This script:
 """
 
 import sys
+import os
 import subprocess
 from pathlib import Path
 
@@ -83,9 +84,18 @@ def main():
     # Run pytest
     try:
         result = subprocess.run(
-            [sys.executable, "-m", "pytest", str(test_dir), "-v", "--tb=short"],
+            [
+                sys.executable,
+                "-m",
+                "pytest",
+                str(test_dir),
+                "-v",
+                "--tb=short",
+                "-m",
+                "not slow and not integration",
+            ],
             cwd=str(project_root),
-            check=False
+            check=False,
         )
         return result.returncode
     except Exception as e:

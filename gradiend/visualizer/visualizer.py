@@ -121,6 +121,7 @@ class Visualizer:
         plot_mean_by_class: bool = True,
         plot_mean_by_feature_class: Optional[bool] = None,
         plot_correlation: bool = True,
+        class_spread: Optional[Literal["minmax", "iqr", "ci95"]] = None,
         output: Optional[str] = None,
         show: bool = True,
         title: Union[str, bool] = True,
@@ -138,6 +139,10 @@ class Visualizer:
             plot_mean_by_feature_class: Include mean encoded value by feature class. ``None``
                 auto-disables redundant feature-class plots.
             plot_correlation: Include correlation over training steps.
+            class_spread: Optional spread band behind class means.
+                ``"minmax"`` shades min-max encoded values, ``"iqr"`` shades Q1-Q3,
+                ``"ci95"`` shades mean +/- 1.96 standard errors,
+                and ``None`` disables spread shading.
             output: Explicit output path.
             show: Whether to display the plot.
             title: True for the default title, False for no title, or a custom title string.
@@ -153,6 +158,7 @@ class Visualizer:
             plot_mean_by_class=plot_mean_by_class,
             plot_mean_by_feature_class=plot_mean_by_feature_class,
             plot_correlation=plot_correlation,
+            class_spread=class_spread,
             output=output,
             show=show,
             title=title,

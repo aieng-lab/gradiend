@@ -13,9 +13,10 @@ import pandas as pd
 
 from gradiend.util.paths import resolve_output_path, ARTIFACT_ENCODER_PLOT
 from gradiend.visualizer.labels import (
-    converged_for_trainer,
-    format_label_with_convergence,
+    format_plotly_label,
+    plotly_labels_for,
     resolve_highlight_non_convergence,
+    resolve_plot_title_with_convergence,
 )
 from gradiend.visualizer.plot_optional import _require_matplotlib
 from gradiend.util.logging import get_logger
@@ -24,6 +25,7 @@ logger = get_logger(__name__)
 
 # Default cmap for scatter to match encoder_distributions violins
 DEFAULT_SCATTER_CMAP = "tab20"
+TEXT_HOVER_COLUMNS = ("display_text", "text_:hover", "text_hover", "template", "masked", "input_text", "text", "sentence")
 
 
 def _palette_for_categories(categories: List[str], cmap: str = DEFAULT_SCATTER_CMAP) -> dict:
@@ -71,22 +73,52 @@ def _wrap_hover_text(text: str, line_chars: int = 90) -> str:
 
 
 def _truncate_text_around_mask(text: str, max_chars: int = 180, *, line_chars: int = 90) -> str:
-    """Truncate text to max_chars, centered on [MASK] when present, then wrap for hover."""
+    """Truncate hover text without hiding or chopping through the [MASK] context."""
     if not isinstance(text, str):
         return str(text) if text is not None else ""
-    if len(text) <= max_chars:
+    if max_chars is None or max_chars <= 0 or len(text) <= max_chars:
         return _wrap_hover_text(text, line_chars=line_chars)
+
+    def _trim_to_word_start(value: str, start: int, protected_end: int) -> int:
+        if start <= 0:
+            return 0
+        while start < protected_end and not value[start].isspace() and not value[start - 1].isspace():
+            start += 1
+        return min(start, protected_end)
+
+    def _trim_to_word_end(value: str, end: int, protected_start: int) -> int:
+        if end >= len(value):
+            return len(value)
+        while end > protected_start and not value[end - 1].isspace() and not value[end].isspace():
+            end -= 1
+        return max(end, protected_start)
+
+    def _truncate_prefix(value: str, limit: int) -> str:
+        limit = max(1, limit)
+        if len(value) <= limit:
+            return value
+        end = _trim_to_word_end(value, limit, 1)
+        return value[:end].rstrip() if end > 1 else value[:limit].rstrip()
+
     mask = "[MASK]"
     idx = text.find(mask)
-    content_max = max(10, max_chars - 6)  # reserve for "..." and "..."
     if idx < 0:
-        return _wrap_hover_text(text[:content_max] + "...", line_chars=line_chars)
-    half = (content_max - len(mask)) // 2
-    start = max(0, idx - half)
-    end = min(len(text), idx + len(mask) + (content_max - half - len(mask)))
+        return _wrap_hover_text(_truncate_prefix(text, max_chars - 3) + "...", line_chars=line_chars)
+
+    mask_end = idx + len(mask)
+    context_budget = max(0, max_chars - len(mask) - 6)
+    left_available = idx
+    right_available = len(text) - mask_end
+    left_budget = min(left_available, context_budget // 2)
+    right_budget = min(right_available, context_budget - left_budget)
+    left_budget = min(left_available, context_budget - right_budget)
+
+    start = _trim_to_word_start(text, max(0, idx - left_budget), idx)
+    end = _trim_to_word_end(text, min(len(text), mask_end + right_budget), mask_end)
     prefix = "..." if start > 0 else ""
     suffix = "..." if end < len(text) else ""
-    return _wrap_hover_text(prefix + text[start:end] + suffix, line_chars=line_chars)
+    snippet = text[start:end].strip()
+    return _wrap_hover_text(prefix + snippet + suffix, line_chars=line_chars)
 
 
 def _first_existing_column(df: pd.DataFrame, candidates: Sequence[str]) -> Optional[str]:
@@ -94,6 +126,34 @@ def _first_existing_column(df: pd.DataFrame, candidates: Sequence[str]) -> Optio
         if col in df.columns:
             return col
     return None
+
+
+def _first_masked_or_non_empty_column(df: pd.DataFrame, candidates: Sequence[str]) -> Optional[str]:
+    fallback: Optional[str] = None
+    for col in candidates:
+        if col not in df.columns:
+            continue
+        values = df[col].dropna().astype(str).str.strip()
+        non_empty = values[values.ne("")]
+        if non_empty.empty:
+            continue
+        if non_empty.str.contains("[MASK]", regex=False).any():
+            return col
+        if fallback is None:
+            fallback = col
+    return fallback
+
+
+def _is_text_hover_column(column: str) -> bool:
+    return str(column).strip().casefold() in {c.casefold() for c in TEXT_HOVER_COLUMNS}
+
+
+def _ordered_existing_columns(df: pd.DataFrame, columns: Sequence[str]) -> List[str]:
+    out: List[str] = []
+    for column in columns:
+        if column in df.columns and column not in out:
+            out.append(column)
+    return out
 
 
 def _natural_category_order(values: Sequence[Any]) -> List[str]:
@@ -149,7 +209,7 @@ def plot_encoder_scatter(
     output_dir: Optional[str] = None,
     experiment_dir: Optional[str] = None,
     show: bool = True,
-    title: Optional[str] = None,
+    title: Union[str, bool, None] = True,
     height: int = 500,
     split: str = "test",
     hover_text_max_chars: int = 180,
@@ -179,7 +239,7 @@ def plot_encoder_scatter(
         output_dir: Directory for HTML when output_path and experiment_dir are not set.
         experiment_dir: For resolve_output_path.
         show: Whether to display the figure (e.g. in Jupyter).
-        title: Plot title.
+        title: Plot title. ``True`` (default) uses a default title; ``None``/``False`` disables it.
         height: Figure height in pixels.
         split: Dataset split when encoder_df is None (passed to analyze_encoder).
         hover_text_max_chars: Max characters for 'text' in hover; truncated around first [MASK] with '...'. Default 50.
@@ -241,24 +301,21 @@ def plot_encoder_scatter(
         x_vals = encoder_df[resolved_x_col].fillna("").astype(str).tolist()
         x_vals = [value if value else "neutral" for value in x_vals]
 
-    text_col = _first_existing_column(encoder_df, ["masked", "text", "sentence"])
+    text_col = _first_masked_or_non_empty_column(encoder_df, TEXT_HOVER_COLUMNS)
     default_hover = [
-        "display_text",
         "target_token",
         "factual_token",
         "factual",
-        "label",
         "feature_class",
+        "label",
+        "data_split",
         "source_id",
         "target_id",
-        "data_split",
-        "type",
     ]
     if hover_cols is None:
-        hover_cols = [c for c in default_hover if c == "display_text" or c in encoder_df.columns]
-    hover_cols = [c for c in hover_cols if c in encoder_df.columns]
-    if "display_text" in (hover_cols or []) and "display_text" not in encoder_df.columns:
-        hover_cols = [c for c in hover_cols if c != "display_text"]
+        hover_cols = _ordered_existing_columns(encoder_df, default_hover)
+    else:
+        hover_cols = [c for c in hover_cols if c in encoder_df.columns and c != "type"]
 
     try:
         import plotly.express as px
@@ -273,29 +330,25 @@ def plot_encoder_scatter(
             for v in encoder_df[text_col].tolist()
         ]
     for c in hover_cols:
-        if c != "encoded":
+        if c != "encoded" and not _is_text_hover_column(c):
             vals = encoder_df[c].tolist()
-            if c == "text" and hover_text_max_chars > 0:
-                vals = [
-                    _truncate_text_around_mask(v, hover_text_max_chars, line_chars=hover_text_line_chars)
-                    for v in vals
-                ]
             df_plot[c] = vals
     hover_cols_resolved = []
     if "text" in df_plot.columns:
         hover_cols_resolved.append("text")
     hover_cols_resolved.extend([c for c in hover_cols if c in df_plot.columns and c != "text"])
     hover_data = hover_cols_resolved or None
+    plotly_labels = plotly_labels_for(["target", "encoded", "color", *(hover_cols_resolved or [])])
 
     highlight = resolve_highlight_non_convergence(highlight_non_convergence, trainer=trainer)
-    converged = converged_for_trainer(trainer) if trainer is not None else None
     default_title = "Encoded values (1D) by label" if color_col else "Encoded values (1D)"
-    plot_title = title or default_title
-    plot_title = format_label_with_convergence(
-        plot_title,
-        converged=converged,
+    plot_title = resolve_plot_title_with_convergence(
+        title,
+        trainer=trainer,
         highlight_non_convergence=highlight,
+        default=default_title,
     )
+    plotly_title = str(plot_title) if plot_title else None
 
     if color_col:
         df_plot["color"] = [
@@ -309,26 +362,35 @@ def plot_encoder_scatter(
             x="target",
             y="encoded",
             color="color",
-            title=plot_title,
+            title=plotly_title,
             height=height,
             hover_data=hover_data,
+            labels=plotly_labels,
             category_orders={"color": unique_cats, "target": _natural_category_order(df_plot["target"].tolist())},
             color_discrete_map=color_map if color_map else None,
         )
         fig.update_traces(marker={"opacity": 0.78})
-        fig.update_layout(xaxis_title="target", yaxis_title="encoded value", legend_title_text=color_col)
+        fig.update_layout(
+            xaxis_title=format_plotly_label("target"),
+            yaxis_title=format_plotly_label("encoded"),
+            legend_title_text=format_plotly_label(color_col),
+        )
     else:
         fig = px.scatter(
             df_plot,
             x="target",
             y="encoded",
-            title=plot_title,
+            title=plotly_title,
             height=height,
             hover_data=hover_data,
+            labels=plotly_labels,
             category_orders={"target": _natural_category_order(df_plot["target"].tolist())},
         )
         fig.update_traces(marker={"opacity": 0.78})
-        fig.update_layout(xaxis_title="target", yaxis_title="encoded value")
+        fig.update_layout(
+            xaxis_title=format_plotly_label("target"),
+            yaxis_title=format_plotly_label("encoded"),
+        )
 
     if output_path:
         out = output_path

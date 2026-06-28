@@ -51,12 +51,47 @@ def _token_to_single_id(tokenizer, token_str: str, vocab_norm_map: Dict[str, Lis
     norm = _normalize_token_string(s)
     candidates = vocab_norm_map.get(norm, []) or [s]
     for cand in candidates:
-        tokenized = _tokenizer.tokenize(cand)
-        if len(tokenized) == 1:
-            return _tokenizer.convert_tokens_to_ids(tokenized[0])
-        if len(tokenized) > 1:
-            return _tokenizer.convert_tokens_to_ids(tokenized[0])
-    return _tokenizer.convert_tokens_to_ids(_tokenizer.tokenize(s)[0]) if _tokenizer.tokenize(s) else None
+        if hasattr(_tokenizer, "tokenize"):
+            tokenized = _tokenizer.tokenize(cand)
+            if len(tokenized) == 1:
+                return _tokenizer.convert_tokens_to_ids(tokenized[0])
+            if len(tokenized) > 1:
+                return _tokenizer.convert_tokens_to_ids(tokenized[0])
+        ids = _tokenizer(cand, add_special_tokens=False).get("input_ids", [])
+        if ids:
+            return ids[0]
+    fallback_ids = _tokenizer(s, add_special_tokens=False).get("input_ids", [])
+    return fallback_ids[0] if fallback_ids else None
+
+
+def resolve_prediction_target_token_id(tokenizer, label: str) -> int:
+    """
+    Resolve a prediction label string to one vocabulary token id.
+
+    Multi-token labels use the first subword token, matching decoder evaluation.
+    """
+    if label is None or (isinstance(label, float) and np.isnan(label)):
+        raise ValueError("Cannot resolve empty prediction label to a token id.")
+    s = str(label).strip()
+    if not s:
+        raise ValueError("Cannot resolve empty prediction label to a token id.")
+    _tokenizer = tokenizer.tokenizer if hasattr(tokenizer, "tokenizer") else tokenizer
+    vocab_norm_map = _build_vocab_norm_map(_tokenizer)
+    token_id = _token_to_single_id(_tokenizer, s, vocab_norm_map)
+    if token_id is None:
+        ids = _tokenizer(s, add_special_tokens=False).get("input_ids", [])
+        if not ids:
+            raise ValueError(f"Could not resolve label {label!r} to a vocabulary token id.")
+        token_id = ids[0]
+    ids = _tokenizer(s, add_special_tokens=False).get("input_ids", [])
+    if len(ids) > 1:
+        logger.warning(
+            "Label %r tokenized to %d tokens; using first token id %s for decoder-only prediction.",
+            label,
+            len(ids),
+            token_id,
+        )
+    return token_id
 
 
 def _build_vocab_norm_map(tokenizer) -> Dict[str, List[str]]:
@@ -320,6 +355,7 @@ def compute_probability_shift_score_clm(
     key_text='masked',
     batch_size=16,
     dataset_class_col=None,
+    factual_dataset_class_col=None,
 ):
     """
     Compute probabilities for all classes evaluated on all datasets.
@@ -385,6 +421,9 @@ def compute_probability_shift_score_clm(
 
     # Group probabilities by dataset class: {dataset_class: {class_name: [probs]}}
     probs_by_dataset = defaultdict(lambda: defaultdict(list))
+    probs_by_factual_dataset = (
+        defaultdict(lambda: defaultdict(list)) if factual_dataset_class_col else None
+    )
     rows = df.to_dict("records")
     n_batches = (len(rows) + batch_size - 1) // batch_size
 
@@ -430,6 +469,9 @@ def compute_probability_shift_score_clm(
                 dataset_class = None
                 if dataset_class_col:
                     dataset_class = row.get(dataset_class_col)
+                factual_class = None
+                if factual_dataset_class_col:
+                    factual_class = row.get(factual_dataset_class_col)
                 
                 # Compute probabilities for all classes
                 for g, ids in targets_ids.items():
@@ -440,6 +482,8 @@ def compute_probability_shift_score_clm(
                         else:
                             # Fallback: use class name as dataset identifier
                             probs_by_dataset[g][g].append(prob)
+                        if factual_class is not None and probs_by_factual_dataset is not None:
+                            probs_by_factual_dataset[factual_class][g].append(prob)
 
     # Compute means per dataset class
     probs_by_dataset_means = {}
@@ -456,6 +500,15 @@ def compute_probability_shift_score_clm(
             for ds_cls, cls_probs in sorted(probs_by_dataset_means.items())
         )
         logger.debug(f"Decoder eval probability means by dataset: {means_str}")
+        if probs_by_factual_dataset is not None:
+            factual_means = {
+                dataset_class: {
+                    class_name: float(np.mean(probs)) if probs else 0.0
+                    for class_name, probs in class_probs.items()
+                }
+                for dataset_class, class_probs in probs_by_factual_dataset.items()
+            }
+            return probs_by_dataset_means, factual_means
         return probs_by_dataset_means
     
     raise ValueError("No valid group probabilities computed; check your data and targets.")
@@ -472,6 +525,7 @@ def compute_probability_shift_score_mlm(
     key_text='masked',
     batch_size=16,
     dataset_class_col=None,
+    factual_dataset_class_col=None,
 ):
     """
     Compute probabilities for all classes evaluated on all datasets.
@@ -492,12 +546,16 @@ def compute_probability_shift_score_mlm(
     model.eval()
     device = model.device
     if is_decoder_only_model(model):
-        return compute_probability_shift_score_clm(model, tokenizer, df, targets, key_text, batch_size, dataset_class_col)
+        return compute_probability_shift_score_clm(
+            model, tokenizer, df, targets, key_text, batch_size,
+            dataset_class_col, factual_dataset_class_col,
+        )
 
     eval_kind = prediction_eval_kind(model)
     if eval_kind == "seq2seq_encoder_mlm":
         return compute_probability_shift_score_clm(
-            model, tokenizer, df, targets, key_text, batch_size, dataset_class_col
+            model, tokenizer, df, targets, key_text, batch_size,
+            dataset_class_col, factual_dataset_class_col,
         )
 
     _tokenizer = tokenizer.tokenizer if hasattr(tokenizer, 'tokenizer') else tokenizer
@@ -540,6 +598,9 @@ def compute_probability_shift_score_mlm(
 
     # Group probabilities by dataset class: {dataset_class: {class_name: [probs]}}
     probs_by_dataset = defaultdict(lambda: defaultdict(list))
+    probs_by_factual_dataset = (
+        defaultdict(lambda: defaultdict(list)) if factual_dataset_class_col else None
+    )
     rows = df.to_dict("records")
     n_batches = (len(rows) + batch_size - 1) // batch_size
 
@@ -585,6 +646,9 @@ def compute_probability_shift_score_mlm(
                 dataset_class = None
                 if dataset_class_col:
                     dataset_class = row.get(dataset_class_col)
+                factual_class = None
+                if factual_dataset_class_col:
+                    factual_class = row.get(factual_dataset_class_col)
                 
                 # Store probabilities grouped by dataset class
                 for g, p in per_group_probs.items():
@@ -593,6 +657,8 @@ def compute_probability_shift_score_mlm(
                     else:
                         # Fallback: use class name as dataset identifier
                         probs_by_dataset[g][g].append(p)
+                    if factual_class is not None and probs_by_factual_dataset is not None:
+                        probs_by_factual_dataset[factual_class][g].append(p)
 
     # Compute means per dataset class
     probs_by_dataset_means = {}
@@ -609,6 +675,15 @@ def compute_probability_shift_score_mlm(
             for ds_cls, cls_probs in sorted(probs_by_dataset_means.items())
         )
         logger.debug(f"Decoder eval probability means by dataset: {means_str}")
+        if probs_by_factual_dataset is not None:
+            factual_means = {
+                dataset_class: {
+                    class_name: float(np.mean(probs)) if probs else 0.0
+                    for class_name, probs in class_probs.items()
+                }
+                for dataset_class, class_probs in probs_by_factual_dataset.items()
+            }
+            return probs_by_dataset_means, factual_means
         return probs_by_dataset_means
     
     raise ValueError("No valid group probabilities computed; check your data and targets.")
@@ -786,11 +861,12 @@ def evaluate_probability_shift_score(
     eval_data_df,
     key_text="masked",
     dataset_class_col=None,
+    factual_dataset_class_col=None,
     use_row_wise: bool = False,
     return_per_row_df: bool = False,
     objective: str = "auto",
     rhs_window: int = -1,
-) -> Union[Dict[str, Dict[str, float]], Tuple[Dict[str, Dict[str, float]], pd.DataFrame]]:
+) -> Union[Dict[str, Dict[str, float]], Tuple[Dict[str, Dict[str, float]], pd.DataFrame], Tuple[Dict[str, Dict[str, float]], Dict[str, Dict[str, float]]]]:
     """
     Compute probabilities for all classes on all datasets.
 
@@ -859,6 +935,7 @@ def evaluate_probability_shift_score(
             targets=targets,
             key_text=key_text,
             dataset_class_col=dataset_class_col,
+            factual_dataset_class_col=factual_dataset_class_col,
         )
     if use_row_wise:
         out = compute_probability_shift_score_row_wise(
@@ -875,11 +952,12 @@ def evaluate_probability_shift_score(
         return out
     return compute_probability_shift_score_mlm(
         model, tokenizer, eval_data_df, targets=targets, key_text=key_text,
-        dataset_class_col=dataset_class_col
+        dataset_class_col=dataset_class_col, factual_dataset_class_col=factual_dataset_class_col,
     )
 
 
 __all__ = [
+    "resolve_prediction_target_token_id",
     "annotate_text_probability_rows",
     "compute_probability_shift_score_row_wise",
     "compute_probability_shift_score_mlm",

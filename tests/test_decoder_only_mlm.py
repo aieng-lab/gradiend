@@ -1,5 +1,6 @@
 import os
 import shutil
+from typing import Any, Dict
 
 import pandas as pd
 import pytest
@@ -103,11 +104,90 @@ def test_decoder_only_mlm_dataset_replaces_literal_mask_with_tokenizer_mask():
             return {"input_ids": ids}
 
     df = pd.DataFrame([{"masked": "Der [MASK] ist da", "label": "Mann"}])
-    dataset = DataFrameMLMDataset(Tokenizer(), df)
+    dataset = DataFrameMLMDataset(Tokenizer(), df, label_class_map={"Mann": 0})
 
     input_ids, _attention_mask, _label_ids = dataset[0]
 
     assert 5 in input_ids.tolist()
+
+
+def test_decoder_only_mlm_head_uses_label_class_indices():
+    config = GPT2Config(
+        n_layer=1,
+        n_head=1,
+        n_embd=8,
+        vocab_size=20,
+        tie_word_embeddings=False,
+    )
+    model = DecoderModelWithMLMHead(config, target_labels=["AFRICAN", "EUROPEAN"])
+
+    assert model.classifier.out_features == 2
+    assert model.target_labels == ["AFRICAN", "EUROPEAN"]
+
+
+def test_decoder_only_mlm_dataset_maps_label_string_to_class_index():
+    class Tokenizer:
+        mask_token = "<mask>"
+        pad_token_id = 0
+
+        def __call__(self, text, **kwargs):
+            ids = [5 if token == self.mask_token else 1 for token in str(text).split()]
+            if kwargs.get("return_tensors") == "pt":
+                return type(
+                    "Encoded",
+                    (),
+                    {
+                        "input_ids": torch.tensor([ids], dtype=torch.long),
+                        "attention_mask": torch.ones(1, len(ids), dtype=torch.long),
+                    },
+                )()
+            return {"input_ids": ids}
+
+    df = pd.DataFrame([{"masked": "people are [MASK]", "label": "AFRICAN"}])
+    dataset = DataFrameMLMDataset(Tokenizer(), df, label_class_map={"AFRICAN": 0, "EUROPEAN": 1})
+
+    _input_ids, _attention_mask, label_ids = dataset[0]
+
+    assert label_ids.tolist() == [0]
+
+
+def test_decoder_only_mlm_from_pretrained_filters_wrapper_kwargs(monkeypatch):
+    config = GPT2Config(
+        n_layer=1,
+        n_head=1,
+        n_embd=8,
+        vocab_size=20,
+        tie_word_embeddings=False,
+    )
+    captured: Dict[str, Any] = {}
+
+    class DummyDecoder(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.config = config
+            self.base_model = self
+
+        def get_input_embeddings(self):
+            return torch.nn.Embedding(20, 8)
+
+    def spy_from_pretrained(name_or_path, *args, **kwargs):
+        captured["name_or_path"] = name_or_path
+        captured["kwargs"] = kwargs
+        return DummyDecoder()
+
+    import gradiend.trainer.text.prediction.decoder_only_mlm as module
+
+    monkeypatch.setattr(module.AutoModelForCausalLM, "from_pretrained", spy_from_pretrained)
+    monkeypatch.setattr(module.AutoConfig, "from_pretrained", lambda *_args, **_kwargs: config)
+
+    DecoderModelWithMLMHead.from_pretrained(
+        "dummy-llama",
+        target_labels=["AFRICAN", "EUROPEAN"],
+        trust_remote_code=True,
+    )
+
+    assert captured["kwargs"] == {"trust_remote_code": True}
+    assert "target_labels" not in captured["kwargs"]
 
 
 def test_decoder_only_mlm_forward_raises_when_labels_given_without_mask():
@@ -194,7 +274,9 @@ def test_saved_decoder_mlm_head_cache_does_not_require_gradiend_training_args(tm
     head_dir = tmp_path / "decoder_mlm_head"
     head_dir.mkdir()
     (head_dir / "config.json").write_text('{"model_type": "gpt2-with-mlm-head"}')
-    (head_dir / "config_mlm_head.json").write_text('{"target_token_ids": [1, 2], "base_model": "gpt2"}')
+    (head_dir / "config_mlm_head.json").write_text(
+        '{"target_labels": ["A", "B"], "target_token_ids": [1, 2], "base_model": "gpt2"}'
+    )
     (head_dir / "model.safetensors").write_bytes(b"placeholder")
     (head_dir / "tokenizer_config.json").write_text("{}")
     (head_dir / "tokenizer.json").write_text("{}")
@@ -208,7 +290,9 @@ def test_train_decoder_only_mlm_head_uses_mlm_head_cache(monkeypatch, tmp_path):
     head_dir = experiment_dir / "decoder_mlm_head"
     head_dir.mkdir(parents=True)
     (head_dir / "config.json").write_text('{"model_type": "gpt2-with-mlm-head"}')
-    (head_dir / "config_mlm_head.json").write_text('{"target_token_ids": [1, 2], "base_model": "gpt2"}')
+    (head_dir / "config_mlm_head.json").write_text(
+        '{"target_labels": ["A", "B"], "target_token_ids": [1, 2], "base_model": "gpt2"}'
+    )
     (head_dir / "pytorch_model.bin").write_bytes(b"placeholder")
     (head_dir / "tokenizer_config.json").write_text("{}")
     (head_dir / "tokenizer.json").write_text("{}")
@@ -223,3 +307,32 @@ def test_train_decoder_only_mlm_head_uses_mlm_head_cache(monkeypatch, tmp_path):
     monkeypatch.setattr(trainer, "get_decoder_mlm_training_data", fail_get_data)
 
     assert trainer.train_decoder_only_mlm_head("gpt2") == str(head_dir)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlink tests require POSIX")
+def test_ensure_writable_dir_resolves_symlink_to_target(tmp_path):
+    from gradiend.util.paths import ensure_writable_dir
+
+    target = tmp_path / "shared_head"
+    target.mkdir()
+    link = tmp_path / "decoder_mlm_head"
+    os.symlink(target, link, target_is_directory=True)
+
+    resolved = ensure_writable_dir(str(link))
+
+    assert resolved == str(target.resolve())
+    assert os.path.isdir(resolved)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlink tests require POSIX")
+def test_ensure_writable_dir_replaces_broken_symlink(tmp_path):
+    from gradiend.util.paths import ensure_writable_dir
+
+    link = tmp_path / "decoder_mlm_head"
+    os.symlink(str(tmp_path / "missing"), link, target_is_directory=True)
+
+    resolved = ensure_writable_dir(str(link))
+
+    assert resolved == str(link.resolve())
+    assert os.path.isdir(resolved)
+    assert not os.path.islink(resolved)

@@ -131,6 +131,7 @@ class Evaluator:
         increase_target_probabilities: bool = True,
         plot: bool = False,
         show: Optional[bool] = None,
+        plot_kwargs: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         Run decoder grid evaluation and return summary + grid for one direction (strengthen or weaken).
@@ -162,6 +163,7 @@ class Evaluator:
                 If False, compute weaken summaries only (keys e.g. "3SG_weaken"). Only required combinations are evaluated.
             plot: If True, after selection run any missing dataset evaluations for plotting, update cache, then plot.
             show: If True, display the plot; if False, only save. When None and plot=True, defaults to True.
+            plot_kwargs: Optional dict of options forwarded to plot_probability_shifts when plot=True.
 
         Returns:
             Flat dict: for strengthen, keys like result['3SG']; for weaken, keys like result['3SG_weaken'].
@@ -184,6 +186,7 @@ class Evaluator:
             increase_target_probabilities=increase_target_probabilities,
             plot=plot,
             show=show if show is not None else plot,
+            plot_kwargs=plot_kwargs,
         )
         if selector is not None:
             kwargs["selector"] = selector
@@ -291,6 +294,7 @@ class Evaluator:
         plot_mean_by_class: bool = True,
         plot_mean_by_feature_class: Optional[bool] = None,
         plot_correlation: bool = True,
+        class_spread: Optional[Literal["minmax", "iqr", "ci95"]] = None,
         output: Optional[str] = None,
         show: bool = True,
         title: Union[str, bool] = True,
@@ -309,6 +313,10 @@ class Evaluator:
             plot_mean_by_feature_class: Plot means grouped by feature class.
                 ``None`` lets the visualizer decide from available statistics.
             plot_correlation: Plot correlation over training steps.
+            class_spread: Optional spread band behind class means.
+                ``"minmax"`` shades min-max encoded values, ``"iqr"`` shades Q1-Q3,
+                ``"ci95"`` shades mean +/- 1.96 standard errors,
+                and ``None`` disables spread shading.
             output: Optional explicit output file path.
             show: Whether to display the figure interactively.
             title: Plot title. ``True`` uses the default title, ``False`` omits it.
@@ -328,6 +336,7 @@ class Evaluator:
             plot_mean_by_class=plot_mean_by_class,
             plot_mean_by_feature_class=plot_mean_by_feature_class,
             plot_correlation=plot_correlation,
+            class_spread=class_spread,
             output=output,
             show=show,
             title=title,

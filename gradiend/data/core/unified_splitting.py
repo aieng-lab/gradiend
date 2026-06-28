@@ -41,6 +41,8 @@ def resplit_unified_dataframe(
     feature_class_col: str = UNIFIED_FACTUAL_CLASS,
     split_col: str = UNIFIED_SPLIT,
     align_alternatives_with_split_vocab: bool = False,
+    balanced_cycle_index: int | None = None,
+    balanced_cycle_length: int | None = None,
 ) -> pd.DataFrame:
     """Assign vocabulary-held-out splits to a unified prediction DataFrame.
 
@@ -61,6 +63,9 @@ def resplit_unified_dataframe(
         align_alternatives_with_split_vocab: If ``True``, replace alternatives
             with tokens from the same split and alternative class so held-out
             factual vocabulary does not re-enter as alternatives.
+        balanced_cycle_index: Optional seed index for balanced multi-seed
+            split rotation.
+        balanced_cycle_length: Number of seed slots in the balanced rotation.
 
     Returns:
         A copy of ``df`` with split assignments, and optionally aligned
@@ -88,6 +93,8 @@ def resplit_unified_dataframe(
                     split_col=split_col,
                     group_key=group_key,
                     class_id=str(class_id),
+                    balanced_cycle_index=balanced_cycle_index,
+                    balanced_cycle_length=balanced_cycle_length,
                 )
             )
         if not parts:
@@ -112,6 +119,8 @@ def resplit_unified_dataframe(
         seed,
         split_col=split_col,
         group_key=group_key,
+        balanced_cycle_index=balanced_cycle_index,
+        balanced_cycle_length=balanced_cycle_length,
     )
     if align_alternatives_with_split_vocab:
         out = align_unified_alternatives_with_split_vocab(

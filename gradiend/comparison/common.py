@@ -5,6 +5,8 @@ from __future__ import annotations
 import math
 from typing import Any, Callable, Dict, List, Optional, Sequence, Union
 
+import pandas as pd
+
 
 GroupingSpec = Union[str, Dict[str, str], Callable[[str], str], None]
 
@@ -46,11 +48,34 @@ def _normalize_model_groups(models: Dict[str, object]) -> Dict[str, List[object]
         if isinstance(value, (list, tuple)):
             group = list(value)
         else:
-            group = [value]
+            try:
+                from gradiend.trainer.core.seed_models import SeedModelGroup
+
+                if isinstance(value, SeedModelGroup):
+                    group = list(value.models)
+                else:
+                    group = [value]
+            except ImportError:
+                group = [value]
         if not group:
             raise ValueError(f"Model group {mid!r} must contain at least one model")
         normalized[mid] = group
     return normalized
+
+
+def encoder_dataframes_from_summary(payload: Any) -> List[pd.DataFrame]:
+    """Return one or more encoder DataFrames from a cross-task encoder summary entry."""
+    if not isinstance(payload, dict):
+        return []
+    encoder_dfs = payload.get("encoder_dfs")
+    if isinstance(encoder_dfs, list):
+        return [
+            df for df in encoder_dfs if isinstance(df, pd.DataFrame) and not df.empty
+        ]
+    encoder_df = payload.get("encoder_df")
+    if isinstance(encoder_df, pd.DataFrame) and not encoder_df.empty:
+        return [encoder_df]
+    return []
 
 
 def _validate_aggregate_dispersion_combo(seed_aggregate: str, dispersion: str) -> None:
@@ -62,6 +87,35 @@ def _validate_aggregate_dispersion_combo(seed_aggregate: str, dispersion: str) -
         raise ValueError(f"dispersion must be one of {sorted(valid_dispersion)}, got {dispersion!r}")
     if dispersion == "range" and seed_aggregate in {"min", "max"}:
         raise ValueError("dispersion='range' does not make sense with seed_aggregate='min' or 'max'")
+
+
+def comparison_matrix_from_cell_stat(
+    comparison_data: Dict[str, Any],
+    field: str = "std",
+) -> Dict[str, Any]:
+    """Build a heatmap payload whose cells are a per-cell dispersion statistic."""
+    cell_stats = comparison_data.get("cell_stats")
+    if not isinstance(cell_stats, list):
+        raise ValueError("comparison_data must contain list-valued 'cell_stats'")
+    matrix: List[List[float]] = []
+    for row in cell_stats:
+        if not isinstance(row, list):
+            raise ValueError("cell_stats must be a rectangular list of dicts")
+        matrix.append(
+            [
+                float(stat[field])
+                if isinstance(stat, dict) and isinstance(stat.get(field), (int, float))
+                else float("nan")
+                for stat in row
+            ]
+        )
+    payload = dict(comparison_data)
+    payload["matrix"] = matrix
+    measure = str(comparison_data.get("measure") or "comparison")
+    payload["measure"] = f"{measure}_{field}"
+    payload.pop("cell_stats", None)
+    payload.pop("row_normalized_by_diagonal", None)
+    return payload
 
 
 def _aggregate_seed_scores(values: Sequence[float], *, seed_aggregate: str, dispersion: str) -> Dict[str, Any]:
@@ -138,3 +192,37 @@ def _safe_float(value: Any) -> Optional[float]:
     if math.isnan(numeric):
         return None
     return numeric
+
+
+def _encoder_label_correlation(encoder_df: Any) -> Optional[float]:
+    """Pearson correlation between encoded values and binary labels (non-neutral, label != 0)."""
+    if not hasattr(encoder_df, "columns"):
+        return None
+    if "encoded" not in encoder_df.columns or "label" not in encoder_df.columns:
+        return None
+    work = encoder_df
+    if "type" in work.columns:
+        work = work[~work["type"].astype(str).str.contains("neutral", case=False, na=False)]
+    labels = work["label"].astype(float)
+    mask = labels != 0.0
+    if int(mask.sum()) < 2:
+        return None
+    encoded = work.loc[mask, "encoded"].astype(float)
+    labels = labels.loc[mask]
+    if float(labels.std()) == 0.0 or float(encoded.std()) == 0.0:
+        return None
+    return _pearson(encoded.tolist(), labels.tolist())
+
+
+def orient_encoder_df_by_label_correlation(encoder_df: Any, *, threshold: float = 0.0) -> Any:
+    """Flip encoded signs when label correlation is negative (anchor-aligned frame)."""
+    import pandas as pd
+
+    if not hasattr(encoder_df, "columns") or encoder_df.empty:
+        return encoder_df
+    corr = _encoder_label_correlation(encoder_df)
+    if corr is None or corr >= threshold:
+        return encoder_df
+    oriented = encoder_df.copy()
+    oriented["encoded"] = -oriented["encoded"].astype(float)
+    return oriented

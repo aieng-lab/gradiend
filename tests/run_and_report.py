@@ -5,6 +5,7 @@ This helps capture test failures when running in environments where direct acces
 """
 
 import sys
+import os
 import subprocess
 from pathlib import Path
 from datetime import datetime
@@ -23,11 +24,20 @@ def main():
     
     try:
         result = subprocess.run(
-            [sys.executable, "-m", "pytest", str(test_dir), "-v", "--tb=long"],
+            [
+                sys.executable,
+                "-m",
+                "pytest",
+                str(test_dir),
+                "-v",
+                "--tb=long",
+                "-m",
+                "not slow and not integration",
+            ],
             cwd=str(project_root),
             capture_output=True,
             text=True,
-            timeout=300
+            timeout=300,
         )
         
         # Write output to file

@@ -480,6 +480,73 @@ class TestModelWithGradiend:
         assert rewritten_model is not None
         assert rewritten_model is not model_with_gradiend.base_model
 
+    def test_effective_rewrite_learning_rate_alternative_source(self):
+        from gradiend.model.model_with_gradiend import effective_rewrite_learning_rate
+
+        assert effective_rewrite_learning_rate(0.1, "factual") == 0.1
+        assert effective_rewrite_learning_rate(0.1, "diff") == 0.1
+        assert effective_rewrite_learning_rate(0.1, "alternative") == 0.1
+
+    def test_effective_rewrite_learning_rate_rejects_invalid_source(self):
+        from gradiend.model.model_with_gradiend import effective_rewrite_learning_rate
+
+        with pytest.raises(ValueError, match="source must be"):
+            effective_rewrite_learning_rate(0.1, "counterfactual")
+
+    def test_rewrite_base_model_same_lr_for_alternative_source(self):
+        """Learning rate sign is unchanged for alternative-source models."""
+        from gradiend.model import ModelWithGradiend, ParamMappedGradiendModel
+        from gradiend.model.model_with_gradiend import effective_rewrite_learning_rate
+
+        class TinyModel(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.weight = torch.nn.Parameter(torch.ones(2, 2))
+
+        class TinyMWG(ModelWithGradiend):
+            def create_gradients(self, *args, **kwargs):
+                raise NotImplementedError
+
+            def _save_model(self, save_directory, **kwargs):
+                raise NotImplementedError
+
+            @classmethod
+            def _load_model(cls, *args, **kwargs):
+                raise NotImplementedError
+
+        def _make_mwg(source: str) -> TinyMWG:
+            torch.manual_seed(0)
+            base = TinyModel()
+            gradiend = ParamMappedGradiendModel(
+                input_dim=4,
+                latent_dim=1,
+                param_map={"weight": {"shape": (2, 2), "repr": "all"}},
+            )
+            with torch.no_grad():
+                gradiend.decoder[0].linear.weight.fill_(1.0)
+                gradiend.decoder[0].linear.bias.zero_()
+            return TinyMWG(
+                base,
+                gradiend,
+                source=source,
+                target="diff",
+            )
+
+        nominal_lr = 0.05
+        ff = 1.0
+        factual = _make_mwg("factual")
+        counter = _make_mwg("alternative")
+        w0 = factual.base_model.weight.detach().clone()
+
+        factual_out = factual.rewrite_base_model(learning_rate=nominal_lr, feature_factor=ff, part="decoder")
+        counter_out = counter.rewrite_base_model(learning_rate=nominal_lr, feature_factor=ff, part="decoder")
+
+        delta_f = factual_out.weight.detach() - w0
+        delta_c = counter_out.weight.detach() - w0
+        assert not torch.allclose(delta_f, torch.zeros_like(delta_f))
+        assert torch.allclose(delta_f, delta_c, atol=1e-6)
+        assert effective_rewrite_learning_rate(nominal_lr, "alternative") == nominal_lr
+
     def test_rewrite_base_model_resolves_backbone_local_param_names(self):
         """Decoder-only wrappers may train on backbone-local names such as embed_tokens.weight."""
         from gradiend.model import ModelWithGradiend, ParamMappedGradiendModel

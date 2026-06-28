@@ -17,9 +17,8 @@ from gradiend.util.encoder_splits import order_split_names
 from gradiend.util.logging import get_logger
 from gradiend.util.paths import ARTIFACT_ENCODER_PLOT, resolve_output_path
 from gradiend.visualizer.labels import (
-    converged_for_trainer,
-    format_label_with_convergence,
     resolve_highlight_non_convergence,
+    resolve_plot_title_with_convergence,
 )
 from gradiend.visualizer.encoder_neutral import (
     NEUTRAL_ENCODER_TYPES,
@@ -330,7 +329,7 @@ def plot_encoder_strip_by_split(
     neutral_type_labels: Optional[dict] = None,
     hue_col: str = "data_split",
     default_hue: str = "test",
-    title: Optional[str] = None,
+    title: Union[str, bool, None] = True,
     output: Optional[str] = None,
     output_dir: Optional[str] = None,
     experiment_dir: Optional[str] = None,
@@ -367,7 +366,8 @@ def plot_encoder_strip_by_split(
         neutral_type_labels: Display labels for neutral row types.
         hue_col: Column used as hue, typically ``data_split``.
         default_hue: Hue value inserted when ``hue_col`` is missing.
-        title: Optional plot title. Defaults to "Encoded values by split".
+        title: Plot title. ``True`` (default) uses "Encoded values by split";
+            ``None``/``False`` disables it.
         output: Explicit output path.
         output_dir: Directory used when resolving the default output filename.
         experiment_dir: Experiment directory used when resolving the default output filename.
@@ -433,11 +433,11 @@ def plot_encoder_strip_by_split(
 
     highlight = resolve_highlight_non_convergence(highlight_non_convergence, trainer=trainer)
     default_title = "Encoded values by split"
-    plot_title = title or default_title
-    plot_title = format_label_with_convergence(
-        plot_title,
-        converged=converged_for_trainer(trainer),
+    plot_title = resolve_plot_title_with_convergence(
+        title,
+        trainer=trainer,
         highlight_non_convergence=highlight,
+        default=default_title,
     )
 
     annotate_indices = _label_indices_from_mode(
@@ -515,7 +515,8 @@ def plot_encoder_strip_by_split(
     ax.set_xticklabels(group_order)
     ax.set_ylabel("Encoded value")
     ax.set_xlabel(encoder_plot_xlabel(includes_neutral_groups=includes_neutral))
-    ax.set_title(plot_title)
+    if plot_title:
+        ax.set_title(str(plot_title))
     if n_hue > 1:
         ax.legend(title="Split", loc="best", fontsize=8)
 

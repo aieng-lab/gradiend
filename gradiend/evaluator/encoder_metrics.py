@@ -15,6 +15,7 @@ from gradiend.util.metrics import accuracy_score
 from gradiend.util import json_loads
 from gradiend.util.encoder_splits import order_split_names
 from gradiend.util.logging import get_logger
+from gradiend.util.paths import invalidate_encoder_metrics_cache
 from gradiend.util.split_policy import (
 	pair_transition_mask,
 	validate_target_pair_encoder_split_coverage,
@@ -49,21 +50,6 @@ def get_correlation(
 	if np.isnan(corr):
 		return 0.0
 	return float(corr)
-
-
-def invalidate_encoder_metrics_cache(encoded_values_csv_path: str) -> None:
-	"""Delete cached metrics JSON for a given encoded-values CSV path.
-
-	Args:
-		encoded_values_csv_path: Path to the encoder CSV whose sibling JSON cache
-			should be removed.
-	"""
-	json_path = encoded_values_csv_path.replace(".csv", ".json")
-	try:
-		if os.path.exists(json_path):
-			os.remove(json_path)
-	except OSError as e:
-		logger.warning("Failed to delete metrics cache at %s (%s)", json_path, e)
 
 
 def _should_use_metrics_cache(csv_path: str, json_path: str) -> bool:
@@ -415,10 +401,23 @@ def _compute_metrics_from_df(
 	neutral_types = ("neutral_training_masked", "neutral_dataset")
 
 	mean_by_class: Dict[float, float] = {}
+	min_by_class: Dict[float, float] = {}
+	max_by_class: Dict[float, float] = {}
+	q1_by_class: Dict[float, float] = {}
+	q3_by_class: Dict[float, float] = {}
+	std_by_class: Dict[float, float] = {}
+	n_by_class: Dict[float, int] = {}
 	if len(df_for_means) > 0 and "label" in df_for_means.columns:
 		for lbl, grp in df_for_means.groupby("label"):
 			if len(grp) > 0:
-				mean_by_class[float(lbl)] = float(grp["encoded"].astype(float).mean())
+				encoded = grp["encoded"].astype(float)
+				mean_by_class[float(lbl)] = float(encoded.mean())
+				min_by_class[float(lbl)] = float(encoded.min())
+				max_by_class[float(lbl)] = float(encoded.max())
+				q1_by_class[float(lbl)] = float(encoded.quantile(0.25))
+				q3_by_class[float(lbl)] = float(encoded.quantile(0.75))
+				std_by_class[float(lbl)] = float(encoded.std(ddof=1)) if len(encoded) > 1 else 0.0
+				n_by_class[float(lbl)] = int(len(encoded))
 
 	mean_by_type: Dict[str, float] = {}
 	abs_mean_by_type: Dict[str, float] = {}
@@ -431,6 +430,12 @@ def _compute_metrics_from_df(
 	neutral_mean_by_type: Dict[str, float] = {nt: mean_by_type[nt] for nt in neutral_types if nt in mean_by_type}
 
 	mean_by_feature_class: Dict[str, float] = {}
+	min_by_feature_class: Dict[str, float] = {}
+	max_by_feature_class: Dict[str, float] = {}
+	q1_by_feature_class: Dict[str, float] = {}
+	q3_by_feature_class: Dict[str, float] = {}
+	std_by_feature_class: Dict[str, float] = {}
+	n_by_feature_class: Dict[str, int] = {}
 	mean_by_eval_group: Dict[str, float] = {}
 	label_value_to_class_name: Dict[float, str] = {}
 	if "eval_group" in df_for_means.columns and len(df_for_means) > 0:
@@ -445,7 +450,15 @@ def _compute_metrics_from_df(
 	if "source_id" in df_for_means.columns and len(df_for_means) > 0:
 		for fc, grp in df_for_means.groupby("source_id"):
 			if len(grp) > 0:
-				mean_by_feature_class[str(fc)] = float(grp["encoded"].astype(float).mean())
+				encoded = grp["encoded"].astype(float)
+				fc_key = str(fc)
+				mean_by_feature_class[fc_key] = float(encoded.mean())
+				min_by_feature_class[fc_key] = float(encoded.min())
+				max_by_feature_class[fc_key] = float(encoded.max())
+				q1_by_feature_class[fc_key] = float(encoded.quantile(0.25))
+				q3_by_feature_class[fc_key] = float(encoded.quantile(0.75))
+				std_by_feature_class[fc_key] = float(encoded.std(ddof=1)) if len(encoded) > 1 else 0.0
+				n_by_feature_class[fc_key] = int(len(encoded))
 		# Map label -> class name from source_id (factual class). When multiple
 		# feature classes share the same label (e.g. include_other_classes=True),
 		# avoid pretending the aggregate +/-1 mean belongs to one specific class.
@@ -482,6 +495,12 @@ def _compute_metrics_from_df(
 		},
 		"correlation": corr_training,
 		"mean_by_class": mean_by_class,
+		"min_by_class": min_by_class,
+		"max_by_class": max_by_class,
+		"q1_by_class": q1_by_class,
+		"q3_by_class": q3_by_class,
+		"std_by_class": std_by_class,
+		"n_by_class": n_by_class,
 		"mean_by_type": mean_by_type,
 		"abs_mean_by_type": abs_mean_by_type,
 	}
@@ -489,6 +508,12 @@ def _compute_metrics_from_df(
 		result["neutral_mean_by_type"] = neutral_mean_by_type
 	if mean_by_feature_class:
 		result["mean_by_feature_class"] = mean_by_feature_class
+		result["min_by_feature_class"] = min_by_feature_class
+		result["max_by_feature_class"] = max_by_feature_class
+		result["q1_by_feature_class"] = q1_by_feature_class
+		result["q3_by_feature_class"] = q3_by_feature_class
+		result["std_by_feature_class"] = std_by_feature_class
+		result["n_by_feature_class"] = n_by_feature_class
 	if mean_by_eval_group:
 		result["mean_by_eval_group"] = mean_by_eval_group
 	if eval_group_basis:
@@ -497,17 +522,18 @@ def _compute_metrics_from_df(
 		result["label_value_to_class_name"] = label_value_to_class_name
 
 	mean_by_target: Dict[str, Dict[str, float]] = {}
+	target_token_col = "source_token" if "source_token" in df_for_means.columns else "factual_token"
 	if (
-		"factual_token" in df_for_means.columns
+		target_token_col in df_for_means.columns
 		and "source_id" in df_for_means.columns
 		and len(df_for_means) > 0
 	):
-		token_mask = df_for_means["factual_token"].notna() & (
-			df_for_means["factual_token"].astype(str).str.strip() != ""
+		token_mask = df_for_means[target_token_col].notna() & (
+			df_for_means[target_token_col].astype(str).str.strip() != ""
 		)
 		df_targets = df_for_means[token_mask]
 		for (fc, tok), grp in df_targets.groupby(
-			[df_targets["source_id"].astype(str), df_targets["factual_token"].astype(str)],
+			[df_targets["source_id"].astype(str), df_targets[target_token_col].astype(str)],
 			sort=False,
 		):
 			if len(grp) > 0:

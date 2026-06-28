@@ -89,7 +89,7 @@ def test_mlm_mask_token_rejects_t5():
 
 
 def test_clm_next_token_rejects_t5():
-    with pytest.raises(ValueError, match="seq2seq_decoder.*seq2seq_decoder_sequence_cloze.*seq2seq_encoder_mlm"):
+    with pytest.raises(ValueError, match="seq2seq_encoder_mlm.*seq2seq_decoder"):
         validate_prediction_objective_for_model(
             "clm_next_token",
             _T5TokenizerStub(),
@@ -108,6 +108,13 @@ def test_resolve_prediction_objective_auto_does_not_validate_bert():
     assert objective.name == "mlm_mask_token"
 
 
+def test_resolve_prediction_objective_auto_seq2seq_uses_encoder_mlm():
+    trainer = _TrainerStub("auto")
+    objective = resolve_prediction_objective(trainer, _T5TokenizerStub())
+    assert objective.name == "seq2seq_encoder_mlm"
+
+
+@pytest.mark.slow(reason="Loads bert-base-cased tokenizer from Hugging Face cache.")
 @pytest.mark.integration
 def test_trainer_prediction_objective_rejects_bert_with_seq2seq_objective():
     pytest.importorskip("transformers")

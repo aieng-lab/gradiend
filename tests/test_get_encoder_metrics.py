@@ -130,6 +130,40 @@ class TestGetEncoderMetricsFromDataframe:
         assert 0.0 in mean_by_class or 0 in mean_by_class, "mean_by_class must include label 0 (identity)"
         assert 1.0 in mean_by_class or 1 in mean_by_class
         assert -1.0 in mean_by_class or -1 in mean_by_class
+        assert result["min_by_class"][1.0] == pytest.approx(0.5)
+        assert result["max_by_class"][1.0] == pytest.approx(0.5)
+        assert result["min_by_class"][-1.0] == pytest.approx(-0.5)
+        assert result["max_by_class"][-1.0] == pytest.approx(-0.5)
+
+    def test_q1_q3_by_class(self):
+        """q1/q3 by class support IQR bands on convergence plots."""
+        encoder_df = pd.DataFrame({
+            "encoded": [0.2, 0.4, 0.6, -0.6, -0.4, -0.2],
+            "label": [1.0, 1.0, 1.0, -1.0, -1.0, -1.0],
+            "source_id": ["A", "A", "A", "B", "B", "B"],
+            "target_id": ["B", "B", "B", "A", "A", "A"],
+            "type": ["training"] * 6,
+        })
+        result = get_encoder_metrics_from_dataframe(encoder_df)
+        assert result["q1_by_class"][1.0] == pytest.approx(0.3)
+        assert result["q3_by_class"][1.0] == pytest.approx(0.5)
+        assert result["q1_by_class"][-1.0] == pytest.approx(-0.5)
+        assert result["q3_by_class"][-1.0] == pytest.approx(-0.3)
+
+    def test_std_and_n_by_class_for_ci_bands(self):
+        """std/n by class support confidence-interval bands on convergence plots."""
+        encoder_df = pd.DataFrame({
+            "encoded": [0.2, 0.4, 0.6, -0.6, -0.4, -0.2],
+            "label": [1.0, 1.0, 1.0, -1.0, -1.0, -1.0],
+            "source_id": ["A", "A", "A", "B", "B", "B"],
+            "target_id": ["B", "B", "B", "A", "A", "A"],
+            "type": ["training"] * 6,
+        })
+        result = get_encoder_metrics_from_dataframe(encoder_df)
+        assert result["std_by_class"][1.0] == pytest.approx(0.2)
+        assert result["n_by_class"][1.0] == 3
+        assert result["std_by_feature_class"]["A"] == pytest.approx(0.2)
+        assert result["n_by_feature_class"]["A"] == 3
 
     def test_mean_by_feature_class_includes_identity_classes(self):
         """mean_by_feature_class must include identity feature classes for convergence plot."""
@@ -303,6 +337,35 @@ class TestEncoderMetricsDetailed:
         assert abs(mean_by_target["positive"]["amazing"] - 0.6) < 0.01
         assert abs(mean_by_target["negative"]["hate"] - (-0.7)) < 0.01
         assert abs(mean_by_target["negative"]["awful"] - (-0.5)) < 0.01
+
+    def test_mean_by_target_prefers_source_token(self):
+        """Target-level summaries must use the same token semantics as plots.
+
+        These rows mimic source="alternative": the encoded source class is
+        positive/negative, while factual_token still points to the opposite side
+        of the original pair. mean_by_target must therefore aggregate by
+        source_token, otherwise positive would be reported with "bad" and
+        negative with "good".
+        """
+        encoder_df = pd.DataFrame({
+            "encoded": [0.8, -0.7],
+            "label": [1.0, -1.0],
+            "source_id": ["positive", "negative"],
+            "target_id": ["positive", "negative"],
+            "factual_token": ["bad", "good"],
+            "alternative_token": ["good", "bad"],
+            "source_token": ["good", "bad"],
+            "type": ["training", "training"],
+        })
+        result = get_encoder_metrics_from_dataframe(encoder_df)
+        mean_by_target = result.get("mean_by_target", {})
+        # Correct: source-side tokens are grouped under their source class.
+        assert abs(mean_by_target["positive"]["good"] - 0.8) < 0.01
+        assert abs(mean_by_target["negative"]["bad"] - (-0.7)) < 0.01
+        # Regression guard: factual-side tokens must not leak into the opposite
+        # feature class summaries.
+        assert "bad" not in mean_by_target["positive"]
+        assert "good" not in mean_by_target["negative"]
 
     def test_label_value_to_class_name_uses_sign_labels_when_multiple_classes_share_label(self):
         encoder_df = pd.DataFrame({
@@ -561,6 +624,23 @@ class TestEvaluateEncoderWithEncoderDf:
         assert "all_data" in result
         assert "correlation" in result
         assert "mean_by_class" in result
+
+    def test_encoder_evaluator_accepts_training_cache_string_modes(self):
+        """TrainingArguments policy strings must not break artifact cache resolution."""
+        import tempfile
+
+        from gradiend.evaluator.encoder import EncoderEvaluator
+        from tests.test_evaluator import MockTrainer
+
+        evaluator = EncoderEvaluator()
+        with tempfile.TemporaryDirectory() as temp:
+            args = type("Args", (), {"use_cache": False, "experiment_dir": temp, "encoder_eval_max_size": 100})()
+            trainer = MockTrainer(training_args=args)
+            trainer.experiment_dir = temp
+            encoder_df = _make_encoder_df(10)
+
+            result = evaluator.evaluate_encoder(trainer, encoder_df=encoder_df, use_cache="always")
+            assert result["n_samples"] == 10
 
     def test_encoder_evaluator_with_empty_encoder_df_returns_empty(self):
         """EncoderEvaluator.evaluate_encoder(encoder_df=empty) returns n_samples=0, correlation=None."""

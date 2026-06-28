@@ -99,6 +99,46 @@ def test_compute_similarity_matrix_multi_seed_reports_cell_counts_and_stats():
     assert "std" in result["cell_stats"][0][1]
 
 
+def test_compute_similarity_matrix_cosine_uses_aligned_vector_path(monkeypatch):
+    models = {
+        "a": _TinyModel([[1.0, 0.0], [0.0, 1.0]]),
+        "b": _TinyModel([[2.0, 0.0], [0.0, 2.0]]),
+    }
+
+    def fail_sparse_extract(*args, **kwargs):
+        raise AssertionError("aligned cosine should not use sparse block extraction")
+
+    monkeypatch.setattr("gradiend.comparison.similarity._extract_sparse_blocks", fail_sparse_extract)
+
+    result = compute_similarity_matrix(
+        models,
+        measure="cosine",
+        part="decoder-weight",
+    )
+
+    assert result["matrix"][0][1] == pytest.approx(1.0)
+    assert result["resolved_topk"] == {"a": 2, "b": 2}
+
+
+def test_comparison_matrix_from_cell_stat_extracts_std():
+    from gradiend.comparison.common import comparison_matrix_from_cell_stat
+
+    payload = {
+        "measure": "topk_overlap",
+        "model_ids": ["a", "b"],
+        "matrix": [[1.0, 0.5], [0.5, 1.0]],
+        "cell_stats": [
+            [{"aggregate": 1.0, "std": 0.1}, {"aggregate": 0.5, "std": 0.2}],
+            [{"aggregate": 0.5, "std": 0.3}, {"aggregate": 1.0, "std": 0.4}],
+        ],
+    }
+    std_payload = comparison_matrix_from_cell_stat(payload, field="std")
+    assert std_payload["measure"] == "topk_overlap_std"
+    assert std_payload["matrix"][0] == pytest.approx([0.1, 0.2])
+    assert std_payload["matrix"][1] == pytest.approx([0.3, 0.4])
+    assert "cell_stats" not in std_payload
+
+
 def test_grouped_similarity_matrix_groups_by_decoded_layer_names():
     models = {
         "a": _TinyModel([[1.0, 0.0], [1.0, 0.0], [0.0, 1.0], [0.0, 1.0]]),

@@ -11,19 +11,83 @@ from __future__ import annotations
 import json
 import os
 import random
-import sys
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Mapping, Optional, Protocol, Sequence, Tuple, Union
 
 import torch
-from tqdm import tqdm
+from gradiend.util.tqdm_utils import gradiend_tqdm
 
-from gradiend.evaluator.decoder_eval_utils import convert_results_to_dict, convert_results_to_list
+from gradiend.evaluator.decoder_eval_utils import (
+    convert_results_to_dict,
+    convert_results_to_list,
+    parse_grid_candidate_id,
+)
 from gradiend.model import ModelWithGradiend
+from gradiend.model._source_target import (
+    feature_factor_from_encoding_direction,
+    resolve_model_source,
+)
 from gradiend.util.paths import resolve_decoder_grid_cache_path
 from gradiend.util.logging import get_logger
 
 logger = get_logger(__name__)
+
+# Panel keys in probability-shift plots: factual label_class / factual_id only.
+PROBS_BY_DATASET_GROUPING = "label_class"
+
+
+def _refresh_probs_by_dataset_for_plotting(
+    trainer: Any,
+    *,
+    model_with_gradiend: Any,
+    base_model: Any,
+    tokenizer: Any,
+    relevant_results: Dict[Any, Dict[str, Any]],
+    training_like_df: Any,
+    neutral_df: Any,
+    part: str,
+    max_size_training_like: Optional[int] = None,
+    max_size_neutral: Optional[int] = None,
+    eval_batch_size: Optional[int] = None,
+) -> None:
+    """Replace probs_by_dataset on every grid entry using full factual-grouped evaluation.
+
+    Decoder selection may evaluate a row subset; legacy caches may have grouped by
+    alternative_id while using the same key names. Never merge — always replace for plots.
+    """
+    for id_key, entry in list(relevant_results.items()):
+        if id_key == "base":
+            eval_model = base_model
+            rewritten = None
+        else:
+            parsed = parse_grid_candidate_id(id_key, entry)
+            if parsed is None:
+                continue
+            ff, lr = parsed
+            rewritten = model_with_gradiend.rewrite_base_model(
+                learning_rate=lr, feature_factor=ff, part=part,
+            )
+            eval_model = rewritten
+
+        try:
+            result = trainer.evaluate_base_model(
+                eval_model,
+                tokenizer,
+                use_cache=False,
+                training_like_df=training_like_df,
+                neutral_df=neutral_df,
+                max_size_training_like=max_size_training_like,
+                max_size_neutral=max_size_neutral,
+                eval_batch_size=eval_batch_size,
+            )
+        finally:
+            if rewritten is not None:
+                del rewritten
+                torch.cuda.empty_cache()
+
+        if isinstance(result, dict) and result.get("probs_by_dataset"):
+            entry["probs_by_dataset"] = result["probs_by_dataset"]
+            entry["_probs_by_dataset_grouping"] = PROBS_BY_DATASET_GROUPING
 
 
 def _plot_all_target_classes(
@@ -36,6 +100,7 @@ def _plot_all_target_classes(
     show: Optional[bool] = None,
     increase_target_probabilities: bool = True,
     plot_keys_override: Optional[List[str]] = None,
+    plot_kwargs: Optional[Dict[str, Any]] = None,
 ) -> List[str]:
     """Plot probability shifts once per target class for the given direction. Returns list of saved plot paths.
     When show is None and plot was requested, defaults to True so the plot is displayed.
@@ -52,7 +117,12 @@ def _plot_all_target_classes(
     decoder_results = {**summary, "grid": relevant_results}
     cfg = getattr(trainer, "config", None)
     img_format = getattr(cfg, "img_format", "png") if cfg else "png"
-    do_show = show if show is not None else True
+    base_plot_kwargs = dict(plot_kwargs or {})
+    if show is not None:
+        base_plot_kwargs["show"] = show
+    elif "show" not in base_plot_kwargs:
+        base_plot_kwargs["show"] = True
+    base_plot_kwargs.setdefault("img_format", img_format)
     paths: List[str] = []
     for key in plot_keys:
         target_class = key[:-7] if key.endswith("_weaken") else key
@@ -61,12 +131,14 @@ def _plot_all_target_classes(
             safe_name = str(target_class).replace("/", "_").replace("\\", "_").replace(":", "_")
             out_dir = os.path.join(experiment_dir, run_id or "")
             output_path = os.path.join(out_dir, f"decoder_probability_shifts_{safe_name}.{img_format}")
+        call_kwargs = dict(base_plot_kwargs)
+        if output_path is not None:
+            call_kwargs["output"] = output_path
         path = trainer.plot_probability_shifts(
             decoder_results=decoder_results,
             target_class=target_class,
             increase_target_probabilities=increase_target_probabilities,
-            output=output_path,
-            show=do_show,
+            **call_kwargs,
         )
         if path:
             paths.append(path)
@@ -74,7 +146,7 @@ def _plot_all_target_classes(
 
 
 # ============================
-# Feature-factor defaults
+# Feature-factor defaults (contract: gradiend.model._source_target)
 # ============================
 
 
@@ -86,8 +158,10 @@ def derive_default_feature_factor(
     """
     Derive a single default feature factor for decoder eval.
 
-    Rule: feature_factor = - feature_class_encoding_direction[class_name]
-    when available.
+    CONTRACT (do not change without explicit design review):
+    - ``factual`` / ``diff``: ``ff = -feature_class_encoding_direction[class_name]``.
+    - ``alternative``: ``ff = +feature_class_encoding_direction[class_name]``.
+    - Rewrite orientation is **only** this ``feature_factor`` × decoder(latent); never flip LR.
 
     Args:
         trainer: Trainer-like object used as fallback for model loading and
@@ -114,8 +188,9 @@ def derive_default_feature_factor(
         raise ValueError("class_name is required to derive a default feature factor.")
 
     direction = getattr(model, "feature_class_encoding_direction", None) if model is not None else None
+    source = resolve_model_source(model, trainer)
     if isinstance(direction, dict) and class_name in direction:
-        return float(-direction[class_name])
+        return feature_factor_from_encoding_direction(direction[class_name], source)
 
     # Fallback: derive from trainer.pair when model was created before data load (e.g. in-memory after train)
     pair = getattr(trainer, "pair", None)
@@ -126,7 +201,7 @@ def derive_default_feature_factor(
             if c not in class_labels:
                 class_labels[c] = 0.0
         if class_name in class_labels:
-            return float(-class_labels[class_name])
+            return feature_factor_from_encoding_direction(class_labels[class_name], source)
 
     raise ValueError(
         "Cannot derive default feature factor for class '%s': model does not have feature_class_encoding_direction (%s) or class not found in it." % (class_name, direction)
@@ -327,6 +402,9 @@ def compute_metric_summaries(
     """
     Summarize multiple metrics in one pass.
 
+    For strengthen metrics (e.g. ``"3SG"``): only consider candidates whose
+    ``feature_factor`` strengthens that class (``class_to_ff[metric]``).
+
     For metrics ending in "_weaken" (e.g. "3PL_weaken"): only consider candidates whose
     feature_factor pushes toward the *other* class (weaken = use opposite direction).
     class_to_ff must map class_name -> feature_factor that strengthens it. The weaken
@@ -345,8 +423,8 @@ def compute_metric_summaries(
         lr_from_id: Function extracting learning rate from a candidate id.
         empty_default_id: Fallback id used when no candidate can be selected.
         class_to_ff: Optional mapping from class id to its strengthening feature
-            factor. Used to restrict weaken summaries to candidates that push
-            toward another class.
+            factor. Used to restrict strengthen and weaken summaries to candidates
+            with the correct rewrite orientation per class.
 
     Returns:
       {metric: {"value", "feature_factor", "learning_rate", "id", "strengthen"}}
@@ -376,16 +454,22 @@ def compute_metric_summaries(
         return min(non_zero, key=lambda c: abs(lr_from_id(c.id)))
 
     def _candidates_for_metric(metric: str) -> List[Candidate]:
-        if not metric.endswith("_weaken") or not class_to_ff:
+        if not class_to_ff:
             return list(candidates)
-        base = metric[:-7]
-        strengthen_ff = class_to_ff.get(base)
+        if metric.endswith("_weaken"):
+            base = metric[:-7]
+            strengthen_ff = class_to_ff.get(base)
+            if strengthen_ff is None:
+                return list(candidates)
+            other_ffs = {float(ff) for cls, ff in class_to_ff.items() if cls != base}
+            if not other_ffs:
+                return list(candidates)
+            return [c for c in candidates if feature_factor_from_id(c.id) in other_ffs]
+        strengthen_ff = class_to_ff.get(metric)
         if strengthen_ff is None:
             return list(candidates)
-        other_ffs = {float(ff) for cls, ff in class_to_ff.items() if cls != base}
-        if not other_ffs:
-            return list(candidates)
-        return [c for c in candidates if feature_factor_from_id(c.id) in other_ffs]
+        target_ff = float(strengthen_ff)
+        return [c for c in candidates if float(feature_factor_from_id(c.id)) == target_ff]
 
     # Basic sanity: we must have a valid base LMS for LMS-aware policies.
     if ctx.base_lms is None:
@@ -401,6 +485,12 @@ def compute_metric_summaries(
         if chosen is None:
             chosen = _fallback_when_none(filtered) if filtered else None
         if chosen is None:
+            if not metric.endswith("_weaken") and class_to_ff and metric in class_to_ff:
+                raise ValueError(
+                    "No decoder grid candidates for strengthen %r with feature_factor %s. "
+                    "Re-run evaluate_decoder(target_class=%r, use_cache=False)."
+                    % (metric, class_to_ff[metric], metric)
+                )
             summary[metric] = {
                 "value": 0.0,
                 "feature_factor": 0.0,
@@ -418,7 +508,6 @@ def compute_metric_summaries(
             "learning_rate": float(lr_from_id(chosen.id)),
             "id": chosen.id,
             "strengthen": not metric.endswith("_weaken"),
-            # expose LMS information for inspection/debugging
             "lms": float(chosen.lms),
             "base_lms": float(ctx.base_lms),
         }
@@ -461,6 +550,7 @@ class DecoderEvaluator:
         increase_target_probabilities: bool = True,
         plot: bool = False,
         show: Optional[bool] = None,
+        plot_kwargs: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         Run decoder grid evaluation and return summary + grid for one direction (strengthen or weaken).
@@ -505,6 +595,9 @@ class DecoderEvaluator:
                 update cache incrementally, then call the trainer's plot_probability_shifts.
             show: If True, display the plot (e.g. plt.show()). If False, only save to file. When None
                 and plot=True, defaults to True (same as evaluate_encoder: plot implies show).
+            plot_kwargs: Optional dict of options forwarded to plot_probability_shifts when plot=True.
+                E.g. plot_kwargs=dict(figsize=(5, 3), show=False). The evaluate_decoder ``show`` argument
+                overrides plot_kwargs[\"show\"] when set.
 
         Returns:
             Flat dict with:
@@ -517,7 +610,7 @@ class DecoderEvaluator:
               - When plot=True, also 'plot_paths' and 'plot_path'.
         """
         logger.info(f"Starting decoder evaluation with part={part}")
-        use_cache = trainer._default_from_training_args(use_cache, "use_cache", fallback=False)
+        use_cache = trainer._resolve_artifact_use_cache(use_cache, fallback=False)
 
         if selector is None:
             selector = LMSThresholdPolicy(ratio=0.99)
@@ -549,47 +642,45 @@ class DecoderEvaluator:
         # other class (e.g. "3PL"). We expose the result under the target class the user asked for
         # (e.g. "3SG") and hide the internal key so the API matches user intent.
         summary_key_aliases: Optional[Dict[str, str]] = None
+        prob_on_other_class = getattr(
+            getattr(trainer, "config", None), "decoder_eval_prob_on_other_class", True
+        )
+        _, decoder_row_wise = trainer._resolve_decoder_eval_targets(training_like_df=None)
         if summary_metrics is None and classes_to_eval:
             if increase_target_probabilities:
-                required_for_strengthen = {d for c in classes_to_eval for d in (tcs - {c})}
-                metrics_for_summary = list(required_for_strengthen)
-                summary_key_aliases = {
-                    c: (tcs - {c}).pop() for c in classes_to_eval if len(tcs - {c}) == 1
-                }
+                if prob_on_other_class and not decoder_row_wise:
+                    # probs[target] is P(target) on the other class's factual dataset.
+                    metrics_for_summary = list(classes_to_eval)
+                else:
+                    required_for_strengthen = {d for c in classes_to_eval for d in (tcs - {c})}
+                    metrics_for_summary = list(required_for_strengthen)
+                    summary_key_aliases = {
+                        c: (tcs - {c}).pop() for c in classes_to_eval if len(tcs - {c}) == 1
+                    }
             else:
                 # Weaken only: keys "3SG_weaken", "3PL_weaken"
                 metrics_for_summary = [f"{c}_weaken" for c in classes_to_eval]
 
-        # Map class -> feature_factor that strengthens it; used to restrict _weaken summaries
+        # Per-class strengthen ff (see gradiend.model._source_target module docstring).
         class_to_ff: Optional[Dict[str, float]] = None
-        if target_classes and any(m.endswith("_weaken") for m in metrics_for_summary):
+        if target_classes:
             class_to_ff = {
                 cls: derive_feature_factor_for_class(trainer, raw_model, cls)
                 for cls in target_classes
             }
 
         if feature_factors is None:
-            if summary_metrics is not None:
-                feature_factors = default_decoder_feature_factors(trainer, raw_model)
-            elif classes_to_eval and target_classes:
-                if increase_target_probabilities:
-                    # Strengthen: use feature factors that strengthen each class in classes_to_eval
-                    feature_factors = [
-                        derive_feature_factor_for_class(trainer, raw_model, c)
-                        for c in classes_to_eval
-                    ]
-                    feature_factors = list(dict.fromkeys(feature_factors))
-                else:
-                    # Weaken only: use feature factors that weaken each class = strengthen the other class
-                    other_per_class = {
-                        c: [o for o in target_classes if o != c] for c in classes_to_eval
-                    }
-                    feature_factors = []
-                    for c in classes_to_eval:
-                        for o in other_per_class[c]:
-                            ff = derive_feature_factor_for_class(trainer, raw_model, o)
-                            if ff not in feature_factors:
-                                feature_factors.append(ff)
+            if increase_target_probabilities and classes_to_eval and class_to_ff:
+                feature_factors = list(dict.fromkeys(class_to_ff[c] for c in classes_to_eval))
+            elif not increase_target_probabilities and classes_to_eval and class_to_ff:
+                feature_factors = []
+                for c in classes_to_eval:
+                    for o in target_classes:
+                        if o == c:
+                            continue
+                        ff = class_to_ff[o]
+                        if ff not in feature_factors:
+                            feature_factors.append(ff)
                 if not feature_factors:
                     feature_factors = default_decoder_feature_factors(trainer, raw_model)
             else:
@@ -607,6 +698,7 @@ class DecoderEvaluator:
                 m * 10 ** e
                 for e in range(2, -4, -1)
                 for m in [5, 2, 1]
+                if m * 10 ** e <= 100
             ]
 
         experiment_dir = trainer.experiment_dir
@@ -622,6 +714,12 @@ class DecoderEvaluator:
         pairs = [(ff, lr) for ff in feature_factors for lr in lrs]
         pairs = sorted(pairs)  # deterministic order for reproducible decoder evaluation
         expected_results = len(pairs) + 1
+        logger.info(
+            "Decoder eval feature_factors=%s class_to_ff=%s source=%s",
+            list(feature_factors),
+            class_to_ff,
+            getattr(raw_model, "source", None),
+        )
 
         relevant_results: Dict[Any, Dict[str, Any]] = {}
         all_results: Dict[Any, Dict[str, Any]] = {}
@@ -680,52 +778,20 @@ class DecoderEvaluator:
                         )
                         full_training_like_df = training_like_df
                         dataset_class_col = "label_class" if "label_class" in getattr(training_like_df, "columns", []) else "factual_id"
-                        # Jump to fill-in and plot (avoid re-running grid)
                         if full_training_like_df is not None and dataset_class_col in getattr(full_training_like_df, "columns", []):
-                            all_dataset_classes = set(
-                                full_training_like_df[dataset_class_col].dropna().astype(str).unique()
+                            _refresh_probs_by_dataset_for_plotting(
+                                trainer,
+                                model_with_gradiend=model_with_gradiend,
+                                base_model=base_model,
+                                tokenizer=tokenizer,
+                                relevant_results=relevant_results,
+                                training_like_df=full_training_like_df,
+                                neutral_df=neutral_df,
+                                part=part,
+                                max_size_training_like=max_size_training_like,
+                                max_size_neutral=max_size_neutral,
+                                eval_batch_size=eval_batch_size,
                             )
-                            for id_key, entry in list(relevant_results.items()):
-                                have = entry.get("probs_by_dataset") or {}
-                                if all_dataset_classes <= set(have.keys()):
-                                    continue
-                                if id_key == "base":
-                                    base_results = trainer.evaluate_base_model(
-                                        base_model,
-                                        tokenizer,
-                                        use_cache=False,
-                                        training_like_df=full_training_like_df,
-                                        neutral_df=neutral_df,
-                                        max_size_training_like=max_size_training_like,
-                                        max_size_neutral=max_size_neutral,
-                                        eval_batch_size=eval_batch_size,
-                                    )
-                                    if base_results.get("probs_by_dataset"):
-                                        entry["probs_by_dataset"] = base_results["probs_by_dataset"]
-                                    continue
-                                ff = id_key[0] if isinstance(id_key, tuple) and len(id_key) == 2 else entry.get("id", {}).get("feature_factor")
-                                lr = id_key[1] if isinstance(id_key, tuple) and len(id_key) == 2 else entry.get("id", {}).get("learning_rate")
-                                if ff is None or lr is None:
-                                    continue
-                                modified_model = model_with_gradiend.rewrite_base_model(
-                                    learning_rate=lr, feature_factor=ff, part=part,
-                                )
-                                extra = trainer.evaluate_base_model(
-                                    modified_model,
-                                    tokenizer,
-                                    use_cache=False,
-                                    training_like_df=full_training_like_df,
-                                    neutral_df=neutral_df,
-                                    max_size_training_like=max_size_training_like,
-                                    max_size_neutral=max_size_neutral,
-                                    eval_batch_size=eval_batch_size,
-                                )
-                                if extra.get("probs_by_dataset"):
-                                    merged = dict(have)
-                                    merged.update(extra["probs_by_dataset"])
-                                    entry["probs_by_dataset"] = merged
-                                del modified_model
-                                torch.cuda.empty_cache()
                         if cache_file:
                             try:
                                 payload_update = {
@@ -748,9 +814,10 @@ class DecoderEvaluator:
                                     relevant_results,
                                     experiment_dir=getattr(trainer, "experiment_dir", None),
                                     run_id=run_id,
-                                    show=show if show is not None else True,
+                                    show=show,
                                     increase_target_probabilities=increase_target_probabilities,
                                     plot_keys_override=plot_keys_override,
+                                    plot_kwargs=plot_kwargs,
                                 )
                             except ImportError as e:
                                 logger.warning("Skipping decoder probability-shift plots: %s", e)
@@ -835,7 +902,12 @@ class DecoderEvaluator:
             all_results["base"] = base_results
             relevant_results["base"] = base_results
 
-        for feature_factor, lr in tqdm(pairs, desc=f"Evaluate GRADIEND {run_id or ''}", total=len(pairs), position=0, dynamic_ncols=True, disable=not sys.stderr.isatty()):
+        for feature_factor, lr in gradiend_tqdm(
+            pairs,
+            desc=f"Evaluate GRADIEND {run_id or ''}",
+            total=len(pairs),
+            position=0,
+        ):
             id_key = (feature_factor, lr)
             if id_key in relevant_results and use_cache:
                 continue
@@ -891,53 +963,20 @@ class DecoderEvaluator:
                     summary.pop(k, None)
 
         plot_paths: List[str] = []
-        # If plot requested, fill missing probs_by_dataset (incremental cache) then plot.
         if plot and full_training_like_df is not None and dataset_class_col in getattr(full_training_like_df, "columns", []):
-            all_dataset_classes = set(
-                full_training_like_df[dataset_class_col].dropna().astype(str).unique()
+            _refresh_probs_by_dataset_for_plotting(
+                trainer,
+                model_with_gradiend=model_with_gradiend,
+                base_model=base_model,
+                tokenizer=tokenizer,
+                relevant_results=relevant_results,
+                training_like_df=full_training_like_df,
+                neutral_df=neutral_df,
+                part=part,
+                max_size_training_like=max_size_training_like,
+                max_size_neutral=max_size_neutral,
+                eval_batch_size=eval_batch_size,
             )
-            for id_key, entry in list(relevant_results.items()):
-                have = entry.get("probs_by_dataset") or {}
-                missing = all_dataset_classes - set(have.keys())
-                if not missing:
-                    continue
-                if id_key == "base":
-                    base_results = trainer.evaluate_base_model(
-                        base_model,
-                        tokenizer,
-                        use_cache=False,
-                        training_like_df=full_training_like_df,
-                        neutral_df=neutral_df,
-                        max_size_training_like=max_size_training_like,
-                        max_size_neutral=max_size_neutral,
-                        eval_batch_size=eval_batch_size,
-                    )
-                    if base_results.get("probs_by_dataset"):
-                        entry["probs_by_dataset"] = base_results["probs_by_dataset"]
-                    continue
-                ff = id_key[0] if isinstance(id_key, tuple) and len(id_key) == 2 else entry.get("id", {}).get("feature_factor")
-                lr = id_key[1] if isinstance(id_key, tuple) and len(id_key) == 2 else entry.get("id", {}).get("learning_rate")
-                if ff is None or lr is None:
-                    continue
-                modified_model = model_with_gradiend.rewrite_base_model(
-                    learning_rate=lr, feature_factor=ff, part=part,
-                )
-                extra = trainer.evaluate_base_model(
-                    modified_model,
-                    tokenizer,
-                    use_cache=False,
-                    training_like_df=full_training_like_df,
-                    neutral_df=neutral_df,
-                    max_size_training_like=max_size_training_like,
-                    max_size_neutral=max_size_neutral,
-                    eval_batch_size=eval_batch_size,
-                )
-                if extra.get("probs_by_dataset"):
-                    merged = dict(have)
-                    merged.update(extra["probs_by_dataset"])
-                    entry["probs_by_dataset"] = merged
-                del modified_model
-                torch.cuda.empty_cache()
             if cache_file:
                 try:
                     payload = {
@@ -959,9 +998,10 @@ class DecoderEvaluator:
                         relevant_results,
                         experiment_dir=getattr(trainer, "experiment_dir", None),
                         run_id=run_id,
-                        show=show if show is not None else True,
+                        show=show,
                         increase_target_probabilities=increase_target_probabilities,
                         plot_keys_override=plot_keys_override,
+                        plot_kwargs=plot_kwargs,
                     )
                 except ImportError as e:
                     logger.warning("Skipping decoder probability-shift plots: %s", e)
@@ -1024,9 +1064,9 @@ class DecoderEvaluator:
                 When the selector returns None, we first try the candidate with learning_rate != 0 and smallest
                 absolute value; only if none exists do we use this default (representing the base model).
             class_to_ff: Optional mapping from class id to the feature factor
-                that strengthens it. Used for ``*_weaken`` metrics so weakening
-                one class only considers candidates that strengthen another
-                class.
+                that strengthens it. Used for strengthen and ``*_weaken`` metrics
+                so each summary only considers candidates with the correct
+                rewrite orientation for that class.
 
         Returns:
             A dict keyed by metric name with values containing selected metric

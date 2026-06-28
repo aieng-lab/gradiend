@@ -5,6 +5,8 @@ Provides mock models, tokenizers, and common test utilities.
 """
 
 import os
+import gc
+from pathlib import Path
 
 # Use non-interactive backend for any tests that use matplotlib (headless/CI)
 os.environ.setdefault("MPLBACKEND", "Agg")
@@ -20,6 +22,81 @@ import torch.nn as nn
 os.environ["CUDA_VISIBLE_DEVICES"] = ""
 if torch.cuda.is_available():
     torch.cuda.set_device(torch.device("cpu"))
+
+
+def _close_matplotlib_figures() -> None:
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError:
+        return
+    plt.close("all")
+
+
+@pytest.fixture(autouse=True)
+def _release_test_memory():
+    """Close matplotlib figures between tests (full suite can otherwise grow)."""
+    yield
+    _close_matplotlib_figures()
+    if os.environ.get("GRADIEND_GC_EACH_TEST") == "1":
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+
+def pytest_configure(config):
+    repo_basetemp = Path(__file__).resolve().parents[1] / ".pytest_tmp_local"
+    repo_basetemp.mkdir(parents=True, exist_ok=True)
+    config.option.basetemp = str(repo_basetemp)
+
+    if os.environ.get("GRADIEND_PROFILE_TEST_MEMORY") != "1":
+        return
+    config.pluginmanager.register(_MemoryProfiler(), "gradiend_memory_profiler")
+
+
+class _MemoryProfiler:
+    """Log per-test RSS deltas when GRADIEND_PROFILE_TEST_MEMORY=1 is set."""
+
+    def __init__(self):
+        self._rss_before = 0
+
+    @pytest.hookimpl(hookwrapper=True)
+    def pytest_runtest_protocol(self, item, nextitem):
+        import gc
+
+        try:
+            import psutil
+        except ImportError:
+            yield
+            return
+
+        gc.collect()
+        proc = psutil.Process()
+        self._rss_before = proc.memory_info().rss
+        yield
+        gc.collect()
+        rss_after = proc.memory_info().rss
+        delta_mb = (rss_after - self._rss_before) / (1024 * 1024)
+        total_mb = rss_after / (1024 * 1024)
+        threshold = float(os.environ.get("GRADIEND_PROFILE_TEST_MEMORY_MB", "100"))
+        if delta_mb >= threshold:
+            print(
+                f"\n[mem] +{delta_mb:.1f} MB (total {total_mb:.1f} MB): {item.nodeid}",
+                flush=True,
+            )
+
+
+def bind_trainer_cache_resolver(trainer_stub):
+    """Attach artifact cache resolution to lightweight decoder-eval test doubles."""
+    from unittest.mock import MagicMock
+
+    from gradiend.trainer.core.feature_definition import FeatureLearningDefinition
+
+    if not hasattr(trainer_stub, "_training_args") or trainer_stub._training_args is None:
+        trainer_stub._training_args = MagicMock()
+    trainer_stub._resolve_artifact_use_cache = (
+        FeatureLearningDefinition._resolve_artifact_use_cache.__get__(trainer_stub)
+    )
+    return trainer_stub
 
 
 class SimpleMockModel(nn.Module):

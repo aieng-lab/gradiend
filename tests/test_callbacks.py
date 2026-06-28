@@ -155,8 +155,22 @@ class TestNormalizationCallback:
         model.gradiend.latent_dim = 1
         model.invert_encoding = MagicMock()
 
-        eval_result = {"correlation": -0.7, "mean_by_class": {1.0: 0.5, -1.0: -0.5}}
-        training_stats = {"scores": {100: -0.7}, "mean_by_class": {100: eval_result["mean_by_class"]}}
+        eval_result = {
+            "correlation": -0.7,
+            "mean_by_class": {1.0: 0.5, -1.0: -0.5},
+            "min_by_class": {1.0: 0.4, -1.0: -0.6},
+            "max_by_class": {1.0: 0.6, -1.0: -0.4},
+            "q1_by_class": {1.0: 0.45, -1.0: -0.55},
+            "q3_by_class": {1.0: 0.55, -1.0: -0.45},
+        }
+        training_stats = {
+            "scores": {100: -0.7},
+            "mean_by_class": {100: eval_result["mean_by_class"]},
+            "min_by_class": {100: eval_result["min_by_class"]},
+            "max_by_class": {100: eval_result["max_by_class"]},
+            "q1_by_class": {100: eval_result["q1_by_class"]},
+            "q3_by_class": {100: eval_result["q3_by_class"]},
+        }
 
         callback.on_step_end(
             step=100, loss=0.5, model=model, config={}, training_stats=training_stats,
@@ -168,6 +182,11 @@ class TestNormalizationCallback:
         assert training_stats["correlation"] == pytest.approx(0.7)
         assert training_stats["scores"][100] == pytest.approx(0.7)
         assert eval_result["mean_by_class"][1.0] == pytest.approx(-0.5)
+        assert eval_result["min_by_class"][1.0] == pytest.approx(-0.6)
+        assert eval_result["max_by_class"][1.0] == pytest.approx(-0.4)
+        assert training_stats["min_by_class"][100][1.0] == pytest.approx(-0.6)
+        assert eval_result["q1_by_class"][1.0] == pytest.approx(-0.55)
+        assert eval_result["q3_by_class"][1.0] == pytest.approx(-0.45)
 
     def test_normalization_callback_no_inversion_on_positive_correlation(self):
         """Test that normalization doesn't invert when correlation >= -0.6."""

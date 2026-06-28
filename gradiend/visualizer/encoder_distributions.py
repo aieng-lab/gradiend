@@ -271,7 +271,7 @@ def plot_encoder_distributions(
         title,
         trainer=trainer,
         highlight_non_convergence=highlight,
-        default=str(run_id) if run_id else "Encoder distributions",
+        default=str(run_id) if run_id else None,
     )
 
     if encoder_df is None:

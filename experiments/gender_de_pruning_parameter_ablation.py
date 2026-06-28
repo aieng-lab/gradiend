@@ -1,10 +1,18 @@
 """
 Small German DE pruning-parameter ablations.
 
-This is the lightweight first pass before the large pre_topk x post_topk grid:
+Default pre-prune mode (mask recall): train one no-pre baseline, run ``pre_prune()``
+per config, and report mask recall |M_config INTERSECT T_ref| / topk_eval vs the
+baseline oracle top-1000 decoder weights. No GRADIEND training per pre-prune cell.
 
-- pre-prune ablation: n_samples x source x pre_topk, with no post-pruning
-- post-prune part ablation: part x post_topk, trained once then post-pruned
+**--full-grid** pre mode trains and evaluates encoder/decoder for every cell instead.
+
+Also supports post-prune part ablation (--mode post-part): part x post_topk, trained once
+then post-pruned.
+
+This is the lightweight first pass before the large pre_topk x post_topk grid in
+``gender_de_pruning_analysis.py``. Multi-pair recall screening with all der<->die pairs
+lives in ``gender_de_pre_prune_topk_ablation.py``.
 
 Results are saved incrementally so interrupted runs can resume.
 """
@@ -16,9 +24,10 @@ import gc
 import json
 import math
 import os
+import sys
 import time
 from dataclasses import asdict, dataclass
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 import torch
 from matplotlib import pyplot as plt
@@ -30,6 +39,15 @@ from gradiend.trainer.core.stats import load_training_stats
 from gradiend.util.logging import get_logger
 from gradiend.util.paths import ARTIFACT_MODEL, resolve_output_path
 from gradiend.util.runtime_monitor import CudaMemorySpan
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from pre_prune_mask_recall import (  # noqa: E402
+    TOPK_EVAL,
+    TOPK_PART,
+    all_kept_base_global as _all_kept_base_global,
+    ref_recall_metrics as _ref_recall_metrics,
+    topk_base_global as _topk_base_global,
+)
 
 logger = get_logger(__name__)
 
@@ -266,6 +284,9 @@ class AblationResult:
     post_pruning_max_gpu_reserved_bytes: Optional[int] = None
     eval_max_gpu_allocated_bytes: Optional[int] = None
     eval_max_gpu_reserved_bytes: Optional[int] = None
+    ref_recall: Optional[float] = None
+    ref_precision: Optional[float] = None
+    mask_recall: bool = False
     error: Optional[str] = None
 
 
@@ -314,8 +335,121 @@ def _append_result(results: List[AblationResult], result: AblationResult, path: 
     _save_results(results, path)
 
 
-def _has_success(results: List[AblationResult], ablation: str, run_id: str) -> bool:
-    return any(r.ablation == ablation and r.run_id == run_id and r.error is None for r in results)
+def _has_success(
+    results: List[AblationResult],
+    ablation: str,
+    run_id: str,
+    *,
+    recall_only: bool = True,
+) -> bool:
+    for row in results:
+        if row.ablation != ablation or row.run_id != run_id or row.error:
+            continue
+        if recall_only:
+            if row.mask_recall and row.ref_recall is not None:
+                return True
+            continue
+        if row.mask_recall:
+            continue
+        return row.encoder_correlation is not None
+    return False
+
+
+def _baseline_oracle_topk(model: Any) -> Set[int]:
+    return _topk_base_global(model, topk=TOPK_EVAL, part=TOPK_PART)
+
+
+def _train_pre_baseline(
+    *,
+    output_dir: str,
+    pair: Tuple[str, str],
+    args_base: Dict[str, Any],
+) -> Tuple[Any, float]:
+    run_id = _pre_baseline_run_id()
+    trainer = _build_trainer(
+        run_id=run_id,
+        pair=pair,
+        args=TrainingArguments(**args_base),
+    )
+    try:
+        with CudaMemorySpan():
+            training_time = _train_and_get_time(trainer, output_dir, run_id)
+    finally:
+        trainer.unload_model()
+        _clear_cuda_memory()
+
+    eval_trainer = _build_trainer(
+        run_id=run_id,
+        pair=pair,
+        args=TrainingArguments(**args_base),
+    )
+    try:
+        model = eval_trainer.load_model(_checkpoint_path(output_dir, run_id))
+        return model, training_time
+    finally:
+        eval_trainer.unload_model()
+
+
+def _ensure_baseline_oracle(
+    *,
+    output_dir: str,
+    results_path: str,
+    pair: Tuple[str, str],
+    args_base: Dict[str, Any],
+    results: List[AblationResult],
+) -> Optional[Set[int]]:
+    run_id = _pre_baseline_run_id()
+    checkpoint_path = _checkpoint_path(output_dir, run_id)
+    if os.path.isdir(checkpoint_path):
+        eval_trainer = _build_trainer(
+            run_id=run_id,
+            pair=pair,
+            args=TrainingArguments(**args_base),
+        )
+        try:
+            model = eval_trainer.load_model(checkpoint_path)
+            return _baseline_oracle_topk(model)
+        finally:
+            eval_trainer.unload_model()
+            _clear_cuda_memory()
+
+    logger.info("Training pre ablation baseline for mask-recall oracle.")
+    model = None
+    try:
+        model, training_time = _train_pre_baseline(
+            output_dir=output_dir,
+            pair=pair,
+            args_base=args_base,
+        )
+        ref_topk = _baseline_oracle_topk(model)
+        gradiend_num_params, base_model_num_params = _model_param_counts(model)
+        baseline = AblationResult(
+            ablation="pre",
+            run_id=run_id,
+            pre_topk=1.0,
+            post_topk=1.0,
+            ref_recall=1.0,
+            ref_precision=1.0,
+            gradiend_num_params=gradiend_num_params,
+            base_model_num_params=base_model_num_params,
+            training_time_s=training_time,
+        )
+        _append_result(results, baseline, results_path)
+        return ref_topk
+    except Exception as exc:
+        logger.exception("Pre ablation baseline run failed: %s", run_id)
+        failed = AblationResult(
+            ablation="pre",
+            run_id=run_id,
+            pre_topk=1.0,
+            post_topk=1.0,
+            error=str(exc),
+        )
+        _append_result(results, failed, results_path)
+        return None
+    finally:
+        del model
+        _clear_cuda_memory()
 
 
 def _csv_floats(value: str) -> List[float]:
@@ -351,14 +485,89 @@ def run_pre_ablation(
     sources: Iterable[str],
     pre_topk_values: Iterable[float],
     max_size: int = 200,
+    recall_only: bool = True,
 ) -> List[AblationResult]:
     results = _load_results(results_path)
     args_base = _base_args(output_dir)
 
+    if recall_only:
+        ref_topk = _ensure_baseline_oracle(
+            output_dir=output_dir,
+            results_path=results_path,
+            pair=pair,
+            args_base=args_base,
+            results=results,
+        )
+        if not ref_topk:
+            return results
+
+        for topk in pre_topk_values:
+            if isinstance(topk, float) and math.isclose(topk, 1.0):
+                continue
+            for source in sources:
+                for n_samples in n_samples_values:
+                    run_id = _pre_run_id(source, n_samples, topk)
+                    if _has_success(results, "pre", run_id, recall_only=True):
+                        logger.info("Skipping cached mask-recall pre ablation run %s.", run_id)
+                        continue
+
+                    logger.info(
+                        "Mask-recall pre ablation: source=%s n_samples=%s pre_topk=%s.",
+                        source,
+                        n_samples,
+                        f"{topk:g}",
+                    )
+                    result = AblationResult(
+                        ablation="pre",
+                        run_id=run_id,
+                        pre_topk=topk,
+                        pre_source=source,
+                        pre_n_samples=n_samples,
+                        post_topk=1.0,
+                        mask_recall=True,
+                    )
+                    trainer = None
+                    try:
+                        pre_cfg = PrePruneConfig(
+                            n_samples=n_samples,
+                            topk=topk,
+                            source=source,
+                            seed=PRE_PRUNE_SEED,
+                        )
+                        args = TrainingArguments(
+                            **args_base,
+                            pre_prune_config=pre_cfg,
+                            reuse_pre_prune=True,
+                        )
+                        trainer = _build_trainer(run_id=run_id, pair=pair, args=args)
+                        pre_prune_start = time.perf_counter()
+                        with CudaMemorySpan() as memory_span:
+                            base_input_dim = int(trainer.get_model().gradiend.input_dim)
+                            trainer.pre_prune(inplace=False)
+                        result.pre_pruning_time_s = time.perf_counter() - pre_prune_start
+                        _record_cuda_memory_span(result, "pre_pruning", memory_span)
+                        model = trainer.get_model()
+                        heuristic_topk = _all_kept_base_global(model)
+                        ref_recall, ref_precision = _ref_recall_metrics(heuristic_topk, ref_topk)
+                        gradiend_num_params, base_model_num_params = _model_param_counts(model)
+                        result.ref_recall = ref_recall
+                        result.ref_precision = ref_precision
+                        result.gradiend_num_params = gradiend_num_params
+                        result.base_model_num_params = base_model_num_params
+                    except Exception as exc:
+                        logger.exception("Mask-recall pre ablation run failed: %s", run_id)
+                        result.error = str(exc)
+                    finally:
+                        if trainer is not None:
+                            trainer.unload_model()
+                        _clear_cuda_memory()
+                    _append_result(results, result, results_path)
+        return results
+
     for topk in pre_topk_values:
         if isinstance(topk, float) and math.isclose(topk, 1.0):
             run_id = _pre_baseline_run_id()
-            if _has_success(results, "pre", run_id):
+            if _has_success(results, "pre", run_id, recall_only=False):
                 logger.info("Skipping cached pre ablation baseline (no pre-prune).")
                 continue
 
@@ -425,7 +634,7 @@ def run_pre_ablation(
         for source in sources:
             for n_samples in n_samples_values:
                 run_id = _pre_run_id(source, n_samples, topk)
-                if _has_success(results, "pre", run_id):
+                if _has_success(results, "pre", run_id, recall_only=False):
                     logger.info("Skipping cached pre ablation run %s.", run_id)
                     continue
 
@@ -630,8 +839,11 @@ def plot_pre_metric(
     *,
     metric: str,
     output_path: str,
+    mask_recall_only: bool = False,
 ) -> None:
     rows = [r for r in results if r.ablation == "pre" and r.error is None]
+    if mask_recall_only:
+        rows = [r for r in rows if r.mask_recall or (r.pre_topk is not None and math.isclose(r.pre_topk, 1.0))]
     n_samples_values = sorted({r.pre_n_samples for r in rows if r.pre_n_samples is not None})
     sources = sorted({r.pre_source for r in rows if r.pre_source is not None})
     topks = sorted({r.pre_topk for r in rows if r.pre_topk is not None}, reverse=True)
@@ -745,6 +957,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", default=os.path.join("runs", "pruning_parameter_ablation", "german_de_v1"))
     parser.add_argument("--results-path", default=None)
     parser.add_argument("--pair", default="masc_nom:fem_nom")
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument(
+        "--recall-only",
+        dest="recall_only",
+        action="store_true",
+        help="Mask recall via pre_prune only (default for --mode pre).",
+    )
+    mode_group.add_argument(
+        "--full-grid",
+        dest="recall_only",
+        action="store_false",
+        help="Train and evaluate encoder/decoder for every pre-prune cell.",
+    )
+    parser.set_defaults(recall_only=True)
     parser.add_argument("--pre-n-samples", type=_csv_ints, default=PRE_N_SAMPLES)
     parser.add_argument("--pre-sources", type=_csv_strings, default=PRE_SOURCES)
     parser.add_argument("--pre-topk-values", type=_csv_floats, default=PRE_TOPK_VALUES)
@@ -772,6 +998,7 @@ def main() -> None:
             sources=args.pre_sources,
             pre_topk_values=args.pre_topk_values,
             max_size=args.eval_max_size,
+            recall_only=args.recall_only,
         )
     if args.mode in ("post-part", "both"):
         results = run_post_part_ablation(
@@ -784,26 +1011,45 @@ def main() -> None:
         )
 
     if args.mode in ("pre", "both", "plot"):
-        plot_pre_metric(
-            results,
-            metric="decoder_prob_delta",
-            output_path=os.path.join(args.output_dir, "pre_decoder_prob_delta.pdf"),
-        )
-        plot_pre_metric(
-            results,
-            metric="encoder_correlation",
-            output_path=os.path.join(args.output_dir, "pre_encoder_correlation.pdf"),
-        )
-        plot_pre_metric(
-            results,
-            metric="pre_pruning_time_s",
-            output_path=os.path.join(args.output_dir, "pre_pruning_time.pdf"),
-        )
-        plot_pre_metric(
-            results,
-            metric="training_max_gpu_allocated_bytes",
-            output_path=os.path.join(args.output_dir, "pre_training_max_gpu_allocated.pdf"),
-        )
+        if args.recall_only:
+            plot_pre_metric(
+                results,
+                metric="ref_recall",
+                output_path=os.path.join(args.output_dir, "pre_ref_recall.pdf"),
+                mask_recall_only=True,
+            )
+            plot_pre_metric(
+                results,
+                metric="ref_precision",
+                output_path=os.path.join(args.output_dir, "pre_ref_precision.pdf"),
+                mask_recall_only=True,
+            )
+            plot_pre_metric(
+                results,
+                metric="pre_pruning_time_s",
+                output_path=os.path.join(args.output_dir, "pre_pruning_time.pdf"),
+            )
+        else:
+            plot_pre_metric(
+                results,
+                metric="decoder_prob_delta",
+                output_path=os.path.join(args.output_dir, "pre_decoder_prob_delta.pdf"),
+            )
+            plot_pre_metric(
+                results,
+                metric="encoder_correlation",
+                output_path=os.path.join(args.output_dir, "pre_encoder_correlation.pdf"),
+            )
+            plot_pre_metric(
+                results,
+                metric="pre_pruning_time_s",
+                output_path=os.path.join(args.output_dir, "pre_pruning_time.pdf"),
+            )
+            plot_pre_metric(
+                results,
+                metric="training_max_gpu_allocated_bytes",
+                output_path=os.path.join(args.output_dir, "pre_training_max_gpu_allocated.pdf"),
+            )
 
     if args.mode in ("post-part", "both", "plot"):
         plot_post_part_metric(

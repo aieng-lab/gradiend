@@ -28,6 +28,7 @@ from gradiend.util import unwrap_model
 from gradiend.util.logging import get_logger
 from gradiend.model import ParamMappedGradiendModel
 from gradiend.model.core import build_gradiend_from_base_model
+from gradiend.model._source_target import validate_source_target
 from gradiend.model.utils import (
     get_hf_device_map,
     resolve_device_config_for_model,
@@ -36,6 +37,18 @@ from gradiend.model.utils import (
 )
 
 logger = get_logger(__name__)
+
+def effective_rewrite_learning_rate(learning_rate: float, source: str) -> float:
+    """
+    Learning rate applied in :meth:`ModelWithGradiend.rewrite_base_model`.
+
+    CONTRACT (do not change without explicit design review):
+    - Return the nominal ``learning_rate`` unchanged for every ``source``.
+    - Rewrite orientation is **only** controlled by ``feature_factor`` passed to the decoder,
+      not by negating LR for ``source="alternative"`` or any other source.
+    """
+    validate_source_target("source", source)
+    return float(learning_rate)
 
 
 def _gradiend_checkpoint_diagnostic(load_directory: str) -> str:
@@ -259,14 +272,8 @@ class ModelWithGradiend(nn.Module, ABC):
         source: str = "factual",
         target: str = "diff",
     ):
-        if not isinstance(source, str):
-            raise TypeError(f"source must be str, got {type(source).__name__}")
-        if source not in ("factual", "alternative", "diff"):
-            raise ValueError(f"source must be one of 'factual', 'alternative', 'diff', got {source!r}")
-        if not isinstance(target, str):
-            raise TypeError(f"target must be str, got {type(target).__name__}")
-        if target not in ("factual", "alternative", "diff"):
-            raise ValueError(f"target must be one of 'factual', 'alternative', 'diff', got {target!r}")
+        validate_source_target("source", source)
+        validate_source_target("target", target)
 
         super().__init__()
         self.base_model = base_model
@@ -686,8 +693,10 @@ class ModelWithGradiend(nn.Module, ABC):
         """
         Rewrite the base model by applying GRADIEND-derived updates.
 
-        General form: $base\\_model + learning\\_rate * enhancer(part, feature\\_factor)$,
-        where enhancer(part, feature_factor) is defined by the selected part below.
+        General form: ``base_model + learning_rate * enhancer(part, feature_factor)``.
+
+        CONTRACT: ``feature_factor`` (nominal latent scale) sets rewrite orientation.
+        ``learning_rate`` is never negated by ``source``; see ``effective_rewrite_learning_rate``.
 
         part:
         - 'decoder'        : uses decoder(feature_factor)
@@ -695,10 +704,11 @@ class ModelWithGradiend(nn.Module, ABC):
         - 'decoder-bias'   : uses decoder bias vector
         - 'decoder-sum'    : uses decoder (weight + bias) vector
         - 'encoder-weight' : uses encoder weights
-
         """
         if not isinstance(feature_factor, list):
             feature_factor = [feature_factor]
+
+        applied_learning_rate = effective_rewrite_learning_rate(learning_rate, self.source)
 
         # Work on the unwrapped model, not a training wrapper.
         source_model = unwrap_model(self.base_model)
@@ -743,7 +753,7 @@ class ModelWithGradiend(nn.Module, ABC):
                     n = p.numel()
                     chunk = enhancer[..., idx: idx + n].to(p.device)
                     chunk = chunk.unsqueeze(0) if chunk.dim() == 1 and p.dim() > 0 else chunk
-                    p.add_(learning_rate * chunk.reshape(p.shape))
+                    p.add_(applied_learning_rate * chunk.reshape(p.shape))
                     idx += n
 
                 elif r == "mask":
@@ -752,7 +762,7 @@ class ModelWithGradiend(nn.Module, ABC):
                     update_values = enhancer[idx: idx + n].to(p.device)
                     update_tensor = torch.zeros_like(m, dtype=update_values.dtype, device=p.device)
                     update_tensor[m] = update_values
-                    p.add_(learning_rate * update_tensor)
+                    p.add_(applied_learning_rate * update_tensor)
                     idx += n
 
                 elif r == "indices":
@@ -761,7 +771,7 @@ class ModelWithGradiend(nn.Module, ABC):
                     update_values = enhancer[idx: idx + n].to(p.device)
                     update_tensor = torch.zeros(p.numel(), dtype=update_values.dtype, device=p.device)
                     update_tensor[flat_idx] = update_values
-                    p.add_(learning_rate * update_tensor.reshape(p.shape))
+                    p.add_(applied_learning_rate * update_tensor.reshape(p.shape))
                     idx += n
 
                 else:
@@ -823,10 +833,19 @@ class ModelWithGradiend(nn.Module, ABC):
 
     def invert_encoding(self, *, update_direction: bool = True) -> None:
         """
-        Invert encoder direction by flipping encoder/decoder signs.
+        Invert encoder direction by flipping encoder/decoder weight signs.
 
-        This preserves reconstruction while flipping the sign of the latent feature.
-        Set update_direction=True only for manual/user-driven flips.
+        ``update_direction`` controls whether ``feature_class_encoding_direction`` metadata
+        is flipped as well:
+
+        - **Training normalization** (``NormalizationCallback``): ``update_direction=False``.
+          Only weights are flipped so correlation becomes positive; semantic class→sign
+          metadata in ``feature_class_encoding_direction`` stays fixed. Do **not** set True here.
+        - **Manual / user-driven correction**: ``update_direction=True`` so metadata stays
+          consistent with weights.
+
+        Decoder rewrite orientation is still set via ``feature_factor`` at eval time, not by
+        changing this flag during training normalization.
         """
         enc = self.gradiend.encoder[0]
         dec = self.gradiend.decoder[0]
@@ -1005,6 +1024,7 @@ class ModelWithGradiend(nn.Module, ABC):
                 "base_model_device_map", "base_model_max_memory",
                 "prediction_objective",
                 "decoder_sequence_cloze_rhs_window",
+                "source", "target",
             )
             for key in gradiend_keys:
                 val = _training_arg_value(key, None)
@@ -1073,8 +1093,8 @@ class ModelWithGradiend(nn.Module, ABC):
         if gradiend is not None and getattr(gradiend, "name_or_path", None) == load_directory_str:
             source, target, feature_class_encoding_direction_from_context = read_gradiend_context(load_directory_str)
         else:
-            source = kwargs.get("source", "factual")
-            target = kwargs.get("target", "diff")
+            source = kwargs.get("source", _training_arg_value("source", "factual"))
+            target = kwargs.get("target", _training_arg_value("target", "diff"))
             feature_class_encoding_direction_from_context = None
 
         gradient_creator = kwargs.pop("gradient_creator", None)
@@ -1124,6 +1144,7 @@ class ModelWithGradiend(nn.Module, ABC):
             part: str = "decoder-weight",
             importance: Optional[torch.Tensor] = None,
             keep_idx: Optional[torch.Tensor] = None,
+            keep_idx_sorted_unique: bool = False,
             inplace: bool = True,
             return_mask: bool = False,
     ) -> Union["ModelWithGradiend", Tuple["ModelWithGradiend", torch.Tensor]]:
@@ -1156,6 +1177,8 @@ class ModelWithGradiend(nn.Module, ABC):
             "keep_idx": keep_idx,
             "return_mask": return_mask,
         }
+        if keep_idx_sorted_unique:
+            kwargs["keep_idx_sorted_unique"] = True
 
         if inplace:
             res = self.gradiend.prune(**kwargs, inplace=False)

@@ -9,6 +9,7 @@ from typing import Literal, Optional, Callable, Union, Any, List, Dict
 import torch
 import torch.nn as nn
 
+from gradiend.trainer.core.config import validate_source_target
 from gradiend.trainer.core.pruning import PostPruneConfig, PrePruneConfig, _validate_topk
 
 
@@ -28,15 +29,15 @@ class TrainingArguments:
     output_dir: Optional[str] = None
     """Directory to save the trained model. If None and experiment_dir is set, uses experiment_dir/model (or experiment_dir/run_id/model when Trainer.run_id is set). Otherwise must be set explicitly."""
 
-    use_cache: Union[bool, Literal["only_convergent"]] = False
+    use_cache: Union[bool, Literal["always", "only_convergent"]] = False
     """Training checkpoint reuse policy.
 
     - ``False``: always retrain even when a saved model exists.
-    - ``True``: reuse any saved model at the output path.
-    - ``"only_convergent"``: reuse only when the saved run meets ``min_convergent_seeds``
-      (per-seed convergence for individual seed dirs; aggregate count for the selected model).
-
-    Evaluator/visualizer ``use_cache`` arguments remain bool-only (artifact JSON reuse).
+    - ``True``: reuse when a saved model exists and matches the training cache fingerprint.
+    - ``"always"``: reuse any saved model at the output path (skip fingerprint matching).
+    - ``"only_convergent"``: same fingerprint check as ``True``, but only when the saved run
+      meets ``min_convergent_seeds`` (per-seed convergence for individual seed dirs;
+      aggregate count for the selected model).
     """
 
     add_identity_for_other_classes: bool = False
@@ -137,7 +138,7 @@ class TrainingArguments:
     """Max samples for decoder neutral evaluation data (also LMS text cap). None = use default behavior."""
 
     decoder_eval_lrs: Optional[List[float]] = None
-    """Learning rates for decoder grid search. None = DecoderEvaluator defaults ([1e-2, 1e-3, 1e-4, 1e-5])."""
+    """Learning rates for decoder grid search. None = DecoderEvaluator defaults (1/2/5 grid from 100 to 1e-3)."""
 
     decoder_eval_feature_factors: Optional[List[float]] = None
     """Feature factors for decoder grid search. None = derive from trainer target classes."""
@@ -178,9 +179,10 @@ class TrainingArguments:
     prediction_objective: str = "auto"
     """Prediction objective for text-gradient training and decoder probability scoring.
     Supported: ``auto``, ``mlm_mask_token``, ``clm_next_token``, ``clm_mlm_head``,
-    ``clm_sequence_cloze``, ``seq2seq_decoder`` (default for T5/BART), ``seq2seq_decoder_sequence_cloze``,
+    ``clm_sequence_cloze``, ``seq2seq_decoder`` (experimental), ``seq2seq_decoder_sequence_cloze`` (experimental),
     ``seq2seq_encoder_mlm``.
-    ``auto``: seq2seq models → ``seq2seq_decoder``; decoder-only → ``clm_next_token``; else MLM."""
+    ``auto``: seq2seq models → ``seq2seq_encoder_mlm``; decoder-only → ``clm_next_token`` (or cached
+    ``clm_mlm_head`` when a saved head exists); else ``mlm_mask_token``."""
 
     decoder_mlm_head_epochs: int = 5
     """Epochs used when prediction_objective="clm_mlm_head" has to train the auxiliary head."""
@@ -251,17 +253,24 @@ class TrainingArguments:
     """Threshold for convergence. Defaults to 0.6 for correlation; required for loss."""
 
     convergent_mean_by_class_threshold: Optional[float] = None
-    """Optional additional convergence criterion: minimum absolute mean encoded value (e.g. abs_mean_by_type['training']).
+    """Optional additional convergence criterion: minimum absolute mean encoded value per target class.
 
     Default: 0.5 when convergent_metric='correlation'. Set to None to disable the mean-based check and use only
     convergent_score_threshold. When set, convergence requires BOTH |correlation| >= convergent_score_threshold AND
-    abs_mean_by_type['training'] >= convergent_mean_by_class_threshold at the best checkpoint step. For
+    min(|mean|) over non-zero target classes >= convergent_mean_by_class_threshold at the best checkpoint step. For
     correlation-based convergence, the two non-zero target classes must also have opposite-sign mean encodings
     at the best checkpoint step (their product must be negative)."""
 
     split_resplit_per_seed: bool = False
     """When split_col is None, re-draw vocabulary-held-out splits per training seed.
     False keeps the same split assignment across multi-seed runs (using TrainingArguments.seed)."""
+
+    split_resplit_strategy: Literal["random", "balanced_cycle"] = "random"
+    """Strategy used when split_resplit_per_seed=True.
+    ``"random"`` redraws splits from each seed. ``"balanced_cycle"`` rotates
+    canonical target groups through train/validation/test across seed indices
+    so ratios such as 60/20/20 over five seed slots place each word in train
+    three times, validation once, and test once."""
 
     seed: Optional[int] = 0
     """Random seed for reproducible runs (default 0). The Trainer sets PyTorch/numpy/Python RNG, CUDA determinism, and CUBLAS/OMP env vars; data pipelines use this as random_state. Also the base for multi-seed runs (seed+i). Pass seed=None for non-deterministic runs. If results still vary, call set_seed(42) at the very start of your script or set env CUBLAS_WORKSPACE_CONFIG=:4096:8 and OMP_NUM_THREADS=1 before starting Python."""
@@ -337,6 +346,11 @@ class TrainingArguments:
         if not isinstance(self.split_resplit_per_seed, bool):
             raise TypeError(
                 f"split_resplit_per_seed must be bool, got {type(self.split_resplit_per_seed).__name__}"
+            )
+        if self.split_resplit_strategy not in {"random", "balanced_cycle"}:
+            raise ValueError(
+                "split_resplit_strategy must be 'random' or 'balanced_cycle', "
+                f"got {self.split_resplit_strategy!r}"
             )
         if not isinstance(self.source, str):
             raise TypeError(f"source must be str, got {type(self.source).__name__}")
@@ -414,11 +428,8 @@ class TrainingArguments:
         if self.seed is not None and not isinstance(self.seed, int):
             raise TypeError(f"seed must be int or None, got {type(self.seed).__name__}")
 
-        supported = {"factual", "alternative", "diff"}
-        if self.source not in supported:
-            raise ValueError(f"source must be one of {supported}, got {self.source!r}")
-        if self.target not in supported:
-            raise ValueError(f"target must be one of {supported}, got {self.target!r}")
+        validate_source_target("source", self.source)
+        validate_source_target("target", self.target)
         if self.torch_dtype is None:
             self.torch_dtype = torch.float32
         if self.base_model_device_map is not None and self.base_model_device_map is not False and not isinstance(self.base_model_device_map, (str, dict)):
@@ -474,6 +485,8 @@ class TrainingArguments:
             raise ValueError(f"convergent_metric must be 'correlation' or 'loss', got {metric!r}")
         if metric == "correlation" and self.convergent_score_threshold is None:
             self.convergent_score_threshold = 0.5
+        if metric == "correlation" and self.convergent_mean_by_class_threshold is None:
+            self.convergent_mean_by_class_threshold = 0.5
         if metric == "loss" and self.convergent_score_threshold is None:
             raise ValueError("convergent_score_threshold is required when convergent_metric='loss'.")
 

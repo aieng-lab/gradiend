@@ -28,6 +28,22 @@ from gradiend.trainer.core.config import (
 logger = get_logger(__name__)
 
 
+def _invert_numeric_label(label: Any) -> Any:
+    """Return the opposite binary label for alternative-source metadata."""
+    if torch.is_tensor(label):
+        numeric = label.to(dtype=torch.float32)
+        if bool(torch.isin(numeric, torch.tensor([-1.0, 0.0, 1.0], device=numeric.device)).all().item()):
+            return -label
+        return label
+    if isinstance(label, (int, float)):
+        return -label if label in (-1, 0, 1) else label
+    if isinstance(label, list):
+        return [_invert_numeric_label(v) for v in label]
+    if isinstance(label, tuple):
+        return tuple(_invert_numeric_label(v) for v in label)
+    return label
+
+
 class GradientTrainingDataset:
     """
     Modality-agnostic dataset for GRADIEND gradient creation and batching.
@@ -257,6 +273,10 @@ class GradientTrainingDataset:
             for key in batch:
                 if key not in output and key not in {'metadata', 'factual', 'alternative'}:
                     output[key] = batch[key]
+            # Label metadata must describe the gradient exposed as source.
+            # For binary pairs, the alternative side is the opposite feature class.
+            if self.source == 'alternative' and 'label' in output:
+                output['label'] = _invert_numeric_label(output['label'])
             if self.return_metadata and 'metadata' in batch:
                 output['metadata'] = batch['metadata']
         if timing_enabled:

@@ -124,6 +124,18 @@ def resolve_encoder_eval_result_path(
     return os.path.splitext(csv_path)[0] + ".json"
 
 
+def invalidate_encoder_metrics_cache(encoded_values_csv_path: str) -> None:
+    """Delete cached encoder metrics JSON sibling for an encoded-values CSV path."""
+    if not encoded_values_csv_path or not str(encoded_values_csv_path).strip():
+        return
+    json_path = os.path.splitext(str(encoded_values_csv_path))[0] + ".json"
+    try:
+        if os.path.isfile(json_path):
+            os.remove(json_path)
+    except OSError:
+        pass
+
+
 def resolve_encoder_eval_result_path_legacy(
     experiment_dir: Optional[str],
     **key_kwargs: Any,
@@ -250,6 +262,26 @@ def resolve_pre_prune_cache_dir(
     return os.path.join(os.path.normpath(str(experiment_dir).strip()), "cache", "pre_prune")
 
 
+def resolve_experiment_cache_dir(experiment_dir: Optional[str]) -> Optional[str]:
+    """Directory for experiment-scoped caches: experiment_dir/cache. None if no experiment_dir."""
+    if experiment_dir is None or not str(experiment_dir).strip():
+        return None
+    return os.path.join(os.path.normpath(str(experiment_dir).strip()), "cache")
+
+
+def remove_dir_if_empty(path: Optional[str]) -> bool:
+    """Remove a directory when it exists and contains no entries. Returns True if removed."""
+    if not path or not os.path.isdir(path):
+        return False
+    try:
+        if os.listdir(path):
+            return False
+        os.rmdir(path)
+        return True
+    except OSError:
+        return False
+
+
 def has_saved_pre_prune_cache(cache_dir: Optional[str]) -> bool:
     """True when cache_dir contains keep_idx.pt and pre_prune_meta.json from a prior pre-prune run."""
     if not cache_dir or not os.path.isdir(cache_dir):
@@ -266,14 +298,23 @@ def has_saved_pre_prune_cache(cache_dir: Optional[str]) -> bool:
     return isinstance(meta, dict) and "pre_prune_config" in meta and "input_dim" in meta
 
 
-def remove_pre_prune_cache(experiment_dir: Optional[str]) -> None:
-    """Remove ephemeral pre-prune cache under experiment_dir. No-op if missing."""
+def remove_pre_prune_cache(experiment_dir: Optional[str]) -> bool:
+    """Remove ephemeral pre-prune cache under experiment_dir.
+
+    Also removes the parent ``experiment_dir/cache`` directory when it is empty
+    after pre-prune cleanup (e.g. no gradient cache left). Returns True if the
+    pre-prune cache directory was removed.
+    """
     cache_dir = resolve_pre_prune_cache_dir(experiment_dir)
+    removed = False
     if cache_dir and os.path.isdir(cache_dir):
         try:
             shutil.rmtree(cache_dir)
+            removed = True
         except OSError:
-            pass
+            return False
+    remove_dir_if_empty(resolve_experiment_cache_dir(experiment_dir))
+    return removed
 
 
 def resolve_classification_head_dir(
@@ -341,6 +382,7 @@ def invalidate_experiment_caches(experiment_dir: Optional[str]) -> None:
                     shutil.rmtree(pre_prune)
                 except OSError:
                     pass
+            remove_dir_if_empty(path)
 
 
 def resolve_output_path(
@@ -415,6 +457,31 @@ def has_saved_model(output_dir: str) -> bool:
     return isinstance(cfg, dict) and "architecture" in cfg
 
 
+def ensure_writable_dir(path: str) -> str:
+    """
+    Return a directory path that is safe for ``os.makedirs`` and checkpoint writes.
+
+    Symlinks are resolved to their target when it is an existing directory; broken
+    symlinks are removed so a real directory can be created. Raises ``ValueError``
+    when ``path`` exists as a non-directory file.
+    """
+    path = os.path.normpath(str(path).strip())
+    if not path:
+        raise ValueError("path must be a non-empty directory path")
+
+    if os.path.islink(path):
+        target = os.path.realpath(path)
+        if os.path.isdir(target):
+            path = target
+        else:
+            os.unlink(path)
+    elif os.path.isfile(path):
+        raise ValueError(f"Expected directory at {path}, found a file")
+
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
 def has_saved_decoder_mlm_head(output_dir: str) -> bool:
     """
     Return True if output_dir contains a complete decoder-only MLM-head checkpoint.
@@ -461,7 +528,11 @@ def has_saved_decoder_mlm_head(output_dir: str) -> bool:
     except (json.JSONDecodeError, OSError):
         return False
 
-    return isinstance(meta, dict) and "target_token_ids" in meta and isinstance(cfg, dict)
+    return (
+        isinstance(meta, dict)
+        and ("target_labels" in meta or "target_token_ids" in meta)
+        and isinstance(cfg, dict)
+    )
 
 
 def should_use_cached(path: Optional[str], use_cache: Any) -> bool:

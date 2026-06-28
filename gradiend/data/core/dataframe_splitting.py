@@ -2,11 +2,43 @@
 
 from __future__ import annotations
 
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 import pandas as pd
 
 from gradiend.data.core.split_group_key import SplitGroupKey, apply_split_group_key
+
+
+def _split_counts_for_groups(
+    n_keys: int,
+    train_ratio: float,
+    val_ratio: float,
+    test_ratio: float,
+) -> Tuple[int, int, int]:
+    n_train = max(0, int(round(n_keys * train_ratio)))
+    n_val = max(0, int(round(n_keys * val_ratio)))
+    n_test = n_keys - n_train - n_val
+    if n_test < 0:
+        n_test = 0
+        n_val = n_keys - n_train
+
+    splits_needed = sum(1 for ratio in (train_ratio, val_ratio, test_ratio) if ratio > 0)
+    if n_keys >= splits_needed:
+        counts = {"train": n_train, "validation": n_val, "test": n_test}
+        ratio_by_split = (
+            ("train", train_ratio),
+            ("validation", val_ratio),
+            ("test", test_ratio),
+        )
+        for split_name, ratio in ratio_by_split:
+            if ratio <= 0 or counts[split_name] > 0:
+                continue
+            donor = max(counts, key=lambda name: counts[name])
+            if counts[donor] > 1:
+                counts[donor] -= 1
+                counts[split_name] = 1
+        n_train, n_val, n_test = counts["train"], counts["validation"], counts["test"]
+    return n_train, n_val, n_test
 from gradiend.data.core.split_validation import (
     validate_row_split_coverage,
     validate_vocabulary_group_split_coverage,
@@ -80,6 +112,8 @@ def split_dataframe_by_group_key(
     min_rows: int = 0,
     group_key: SplitGroupKey = None,
     class_id: Optional[str] = None,
+    balanced_cycle_index: Optional[int] = None,
+    balanced_cycle_length: Optional[int] = None,
 ) -> pd.DataFrame:
     """Assign splits by canonical group key so no group spans split buckets.
 
@@ -95,6 +129,11 @@ def split_dataframe_by_group_key(
         group_key: Optional callable or sequence of callables applied to
             ``group_col`` values before grouping.
         class_id: Optional class id included in validation error messages.
+        balanced_cycle_index: Optional seed index for balanced multi-seed
+            rotations. When provided with ``balanced_cycle_length``, each
+            canonical group is assigned by a cyclic split schedule instead of
+            by a one-off contiguous slice of shuffled groups.
+        balanced_cycle_length: Number of seed slots in the balanced cycle.
 
     Returns:
         A copy of ``df`` with ``split_col`` assigned.
@@ -132,39 +171,37 @@ def split_dataframe_by_group_key(
         out[split_col] = "train"
         return out
 
-    n_train = max(0, int(round(n_keys * train_ratio)))
-    n_val = max(0, int(round(n_keys * val_ratio)))
-    n_test = n_keys - n_train - n_val
-    if n_test < 0:
-        n_test = 0
-        n_val = n_keys - n_train
+    if balanced_cycle_index is not None or balanced_cycle_length is not None:
+        if balanced_cycle_index is None or balanced_cycle_length is None:
+            raise ValueError("balanced_cycle_index and balanced_cycle_length must be provided together")
+        cycle_length = int(balanced_cycle_length)
+        if cycle_length < 1:
+            raise ValueError("balanced_cycle_length must be a positive int")
+        n_train, n_val, n_test = _split_counts_for_groups(n_keys, train_ratio, val_ratio, test_ratio)
+        heldout_count = n_val + n_test
+        shift = 0 if n_keys == 0 else ((int(balanced_cycle_index) % cycle_length) * heldout_count) % n_keys
+        rotated_keys = keys[shift:] + keys[:shift]
+        train_keys = set(rotated_keys[:n_train])
+        val_keys = set(rotated_keys[n_train : n_train + n_val])
 
-    splits_needed = sum(1 for ratio in (train_ratio, val_ratio, test_ratio) if ratio > 0)
-    if n_keys >= splits_needed:
-        counts = {"train": n_train, "validation": n_val, "test": n_test}
-        ratio_by_split = (
-            ("train", train_ratio),
-            ("validation", val_ratio),
-            ("test", test_ratio),
-        )
-        for split_name, ratio in ratio_by_split:
-            if ratio <= 0 or counts[split_name] > 0:
-                continue
-            donor = max(counts, key=lambda name: counts[name])
-            if counts[donor] > 1:
-                counts[donor] -= 1
-                counts[split_name] = 1
-        n_train, n_val, n_test = counts["train"], counts["validation"], counts["test"]
+        def _assign_split(key: str) -> str:
+            if key in train_keys:
+                return "train"
+            if key in val_keys:
+                return "validation"
+            return "test"
 
-    train_keys = set(keys[:n_train])
-    val_keys = set(keys[n_train : n_train + n_val])
+    else:
+        n_train, n_val, _ = _split_counts_for_groups(n_keys, train_ratio, val_ratio, test_ratio)
+        train_keys = set(keys[:n_train])
+        val_keys = set(keys[n_train : n_train + n_val])
 
-    def _assign_split(key: str) -> str:
-        if key in train_keys:
-            return "train"
-        if key in val_keys:
-            return "validation"
-        return "test"
+        def _assign_split(key: str) -> str:
+            if key in train_keys:
+                return "train"
+            if key in val_keys:
+                return "validation"
+            return "test"
 
     out = df.copy()
     out["_split_group_key"] = out[group_col].map(lambda v: apply_split_group_key(v, group_key))

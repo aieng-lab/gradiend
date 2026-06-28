@@ -16,7 +16,7 @@ GRADIEND (Gradient-based targeted feature learning within neural networks) learn
 
 ## Installation
 
-With minimal requirements (enables full data generation, training and evaluation workflow):
+With minimal requirements:
 ```bash
 pip install gradiend
 ```
@@ -27,7 +27,7 @@ With recommended dependencies (enables additional features such as Hugging Face 
 pip install gradiend[recommended]
 ```
 
-Similar, `gradiend[data]` and `gradiend[plot]` only adds additional dependencies for data generation and plotting, respectively.
+Similarly, `gradiend[data]` and `gradiend[plot]` install only the optional data-generation and plotting dependencies, respectively.
 
 Installation from source:
 
@@ -194,7 +194,8 @@ Example scripts and notebooks: [gradiend/examples](https://github.com/aieng-lab/
 - [train_sentiment.py](gradiend/examples/train_sentiment.py) — Sentiment example with split-aware evaluation and visualization
 - [train_gender_de.py](gradiend/examples/train_gender_de.py) — German gender (masc_nom vs fem_nom)
 - [train_multi_seed_stability.py](gradiend/examples/train_multi_seed_stability.py) — Multi-seed training and stability comparison
-- [train_gender_de_decoder_only.py](gradiend/examples/train_gender_de_decoder_only.py) — Decoder-only model with optional MLM head
+- [train_gender_en.py](gradiend/examples/train_gender_en.py) — English gender (`--decoder-only` for GPT-2 + `clm_next_token`)
+- [train_gender_de_decoder_only.py](gradiend/examples/train_gender_de_decoder_only.py) — Decoder-only German articles with auxiliary MLM head (`clm_mlm_head`)
 
 ## Datasets and models
 

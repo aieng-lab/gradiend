@@ -191,6 +191,41 @@ class TextBatchedDataset(TextBatchedDatasetBase):
         """
         is_decoder_only_model = getattr(self, "is_decoder_only_model", False)
         prediction_objective = getattr(self, "prediction_objective", None)
+        if prediction_objective == "clm_mlm_head":
+            target_labels = getattr(self, "mlm_head_target_labels", None)
+            if not target_labels:
+                raise ValueError(
+                    "clm_mlm_head training requires mlm_head_target_labels on the dataset "
+                    "(load from the trained decoder MLM head checkpoint)."
+                )
+            if not self.mask_token:
+                raise ValueError("clm_mlm_head requires tokenizer.mask_token.")
+            if "[MASK]" not in text:
+                raise ValueError("clm_mlm_head training requires a [MASK] placeholder in the input text.")
+            expanded_text = text.replace("[MASK]", self.mask_token, 1)
+            with suppress_tokenizer_length_warning():
+                encoded = self.tokenizer(
+                    expanded_text,
+                    return_tensors="pt",
+                    add_special_tokens=True,
+                    truncation=True,
+                    max_length=self.max_length,
+                    padding="max_length",
+                )
+            label_map = {str(lab).strip(): idx for idx, lab in enumerate(target_labels)}
+            target_str = str(target).strip()
+            if target_str not in label_map:
+                raise ValueError(
+                    f"Target {target_str!r} is not a decoder MLM-head label. Known labels: {target_labels}"
+                )
+            input_ids = encoded["input_ids"]
+            attention_mask = encoded["attention_mask"]
+            labels = torch.tensor([label_map[target_str]], dtype=torch.long)
+            return {
+                "input_ids": input_ids.squeeze(0),
+                "attention_mask": attention_mask.squeeze(0),
+                "labels": labels,
+            }
         if prediction_objective == "clm_sequence_cloze":
             if "[MASK]" not in text:
                 raise ValueError("clm_sequence_cloze training requires a [MASK] placeholder.")
@@ -285,6 +320,7 @@ class TextTrainingDataset(TextBatchedDataset):
         seed: Optional[int] = None,
         prediction_objective: Optional[str] = None,
         rhs_window: int = -1,
+        mlm_head_target_labels: Optional[List[str]] = None,
     ):
         """Initialize the training dataset.
 
@@ -317,6 +353,7 @@ class TextTrainingDataset(TextBatchedDataset):
         self.is_decoder_only_model = is_decoder_only_model
         self.is_seq2seq_model = is_seq2seq_model
         self.prediction_objective = prediction_objective
+        self.mlm_head_target_labels = list(mlm_head_target_labels) if mlm_head_target_labels else None
         self.rhs_window = rhs_window
         if is_decoder_only_model and getattr(self.tokenizer, "pad_token", None) is None:
             eos_token = getattr(self.tokenizer, "eos_token", None)
@@ -336,7 +373,10 @@ class TextTrainingDataset(TextBatchedDataset):
         elif self.prediction_objective == SEQ2SEQ_DECODER_SEQUENCE_CLOZE:
             input_text = template
         elif self.is_decoder_only_model:
-            input_text = template.split("[MASK]")[0] if "[MASK]" in template else template
+            if self.prediction_objective == "clm_mlm_head":
+                input_text = template
+            else:
+                input_text = template.split("[MASK]")[0] if "[MASK]" in template else template
         elif self.is_seq2seq_model:
             input_text = mask_placeholder_for_tokenizer(template, self.tokenizer)
         elif self.mask_token:

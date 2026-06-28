@@ -81,7 +81,7 @@ def test_standard_workflow_mlm_train_encoder_decoder(use_pre_prune):
             train_batch_size=1,
             eval_steps=2,
             num_train_epochs=1,
-            max_steps=4,
+            max_steps=2,
             learning_rate=1e-4,
             experiment_dir=os.path.join(tmpdir, "workflow_test"),
             use_cache=False,

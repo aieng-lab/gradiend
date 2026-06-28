@@ -13,11 +13,11 @@ import pandas as pd
 import torch
 from dataclasses import dataclass
 from dataclasses import fields as dc_fields
-from typing import Dict, List, Optional, Union, Any, Tuple, Type, Sequence
+from typing import Dict, List, Optional, Union, Any, Tuple, Type, Sequence, Literal
 
 from gradiend.visualizer.plot_delegation import see_implementation
 
-from tqdm import tqdm
+from gradiend.util.tqdm_utils import gradiend_tqdm
 
 from gradiend.data.core import SplitGroupKey, SplitRatiosInput, normalize_split_ratios, resplit_unified_dataframe
 from gradiend.trainer.trainer import Trainer, _apply_seed
@@ -45,7 +45,7 @@ from gradiend.trainer.core.unified_data import (
     transition_id,
 )
 from gradiend.trainer.text.prediction.model_with_gradiend import TextPredictionModelWithGradiend
-from gradiend.trainer.text.prediction.decoder_only_mlm import train_mlm_head
+from gradiend.trainer.text.prediction.decoder_only_mlm import load_decoder_mlm_head_meta, train_mlm_head
 from gradiend.util.logging import get_logger
 from gradiend.model.utils import is_decoder_only_model as is_decoder_only_model_from_obj, is_seq2seq_model
 from gradiend.util import normalize_split_name
@@ -60,8 +60,8 @@ from gradiend.util.paths import (
     resolve_decoder_mlm_head_dir,
     has_saved_decoder_mlm_head,
 )
-from gradiend.util.encoding_rows import encode_dataset_to_rows
-from gradiend.evaluator.encoder_metrics import invalidate_encoder_metrics_cache
+from gradiend.util.encoding_rows import encode_dataset_to_rows, gradient_entry_to_encoder_row
+from gradiend.util.paths import invalidate_encoder_metrics_cache
 from gradiend.trainer.text.prediction.prediction_objective import (
     resolve_prediction_objective,
     should_use_decoder_mlm_head_for_auto,
@@ -82,6 +82,46 @@ def _sample_up_to_per_group(df: pd.DataFrame, group_col: str, max_size: int, see
     if not sampled_groups:
         return df.iloc[0:0].copy()
     return pd.concat(sampled_groups).reset_index(drop=True)
+
+
+def _normalize_mlm_label_strings(series: pd.Series) -> List[str]:
+    return sorted({str(v).strip() for v in series.dropna().tolist() if str(v).strip()})
+
+
+def _ensure_mlm_training_label_coverage(
+    train_df: pd.DataFrame,
+    coverage_df: pd.DataFrame,
+    required_labels: Sequence[str],
+) -> pd.DataFrame:
+    """Ensure each required label appears at least once in train_df (MLM-head class indices)."""
+    if not required_labels or train_df.empty or coverage_df.empty:
+        return train_df
+    present = set(train_df["label"].astype(str).str.strip())
+    missing = [lab for lab in required_labels if lab not in present]
+    if not missing:
+        return train_df
+    coverage = coverage_df.copy()
+    coverage["label"] = coverage["label"].astype(str).str.strip()
+    extra_rows = []
+    for lab in missing:
+        matches = coverage.loc[coverage["label"] == lab]
+        if matches.empty:
+            logger.warning(
+                "Decoder MLM-head label %r has no (masked, label) row in data; "
+                "encoder/decoder eval may fail for that token.",
+                lab,
+            )
+            continue
+        extra_rows.append(matches.iloc[[0]])
+    if not extra_rows:
+        return train_df
+    extra = pd.concat(extra_rows, ignore_index=True)
+    logger.info(
+        "Decoder MLM-head: added %d row(s) covering %d label(s) absent from the requested split sample.",
+        len(extra),
+        len(missing),
+    )
+    return pd.concat([train_df, extra], ignore_index=True)
 
 
 def _generated_incomplete_data_path(path: Union[str, Path]) -> Path:
@@ -232,6 +272,11 @@ class TextPredictionConfig(TrainerConfig):
     # Neutral evaluation data
     eval_neutral_data: Optional[Union[pd.DataFrame, str, Path]] = None
     # Optional DataFrame, local path (.csv/.parquet), or HuggingFace dataset id. Paths loaded via resolve_dataframe.
+
+    eval_neutral_additional_excluded_words: Optional[List[str]] = None
+    # Extra tokens that must not be mask targets for neutral encoder variants
+    # (``neutral_training_masked``, ``neutral_dataset``). Mirrors
+    # ``generate_neutral_data(additional_excluded_words=...)``.
 
     eval_neutral_max_rows: Optional[int] = None
     # Optional cap on number of rows loaded from neutral HF datasets.
@@ -533,6 +578,35 @@ class TextPredictionTrainer(Trainer):
             key_kwargs["max_size"] = max_size
         return resolve_encoder_analysis_path(experiment_dir, None, **key_kwargs)
 
+    def _cached_encoder_df_matches_request(
+        self,
+        df: pd.DataFrame,
+        *,
+        include_other_classes: bool = False,
+        use_all_transitions: bool = False,
+        transition_selection: Optional[List[Union[TransitionSpec, Tuple[str, str]]]] = None,
+    ) -> bool:
+        if transition_selection is not None:
+            return True
+        if not (include_other_classes or use_all_transitions):
+            return True
+        if not self.all_classes or len(self.all_classes) <= 2:
+            return True
+        if not self.target_classes or len(self.target_classes) != 2:
+            return True
+        if "source_id" not in df.columns or "target_id" not in df.columns:
+            return False
+        training_df = df[df["type"].astype(str) == "training"] if "type" in df.columns else df
+        if training_df.empty:
+            return False
+        target_set = {str(c) for c in self.target_classes}
+        source_vals = training_df["source_id"].dropna().astype(str)
+        target_vals = training_df["target_id"].dropna().astype(str)
+        if source_vals.empty or target_vals.empty:
+            return False
+        pair_local = source_vals.isin(target_set) & target_vals.isin(target_set)
+        return bool((~pair_local).any())
+
     def __init__(
             self,
             model: Union[str, Any],
@@ -566,6 +640,7 @@ class TextPredictionTrainer(Trainer):
             decoder_eval_ignore_tokens: Optional[List[str]] = None,
             decoder_eval_lms_max_samples: Optional[int] = None,
             eval_neutral_data: Optional[Union[pd.DataFrame, str, Path]] = None,
+            eval_neutral_additional_excluded_words: Optional[List[str]] = None,
             eval_neutral_max_rows: Optional[int] = None,
             img_format: Optional[str] = None,
             img_dpi: Optional[int] = None,
@@ -718,6 +793,7 @@ class TextPredictionTrainer(Trainer):
                 "decoder_eval_ignore_tokens": decoder_eval_ignore_tokens,
                 "decoder_eval_lms_max_samples": decoder_eval_lms_max_samples,
                 "eval_neutral_data": eval_neutral_data,
+                "eval_neutral_additional_excluded_words": eval_neutral_additional_excluded_words,
                 "eval_neutral_max_rows": eval_neutral_max_rows,
                 "img_format": img_format,
                 "img_dpi": img_dpi,
@@ -780,6 +856,7 @@ class TextPredictionTrainer(Trainer):
         self._combined_data: Optional[pd.DataFrame] = None
         self._all_classes: Optional[List[str]] = None
         self._data_loaded = False
+        self._data_materialized_all_class_transitions = False
         self._combined_data_template: Optional[pd.DataFrame] = None
         self._splits_resplit_seed: Optional[int] = None
         self._split_col_explicit = split_col_explicit
@@ -953,7 +1030,38 @@ class TextPredictionTrainer(Trainer):
             return int(seed_value)
         return base_seed
 
-    def _apply_vocabulary_splits(self, seed: int) -> None:
+    def _balanced_split_cycle_args(
+        self,
+        seed_value: Optional[int],
+        *,
+        split_cycle_index: Optional[int] = None,
+        split_cycle_length: Optional[int] = None,
+    ) -> Dict[str, int]:
+        args = getattr(self, "training_args", None)
+        if args is None or not getattr(args, "split_resplit_per_seed", False):
+            return {}
+        if getattr(args, "split_resplit_strategy", "random") != "balanced_cycle":
+            return {}
+        if seed_value is None:
+            return {}
+        base_seed = int(getattr(args, "seed", 0) or 0)
+        cycle_index = int(split_cycle_index) if split_cycle_index is not None else int(seed_value) - base_seed
+        cycle_length = int(split_cycle_length) if split_cycle_length is not None else int(
+            getattr(args, "min_convergent_seeds", None) or getattr(args, "max_seeds", 1) or 1
+        )
+        return {
+            "balanced_cycle_index": cycle_index,
+            "balanced_cycle_length": cycle_length,
+        }
+
+    def _apply_vocabulary_splits(
+        self,
+        seed: int,
+        *,
+        seed_value: Optional[int] = None,
+        split_cycle_index: Optional[int] = None,
+        split_cycle_length: Optional[int] = None,
+    ) -> None:
         if self.config.split_col is not None:
             return
         if self._combined_data_template is None:
@@ -980,6 +1088,11 @@ class TextPredictionTrainer(Trainer):
                 feature_class_col=UNIFIED_FACTUAL_CLASS,
                 split_col=UNIFIED_SPLIT,
                 align_alternatives_with_split_vocab=True,
+                **self._balanced_split_cycle_args(
+                    seed_value,
+                    split_cycle_index=split_cycle_index,
+                    split_cycle_length=split_cycle_length,
+                ),
             )
             self._combined_data = pd.concat([resplit_pair, other_df], ignore_index=True)
         else:
@@ -995,24 +1108,48 @@ class TextPredictionTrainer(Trainer):
                 feature_class_col=UNIFIED_FACTUAL_CLASS,
                 split_col=UNIFIED_SPLIT,
                 align_alternatives_with_split_vocab=True,
+                **self._balanced_split_cycle_args(
+                    seed_value,
+                    split_cycle_index=split_cycle_index,
+                    split_cycle_length=split_cycle_length,
+                ),
             )
         self._splits_resplit_seed = int(seed)
 
-    def _refresh_data_splits_for_seed(self, seed_value: int, args: Any) -> None:
+    def _refresh_data_splits_for_seed(
+        self,
+        seed_value: int,
+        args: Any,
+        *,
+        split_cycle_index: Optional[int] = None,
+        split_cycle_length: Optional[int] = None,
+    ) -> None:
         if self.config.split_col is not None:
             return
         per_seed = bool(getattr(args, "split_resplit_per_seed", False))
-        target_seed = self._resplit_seed_for_training(seed_value if per_seed else None)
+        balanced_cycle = bool(
+            per_seed and getattr(args, "split_resplit_strategy", "random") == "balanced_cycle"
+        )
+        target_seed = (
+            self._resplit_seed_for_training(None)
+            if balanced_cycle
+            else self._resplit_seed_for_training(seed_value if per_seed else None)
+        )
         if not per_seed and self._splits_resplit_seed == target_seed:
             return
-        self._apply_vocabulary_splits(target_seed)
+        self._apply_vocabulary_splits(
+            target_seed,
+            seed_value=seed_value if per_seed else None,
+            split_cycle_index=split_cycle_index,
+            split_cycle_length=split_cycle_length,
+        )
 
     def _ensure_data_for_training(self) -> None:
         """Ensure data is loaded before creating the model for training (so pair is set and from_pretrained can set feature_class_encoding_direction)."""
         self._ensure_data()
         self._validate_required_splits(self._combined_data)
 
-    def _ensure_data(self) -> None:
+    def _ensure_data(self, *, materialize_all_class_transitions: Optional[bool] = None) -> None:
         """Load and normalize data on first use. Idempotent.
 
         Training data can be specified as:
@@ -1022,8 +1159,31 @@ class TextPredictionTrainer(Trainer):
           an existing file path.
         """
         if self._data_loaded:
+            if materialize_all_class_transitions and not self._data_materialized_all_class_transitions:
+                self.data = None
+                self.class_datasets = None
+                self._combined_data = None
+                self._combined_data_template = None
+                self._splits_resplit_seed = None
+                self._data_loaded = False
+            else:
+                return
+        if self._data_loaded:
             return
         config = self.config
+
+        def _pair_for_unified(classes: List[str], pair: Optional[Tuple[str, str]]) -> Optional[Tuple[str, str]]:
+            if pair is None:
+                return None
+            return pair if set(classes).issubset(set(pair)) else None
+
+        if materialize_all_class_transitions is None:
+            materialize_all_class_transitions = bool(
+                self._default_from_training_args(None, "include_other_classes", fallback=False)
+            )
+        else:
+            materialize_all_class_transitions = bool(materialize_all_class_transitions)
+
         # Apply seed from training_args so data build (unified, sampling) is deterministic
         _seed = getattr(config, "seed", None) or (getattr(self, "training_args", None) and getattr(self.training_args, "seed", None))
         if _seed is not None:
@@ -1069,7 +1229,12 @@ class TextPredictionTrainer(Trainer):
             )
         elif is_hf_id:
             # HF per-class: load configs/subsets as class_dfs, merge by class_merge_map if set, then per_class_dict_to_unified
-            classes_to_load = config.all_classes if config.all_classes is not None else "all"
+            if materialize_all_class_transitions and config.all_classes is not None:
+                classes_to_load = config.all_classes
+            elif config.target_classes is not None:
+                classes_to_load = config.target_classes
+            else:
+                classes_to_load = config.all_classes if config.all_classes is not None else "all"
             class_dfs = load_hf_per_class(
                 config.data,
                 classes=classes_to_load,
@@ -1100,7 +1265,7 @@ class TextPredictionTrainer(Trainer):
                 masked_col=config.masked_col,
                 split_col=config.split_col,
                 use_class_names_as_columns=getattr(config, "use_class_names_as_columns", True),
-                pair=pair,
+                pair=_pair_for_unified(inferred_classes, pair),
                 include_identity_rows=False,
                 max_counterfactuals_per_sentence=getattr(config, "max_counterfactuals_per_sentence", 1),
                 random_state=getattr(config, "random_state", getattr(config, "seed", None)),
@@ -1110,8 +1275,13 @@ class TextPredictionTrainer(Trainer):
             if isinstance(config.data, dict):
                 # Infer all_classes from data keys; merge by class_merge_map if set
                 all_classes_from_data = sorted(list(config.data.keys()))
-                self._set_all_classes(all_classes_from_data)
-                classes_for_transitions = self.target_classes or all_classes_from_data
+                configured_all_classes = list(config.all_classes) if config.all_classes is not None else None
+                self._set_all_classes(configured_all_classes or all_classes_from_data)
+                classes_for_transitions = (
+                    configured_all_classes
+                    if materialize_all_class_transitions and configured_all_classes is not None
+                    else self.target_classes or all_classes_from_data
+                )
                 if self._target_classes is None:
                     self._target_classes = classes_for_transitions
                 self.data = config.data
@@ -1124,14 +1294,14 @@ class TextPredictionTrainer(Trainer):
                 else:
                     pair = tuple(config.target_classes) if config.target_classes and len(config.target_classes) == 2 else tuple(self._target_classes) if self._target_classes and len(self._target_classes) == 2 else None
                 self.class_datasets = class_dfs
-                self._validate_classes_in_data(class_dfs, classes_for_transitions, param_name="target_classes")
+                self._validate_classes_in_data(class_dfs, classes_for_transitions, param_name="all_classes" if configured_all_classes else "target_classes")
                 unified = per_class_dict_to_unified(
                     class_dfs,
                     classes=classes_for_transitions,
                     masked_col=config.masked_col,
                     split_col=config.split_col,
                     use_class_names_as_columns=getattr(config, "use_class_names_as_columns", True),
-                    pair=pair,
+                    pair=_pair_for_unified(classes_for_transitions, pair),
                     include_identity_rows=False,
                     max_counterfactuals_per_sentence=getattr(config, "max_counterfactuals_per_sentence", 1),
                     random_state=getattr(config, "random_state", getattr(config, "seed", None)),
@@ -1219,6 +1389,7 @@ class TextPredictionTrainer(Trainer):
         else:
             self._combined_data_template = None
         self._data_loaded = True
+        self._data_materialized_all_class_transitions = materialize_all_class_transitions
 
         if self._all_classes is None and self._combined_data is not None:
             src = self._combined_data[UNIFIED_FACTUAL_CLASS].unique().tolist()
@@ -1277,6 +1448,7 @@ class TextPredictionTrainer(Trainer):
         plot_mean_by_class: bool = True,
         plot_mean_by_feature_class: Optional[bool] = None,
         plot_correlation: bool = True,
+        class_spread: Optional[Literal["minmax", "iqr", "ci95"]] = None,
         output: Optional[str] = None,
         show: bool = True,
         title: Union[str, bool] = True,
@@ -1293,6 +1465,10 @@ class TextPredictionTrainer(Trainer):
             plot_mean_by_class: Plot mean encoder values by label class.
             plot_mean_by_feature_class: Plot means grouped by feature class.
             plot_correlation: Plot correlation over training steps.
+            class_spread: Optional spread band behind class means.
+                ``"minmax"`` shades min-max encoded values, ``"iqr"`` shades Q1-Q3,
+                ``"ci95"`` shades mean +/- 1.96 standard errors,
+                and ``None`` disables spread shading.
             output: Optional explicit output file path.
             show: Whether to display the figure interactively.
             title: Plot title. ``True`` uses the default title, ``False`` omits it.
@@ -1311,6 +1487,7 @@ class TextPredictionTrainer(Trainer):
             plot_mean_by_class=plot_mean_by_class,
             plot_mean_by_feature_class=plot_mean_by_feature_class,
             plot_correlation=plot_correlation,
+            class_spread=class_spread,
             output=output,
             show=show,
             title=title,
@@ -1660,7 +1837,8 @@ class TextPredictionTrainer(Trainer):
         """
         tokenizer = getattr(model_or_tokenizer, "tokenizer", model_or_tokenizer)
         self._prediction_objective(tokenizer)
-        self._ensure_data()
+        requested_all_transitions = bool(use_all_transitions or include_other_classes or transition_selection)
+        self._ensure_data(materialize_all_class_transitions=requested_all_transitions)
         max_size = self._default_from_training_args(max_size, "train_max_size")
         if self.combined_data is None:
             raise ValueError("No data provided. Set data in config or override create_training_data().")
@@ -1713,8 +1891,11 @@ class TextPredictionTrainer(Trainer):
             raise ValueError(f"No data for transitions {train_transitions} in split '{split}'.")
 
         training_pairs = []
-        feature_class_id_map = {}
-        next_fcid = 0
+        feature_class_id_map = {
+            (class_pair[0], class_pair[1]): 0,
+            (class_pair[1], class_pair[0]): 1,
+        }
+        next_fcid = 2
         add_identity = bool(getattr(getattr(self, "training_args", None), "add_identity_for_other_classes", False))
 
         def _feature_class_id(src: str, tgt: str) -> int:
@@ -1830,6 +2011,16 @@ class TextPredictionTrainer(Trainer):
         if batch_size is None:
             batch_size = kwargs.get("batch_size", 1)
 
+        mlm_head_target_labels = None
+        if objective_name == "clm_mlm_head":
+            head_dir = resolve_decoder_mlm_head_dir(self.experiment_dir)
+            if head_dir:
+                try:
+                    meta = load_decoder_mlm_head_meta(head_dir)
+                    mlm_head_target_labels = meta.get("target_labels")
+                except OSError:
+                    mlm_head_target_labels = None
+
         # Create text-specific training dataset (seed for deterministic batch ordering)
         return TextTrainingDataset(
             training_df,
@@ -1842,6 +2033,7 @@ class TextPredictionTrainer(Trainer):
             seed=seed,
             prediction_objective=objective_name,
             rhs_window=getattr(getattr(self, "_training_args", None), "decoder_sequence_cloze_rhs_window", -1),
+            mlm_head_target_labels=mlm_head_target_labels,
         )
 
     def create_gradient_training_dataset(
@@ -2048,17 +2240,16 @@ class TextPredictionTrainer(Trainer):
                 )
 
         # Compute feature score: row-wise (P(factual), P(alternative) per row) or static targets
-        dataset_class_col = None
+        prob_on_other_class = getattr(self.config, "decoder_eval_prob_on_other_class", True)
+        label_dataset_col = None
         if "label_class" in training_like_df.columns:
-            dataset_class_col = "label_class"
+            label_dataset_col = "label_class"
         elif "factual_id" in training_like_df.columns:
-            dataset_class_col = "factual_id"
-        data_class_col = None
-        if getattr(self.config, "decoder_eval_prob_on_other_class", True):
-            if "alternative_id" in training_like_df.columns:
-                data_class_col = "alternative_id"
-            elif "alternative_class" in training_like_df.columns:
-                data_class_col = "alternative_class"
+            label_dataset_col = "factual_id"
+
+        # probs_by_dataset keys = factual label_class (panel title matches row filter).
+        # Do NOT group by alternative_id for panels — same key names, different semantics.
+        dataset_class_col = label_dataset_col
 
         export_row_wise_csv = use_row_wise and getattr(
             self.config, "decoder_eval_export_row_wise_csv", False
@@ -2074,7 +2265,7 @@ class TextPredictionTrainer(Trainer):
             return_per_row_df=export_row_wise_csv,
             trainer=self,
         )
-        if export_row_wise_csv and isinstance(eval_out, tuple):
+        if export_row_wise_csv and isinstance(eval_out, tuple) and len(eval_out) == 2 and hasattr(eval_out[1], "columns"):
             probs_by_dataset, per_row_df = eval_out
             csv_path = resolve_decoder_row_wise_csv_path(self.experiment_dir)
             if csv_path and not per_row_df.empty:
@@ -2093,21 +2284,18 @@ class TextPredictionTrainer(Trainer):
         else:
             class_names_for_metrics = list(targets.keys()) if targets else []
 
-        # Extract selection metrics: strengthen = P(other) on class dataset, weaken = P(class) on class dataset
+        # Strengthen + prob_on_other_class: P(target) on the other class's factual dataset
+        # (e.g. P(3SG) on label_class=3PL rows → star on Dataset 3PL, 3SG line).
+        # Weaken: P(class) on its own factual dataset.
         probs_factual: Dict[str, float] = {}
-        if data_class_col and dataset_class_col:
+        if prob_on_other_class and label_dataset_col and not use_row_wise:
             counterfactual_probs = {}
             for class_name in class_names_for_metrics:
                 other_classes = [c for c in class_names_for_metrics if c != class_name]
-                if other_classes and class_name in probs_by_dataset:
-                    probs_on_this = probs_by_dataset[class_name]
-                    vals = [
-                        float(probs_on_this[other])
-                        for other in other_classes
-                        if other in probs_on_this
-                    ]
-                    if vals:
-                        counterfactual_probs[class_name] = float(np.mean(vals))
+                for other in other_classes:
+                    if other in probs_by_dataset and class_name in probs_by_dataset[other]:
+                        counterfactual_probs[class_name] = float(probs_by_dataset[other][class_name])
+                        break
                 if class_name in probs_by_dataset and class_name in probs_by_dataset[class_name]:
                     probs_factual[class_name] = float(probs_by_dataset[class_name][class_name])
             probs = counterfactual_probs if counterfactual_probs else next(iter(probs_by_dataset.values())) if probs_by_dataset else {}
@@ -2150,8 +2338,9 @@ class TextPredictionTrainer(Trainer):
 
         # Return in standard format with new structure
         result = {
-            'probs': probs,  # Counterfactual probs for selection (P(other) on metric dataset) for strengthen
+            'probs': probs,  # Counterfactual probs for selection (P(target) on other factual dataset)
             'lms': lms,
+            '_probs_by_dataset_grouping': 'label_class' if label_dataset_col == 'label_class' else 'factual_id',
         }
         # Add probs_by_dataset if available
         if probs_by_dataset is not None:
@@ -2232,59 +2421,50 @@ class TextPredictionTrainer(Trainer):
         if not extended_targets and not use_row_wise:
             raise ValueError(f"Could not build targets for classes {class_ids}. Ensure decoder_eval_targets includes these classes.")
         
-        # Extend grid entries with probs_by_dataset if missing
+        # Always refresh plot panels from full factual-grouped evaluation (never reuse
+        # selection-subset or legacy alternative_id-grouped probs_by_dataset).
         extended_grid = {}
         for candidate_id, entry in grid.items():
-            extended_entry = dict(entry)  # Copy entry
-            
-            # Check if probs_by_dataset already exists
-            if "probs_by_dataset" not in extended_entry:
-                # Need to re-evaluate this candidate
-                if candidate_id == "base":
-                    # Evaluate base model
-                    base_result = self.evaluate_base_model(
-                        base_model,
-                        tokenizer,
-                        training_like_df=training_like_df,
-                        neutral_df=neutral_df,
-                        use_cache=use_cache,
-                    )
-                    if "probs_by_dataset" in base_result:
-                        extended_entry["probs_by_dataset"] = base_result["probs_by_dataset"]
+            extended_entry = dict(entry)
+
+            if candidate_id == "base":
+                eval_model = base_model
+                modified_model = None
+            else:
+                if isinstance(candidate_id, tuple) and len(candidate_id) == 2:
+                    feature_factor, lr = candidate_id
+                elif isinstance(candidate_id, dict):
+                    feature_factor = candidate_id.get("feature_factor")
+                    lr = candidate_id.get("learning_rate")
                 else:
-                    # Extract feature_factor and lr from candidate_id
-                    if isinstance(candidate_id, tuple) and len(candidate_id) == 2:
-                        feature_factor, lr = candidate_id
-                    elif isinstance(candidate_id, dict):
-                        feature_factor = candidate_id.get("feature_factor")
-                        lr = candidate_id.get("learning_rate")
-                    else:
-                        logger.warning(f"Unknown candidate_id format: {candidate_id}, skipping")
-                        extended_grid[candidate_id] = extended_entry
-                        continue
-                    
-                    # Create modified model
-                    modified_model = model_with_gradiend.rewrite_base_model(
-                        learning_rate=lr,
-                        feature_factor=feature_factor,
-                        part=getattr(self.config, "decoder_eval_part", "decoder"),
-                    )
-                    
-                    # Evaluate modified model
-                    modified_result = self.evaluate_base_model(
-                        modified_model,
-                        tokenizer,
-                        training_like_df=training_like_df,
-                        neutral_df=neutral_df,
-                        use_cache=use_cache,
-                    )
-                    
-                    if "probs_by_dataset" in modified_result:
-                        extended_entry["probs_by_dataset"] = modified_result["probs_by_dataset"]
-                    
-                    del modified_model
-                    torch.cuda.empty_cache()
-            
+                    logger.warning(f"Unknown candidate_id format: {candidate_id}, skipping")
+                    extended_grid[candidate_id] = extended_entry
+                    continue
+
+                modified_model = model_with_gradiend.rewrite_base_model(
+                    learning_rate=lr,
+                    feature_factor=feature_factor,
+                    part=getattr(self.config, "decoder_eval_part", "decoder"),
+                )
+                eval_model = modified_model
+
+            eval_result = self.evaluate_base_model(
+                eval_model,
+                tokenizer,
+                training_like_df=training_like_df,
+                neutral_df=neutral_df,
+                use_cache=False,
+            )
+            if "probs_by_dataset" in eval_result:
+                extended_entry["probs_by_dataset"] = eval_result["probs_by_dataset"]
+            grouping = eval_result.get("_probs_by_dataset_grouping")
+            if grouping:
+                extended_entry["_probs_by_dataset_grouping"] = grouping
+
+            if modified_model is not None:
+                del modified_model
+                torch.cuda.empty_cache()
+
             extended_grid[candidate_id] = extended_entry
         
         return {
@@ -2331,6 +2511,8 @@ class TextPredictionTrainer(Trainer):
                 for token_key in ("factual_token", "alternative_token"):
                     if entry.get(token_key) is not None:
                         extra[token_key] = entry[token_key]
+                if entry.get("source_token") is not None:
+                    extra["source_token"] = entry["source_token"]
                 return extra
 
             training_rows = encode_dataset_to_rows(
@@ -2360,12 +2542,66 @@ class TextPredictionTrainer(Trainer):
                 "feature_class_id": r.get("feature_class_id"),
                 "eval_group": eval_group_value,
                 "type": "training",
+                "source_token": r.get("source_token"),
                 "factual_token": r.get("factual_token"),
                 "alternative_token": r.get("alternative_token"),
                 "data_split": r.get("data_split"),
             })
         logger.debug(f"Processed {len(rows)} training data entries")
         return rows
+
+    @staticmethod
+    def _neutral_encoder_prediction_objective(objective_name: str) -> str:
+        """Objective for neutral encoder rows.
+
+        The auxiliary decoder MLM head only defines gradients for its trained target
+        labels, so neutral encoder analysis falls back to CLM next-token gradients.
+        """
+        if objective_name == "clm_mlm_head":
+            return "clm_next_token"
+        return objective_name
+
+    def _neutral_encoder_gradient_creator(self, model_with_gradiend: Any) -> Any:
+        """Gradient creator for neutral encoder rows under clm_mlm_head training."""
+        objective_name = self._prediction_objective(
+            getattr(model_with_gradiend, "base_model", getattr(model_with_gradiend, "tokenizer", None))
+        ).name
+        if objective_name == "clm_mlm_head":
+            creator = getattr(model_with_gradiend, "forward_clm_gradients", None)
+            if callable(creator):
+                return creator
+        return model_with_gradiend.gradient_creator
+
+    def _resolve_encoder_neutral_excluded_tokens(self) -> List[str]:
+        """Tokens that must not be selected as neutral mask targets.
+
+        Matches ``generate_neutral_data`` exclusion: all feature target tokens plus
+        ``eval_neutral_additional_excluded_words`` (and optional decoder LMS ignores).
+        """
+        excluded: List[str] = []
+        try:
+            self._ensure_data()
+            inferred, _ = self._infer_decoder_eval_targets()
+            for tokens in inferred.values():
+                excluded.extend(str(t) for t in tokens)
+        except (ValueError, AttributeError, TypeError):
+            pass
+        raw_targets = getattr(self.config, "decoder_eval_targets", None)
+        if isinstance(raw_targets, dict):
+            for tokens in raw_targets.values():
+                excluded.extend(str(t) for t in tokens)
+        additional = getattr(self.config, "eval_neutral_additional_excluded_words", None) or []
+        excluded.extend(str(w) for w in additional)
+        ignore = getattr(self.config, "decoder_eval_ignore_tokens", None) or []
+        excluded.extend(str(w) for w in ignore)
+        seen: set = set()
+        out: List[str] = []
+        for word in excluded:
+            key = word.lower()
+            if key not in seen:
+                seen.add(key)
+                out.append(word)
+        return out
 
     def _encode_neutral_training_masked_rows(
             self,
@@ -2412,6 +2648,7 @@ class TextPredictionTrainer(Trainer):
         is_decoder_only_model = is_decoder_only_model_from_obj(tokenizer)
         mask_token = tokenizer.mask_token if not is_decoder_only_model else None
         objective_name = self._prediction_objective(getattr(model_with_gradiend, "base_model", tokenizer)).name
+        neutral_objective_name = self._neutral_encoder_prediction_objective(objective_name)
         rhs_window = getattr(getattr(self, "_training_args", None), "decoder_sequence_cloze_rhs_window", -1)
         logger.debug(f"Tokenizer: is_decoder_only_model={is_decoder_only_model}, mask_token={mask_token}")
 
@@ -2436,57 +2673,17 @@ class TextPredictionTrainer(Trainer):
                 )
             unmasked_text = template.replace("[MASK]", factual_token)
 
-            # For MLM models: mask one random token that is NOT in excluded_tokens
-            if is_seq2seq_model_value and not mask_token:
-                pair = create_masked_pair_from_text(
-                    unmasked_text,
-                    tokenizer,
-                    is_decoder_only_model=False,
-                    excluded_tokens=excluded_for_masked,
-                    mask_token=None,
-                    min_prefix_tokens=5,
-                )
-                if pair is None:
-                    continue
-                masked_text, original_token = pair
-            elif not is_decoder_only_model and mask_token:
-                tokens = tokenizer.tokenize(unmasked_text)
-                if not tokens:
-                    continue
-
-                # Filter out special tokens and excluded tokens
-                excluded_norm = {
-                    str(excl).lower().lstrip("##").lstrip("Ġ").lstrip("▁")
-                    for excl in excluded_for_masked
-                } if excluded_for_masked else set()
-                valid_indices = []
-                for idx, token in enumerate(tokens):
-                    # Skip special tokens
-                    if token.startswith('[') and token.endswith(']'):
-                        continue
-                    # Skip excluded tokens (target tokens)
-                    token_norm = token.lower().lstrip("##").lstrip("Ġ").lstrip("▁")
-                    if excluded_norm and token_norm in excluded_norm:
-                        continue
-                    valid_indices.append(idx)
-
-                if not valid_indices:
-                    valid_indices = [
-                        idx for idx, token in enumerate(tokens)
-                        if not (token.startswith('[') and token.endswith(']'))
-                    ]
-                if not valid_indices:
-                    continue
-
-                # Mask one random non-target token
-                mask_idx = random.choice(valid_indices)
-                original_token = tokens[mask_idx]  # Token at mask position (neutral)
-                tokens[mask_idx] = mask_token
-                masked_text = tokenizer.convert_tokens_to_string(tokens)
-            else:
-                # For decoder-only models, use unmasked text as-is
-                masked_text = unmasked_text
-                original_token = factual_token  # Use factual as neutral token
+            pair = create_masked_pair_from_text(
+                unmasked_text,
+                tokenizer,
+                is_decoder_only_model=is_decoder_only_model,
+                excluded_tokens=excluded_for_masked,
+                mask_token=mask_token,
+                min_prefix_tokens=5,
+            )
+            if pair is None:
+                continue
+            masked_text, original_token = pair
 
             if is_seq2seq_model_value and not tokenize_prediction_label(tokenizer, original_token):
                 logger.debug(
@@ -2515,7 +2712,7 @@ class TextPredictionTrainer(Trainer):
                 batch_size=1,
                 is_decoder_only_model=is_decoder_only_model,
                 is_seq2seq_model=is_seq2seq_model_value,
-                prediction_objective=objective_name,
+                prediction_objective=neutral_objective_name,
                 rhs_window=rhs_window,
                 target_key="label",
                 balance_column="feature_class_id",
@@ -2525,7 +2722,7 @@ class TextPredictionTrainer(Trainer):
             neutral_training_masked_gradient_data = TextGradientTrainingDataset(
                 neutral_training_masked_dataset,
                 tokenizer,
-                model_with_gradiend.gradient_creator,
+                self._neutral_encoder_gradient_creator(model_with_gradiend),
                 source="factual",
                 target=None,
                 dtype=torch_dtype,
@@ -2540,17 +2737,21 @@ class TextPredictionTrainer(Trainer):
                 neutral_ctr += 1
 
                 grad = entry["source"]
-                text = entry["text"]
                 encoded_value = model_with_gradiend.encode(grad, return_float=True)
-                rows.append({
-                    'text': text,
-                    'encoded': encoded_value,
-                    'label': 0.0,
-                    'source_id': "neutral",
-                    'target_id': "neutral",
-                    'type': 'neutral_training_masked',
-                    **neutral_encoder_row_metadata('neutral_training_masked'),
-                })
+                rows.append(
+                    gradient_entry_to_encoder_row(
+                        entry,
+                        encoded=encoded_value,
+                        input_type="factual",
+                        overrides={
+                            "label": 0.0,
+                            "source_id": "neutral",
+                            "target_id": "neutral",
+                            "type": "neutral_training_masked",
+                            **neutral_encoder_row_metadata("neutral_training_masked"),
+                        },
+                    )
+                )
                 neutral_training_masked_count += 1
 
         logger.debug(f"Processed {neutral_training_masked_count} neutral training masked entries")
@@ -2578,6 +2779,7 @@ class TextPredictionTrainer(Trainer):
         is_decoder_only_model = is_decoder_only_model_from_obj(tokenizer)
         mask_token = tokenizer.mask_token if not is_decoder_only_model else None
         objective_name = self._prediction_objective(getattr(model_with_gradiend, "base_model", tokenizer)).name
+        neutral_objective_name = self._neutral_encoder_prediction_objective(objective_name)
         rhs_window = getattr(getattr(self, "_training_args", None), "decoder_sequence_cloze_rhs_window", -1)
 
         # Prepare neutral data: create masked texts with one mask per entry
@@ -2607,7 +2809,12 @@ class TextPredictionTrainer(Trainer):
         neutral_dataset_count = 0
         if max_size:
             neutral_data_df = neutral_data_df.sample(n=max_size, random_state=_seed).reset_index(drop=True)
-        for idx, row in tqdm(neutral_data_df.iterrows(), total=len(neutral_data_df), desc="Processing neutral dataset", leave=False):
+        for idx, row in gradiend_tqdm(
+            neutral_data_df.iterrows(),
+            total=len(neutral_data_df),
+            desc="Processing neutral dataset",
+            leave=False,
+        ):
             text = str(row[neutral_text_col])
             if idx == 0:
                 logger.debug(f"Sample neutral dataset entry: text={text[:50] if text else 'None'}...")
@@ -2653,7 +2860,7 @@ class TextPredictionTrainer(Trainer):
             batch_size=1,
             is_decoder_only_model=is_decoder_only_model,
             is_seq2seq_model=is_seq2seq_model_value,
-            prediction_objective=objective_name,
+            prediction_objective=neutral_objective_name,
             rhs_window=rhs_window,
             target_key="label",
             balance_column="feature_class_id",
@@ -2663,7 +2870,7 @@ class TextPredictionTrainer(Trainer):
         neutral_gradient_data = TextGradientTrainingDataset(
             neutral_dataset,
             tokenizer,
-            model_with_gradiend.gradient_creator,
+            self._neutral_encoder_gradient_creator(model_with_gradiend),
             source="factual",
             target=None,
             dtype=torch_dtype,
@@ -2682,19 +2889,89 @@ class TextPredictionTrainer(Trainer):
                     f"Sample neutral dataset encoded entry: input_text={input_text[:50] if input_text else 'None'}..., "
                     f"label={label}, available keys: {list(entry.keys())}")
             encoded_value = model_with_gradiend.encode(grad, return_float=True)
-            rows.append({
-                'text': input_text,
-                'encoded': encoded_value,
-                'label': float(label),
-                'source_id': 'neutral',
-                'target_id': 'neutral',
-                'type': 'neutral_dataset',
-                **neutral_encoder_row_metadata('neutral_dataset'),
-            })
+            rows.append(
+                gradient_entry_to_encoder_row(
+                    entry,
+                    encoded=encoded_value,
+                    input_type="factual",
+                    overrides={
+                        "label": 0.0,
+                        "source_id": "neutral",
+                        "target_id": "neutral",
+                        "type": "neutral_dataset",
+                        **neutral_encoder_row_metadata("neutral_dataset"),
+                    },
+                )
+            )
             neutral_encoded_count += 1
 
         logger.debug(f"Encoded {neutral_encoded_count} neutral dataset entries")
         return rows
+
+    def _collect_decoder_mlm_required_labels(self) -> List[str]:
+        """All factual/alternative token strings that may appear during GRADIEND train/eval."""
+        self._ensure_data()
+        if self.combined_data is not None:
+            if UNIFIED_FACTUAL not in self.combined_data.columns:
+                return []
+            labels = set(_normalize_mlm_label_strings(self.combined_data[UNIFIED_FACTUAL]))
+            if UNIFIED_ALTERNATIVE in self.combined_data.columns:
+                labels |= set(_normalize_mlm_label_strings(self.combined_data[UNIFIED_ALTERNATIVE]))
+            return sorted(labels)
+        if getattr(self, "class_datasets", None):
+            tokens: set[str] = set()
+            for df in self.class_datasets.values():
+                for col in df.columns:
+                    if col in ("masked", "split", "text"):
+                        continue
+                    if df[col].dtype == object or pd.api.types.is_string_dtype(df[col]):
+                        tokens |= set(_normalize_mlm_label_strings(df[col]))
+            return sorted(tokens)
+        return []
+
+    def _decoder_mlm_coverage_dataframe(self) -> pd.DataFrame:
+        """(masked, label) rows from all splits for supplementing MLM-head training."""
+        self._ensure_data()
+        if (
+            self.combined_data is not None
+            and UNIFIED_MASKED in self.combined_data.columns
+            and UNIFIED_FACTUAL in self.combined_data.columns
+        ):
+            factual_rows = self.combined_data[[UNIFIED_MASKED, UNIFIED_FACTUAL]].rename(
+                columns={UNIFIED_MASKED: "masked", UNIFIED_FACTUAL: "label"}
+            )
+            frames = [factual_rows]
+            if UNIFIED_ALTERNATIVE in self.combined_data.columns:
+                alt_rows = self.combined_data[[UNIFIED_MASKED, UNIFIED_ALTERNATIVE]].rename(
+                    columns={UNIFIED_MASKED: "masked", UNIFIED_ALTERNATIVE: "label"}
+                )
+                frames.append(alt_rows)
+            out = pd.concat(frames, ignore_index=True)
+            out["label"] = out["label"].astype(str).str.strip()
+            return out.drop_duplicates(subset=["masked", "label"]).reset_index(drop=True)
+        if getattr(self, "class_datasets", None):
+            frames: List[pd.DataFrame] = []
+            masked_col = self.config.masked_col
+            split_col = self.config.split_col or "split"
+            use_class_cols = getattr(self.config, "use_class_names_as_columns", True)
+            for split_name in order_split_names(["train", "validation", "test", "all"]):
+                try:
+                    frames.append(
+                        all_subsets_to_mlm_df(
+                            self.class_datasets,
+                            split=split_name,
+                            masked_col=masked_col,
+                            split_col=split_col,
+                            use_class_names_as_columns=use_class_cols,
+                        )
+                    )
+                except ValueError:
+                    continue
+            if frames:
+                out = pd.concat(frames, ignore_index=True)
+                out["label"] = out["label"].astype(str).str.strip()
+                return out.drop_duplicates(subset=["masked", "label"]).reset_index(drop=True)
+        return pd.DataFrame(columns=["masked", "label"])
 
     def get_decoder_mlm_training_data(
             self,
@@ -2709,8 +2986,8 @@ class TextPredictionTrainer(Trainer):
         head sees the full HuggingFace dataset. When only combined_data is
         available (e.g. single HF dataset), uses combined_data for the split.
         Returned DataFrame has columns 'masked' and 'label'; masked must contain
-        [MASK], label must be a single token per row. Target token IDs are derived
-        from unique values in 'label'.
+        [MASK]. Multi-token label strings are supported: each unique label maps to one
+        classifier output on the auxiliary MLM head.
 
         Args:
             split: Data split(s) to use.
@@ -2748,6 +3025,9 @@ class TextPredictionTrainer(Trainer):
         if max_size is not None:
             _seed = getattr(getattr(self, "training_args", None), "seed", 0) or 0
             out = _sample_up_to_per_group(out, 'label', max_size, _seed)
+        required_labels = self._collect_decoder_mlm_required_labels()
+        coverage_df = self._decoder_mlm_coverage_dataframe()
+        out = _ensure_mlm_training_label_coverage(out, coverage_df, required_labels)
         return out
 
     def train_decoder_only_mlm_head(
@@ -3043,10 +3323,8 @@ class TextPredictionTrainer(Trainer):
             )
         neutral_data_df = encoder_kwargs["neutral_data_df"]
 
-        # Excluded tokens for neutral variant 1 (training_args-derived)
-        excluded_tokens = None
-        if hasattr(self, "training_args") and hasattr(self.config, "decoder_eval_targets"):
-            excluded_tokens = self.config.decoder_eval_targets
+        # Excluded tokens for neutral encoder variants (target words + additional exclusions)
+        excluded_tokens = self._resolve_encoder_neutral_excluded_tokens()
 
         output_path = self._encoder_cache_path(model_with_gradiend.name_or_path, **encoder_kwargs)
 
@@ -3082,12 +3360,28 @@ class TextPredictionTrainer(Trainer):
                         f"Recomputing with use_cache=False to ensure correct structure."
                     )
                     use_cache = False  # Recompute
+                elif not self._cached_encoder_df_matches_request(
+                    df_cached,
+                    include_other_classes=include_other_classes,
+                    use_all_transitions=use_all_transitions,
+                    transition_selection=transition_selection,
+                ):
+                    logger.info(
+                        "Cached encoder analysis at %s is pair-local but this request needs full-eval "
+                        "transitions; recomputing into the same cache path.",
+                        output_path,
+                    )
+                    invalidate_encoder_metrics_cache(output_path)
+                    use_cache = False
                 else:
                     return df_cached
 
         if not use_cache and output_path is not None and os.path.exists(output_path):
-            logger.info(f"Recomputing encoder analysis (removing old cache: {output_path})")
-            os.remove(output_path)
+            logger.info(
+                "Recomputing encoder analysis; existing cache will be overwritten after "
+                "successful recomputation: %s",
+                output_path,
+            )
 
         training_config = model_with_gradiend.gradiend.kwargs.get('training', {}).get('training_args', {})
         source_type = training_config.get('source', 'factual')
@@ -3123,11 +3417,10 @@ class TextPredictionTrainer(Trainer):
         device = model_with_gradiend.gradiend.device_encoder
         rows = []
 
-        # Process excluded_tokens
+        # Process excluded_tokens (already a flat list from _resolve_encoder_neutral_excluded_tokens)
         if excluded_tokens is None:
             excluded_tokens = []
-        if isinstance(excluded_tokens, dict):
-            # Flatten dict of lists to single list
+        elif isinstance(excluded_tokens, dict):
             excluded_tokens = [token for tokens in excluded_tokens.values() for token in tokens]
 
         # 1. Training data: use general EncoderEvaluator path (same as Trainer.evaluate_encoder)

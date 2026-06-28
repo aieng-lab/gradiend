@@ -93,3 +93,28 @@ def test_anchor_aligned_encoding_uses_signed_bounds_and_coolwarm():
         assert mesh.cmap.name == "coolwarm"
     finally:
         plt.close("all")
+
+
+def test_plot_comparison_heatmap_sets_axis_labels():
+    pytest.importorskip("matplotlib")
+    pytest.importorskip("seaborn")
+    import matplotlib.pyplot as plt
+
+    try:
+        plot_comparison_heatmap(
+            {
+                "measure": "anchor_aligned_encoding_factual_mean",
+                "model_ids": ["A", "B"],
+                "column_ids": ["A", "B"],
+                "matrix": [[0.74, -0.23], [0.50, 0.86]],
+            },
+            xlabel="Probe feature",
+            ylabel="Orienting feature",
+            show=False,
+            return_data=True,
+        )
+        ax = plt.gcf().axes[0]
+        assert ax.get_xlabel() == "Probe feature"
+        assert ax.get_ylabel() == "Orienting feature"
+    finally:
+        plt.close("all")

@@ -186,6 +186,9 @@ class NormalizationCallback(TrainingCallback):
                 corr = float(corr_raw)
                 if corr < -0.6:
                     logger.info(f'Inverting encoding since correlation is {corr} < -0.5')
+                    # CONTRACT: update_direction=False — flip encoder/decoder weights only.
+                    # feature_class_encoding_direction is semantic (+1/-1 per class) and must
+                    # NOT be negated here. Decoder eval derives ff from that metadata by source.
                     model.invert_encoding(update_direction=False)
 
                     # After inversion, flip the sign of the recorded correlation so that
@@ -213,6 +216,32 @@ class NormalizationCallback(TrainingCallback):
                         means_hist = training_stats.get('mean_by_class')
                         if isinstance(means_hist, dict):
                             means_hist[step] = flipped_means
+
+                    for min_key, max_key in (
+                        ("min_by_class", "max_by_class"),
+                        ("min_by_feature_class", "max_by_feature_class"),
+                        ("q1_by_class", "q3_by_class"),
+                        ("q1_by_feature_class", "q3_by_feature_class"),
+                    ):
+                        mins = eval_result.get(min_key)
+                        maxs = eval_result.get(max_key)
+                        if isinstance(mins, dict) and isinstance(maxs, dict):
+                            flipped_mins = {
+                                k: (-float(maxs[k]) if isinstance(maxs.get(k), (int, float)) else v)
+                                for k, v in mins.items()
+                            }
+                            flipped_maxs = {
+                                k: (-float(mins[k]) if isinstance(mins.get(k), (int, float)) else v)
+                                for k, v in maxs.items()
+                            }
+                            eval_result[min_key] = flipped_mins
+                            eval_result[max_key] = flipped_maxs
+                            min_hist = training_stats.get(min_key)
+                            max_hist = training_stats.get(max_key)
+                            if isinstance(min_hist, dict):
+                                min_hist[step] = flipped_mins
+                            if isinstance(max_hist, dict):
+                                max_hist[step] = flipped_maxs
 
                     mean_by_feature_class = eval_result.get('mean_by_feature_class')
                     if isinstance(mean_by_feature_class, dict):

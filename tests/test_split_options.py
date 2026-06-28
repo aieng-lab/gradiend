@@ -87,6 +87,69 @@ class TestSplitDataframeByGroupKey:
         )
         assert "test" in set(out["split"].unique())
 
+    def test_balanced_cycle_rotates_each_word_through_60_20_20_over_five_seed_slots(self):
+        df = pd.DataFrame({"label": [f"w{i}" for i in range(10)]})
+        assignments = []
+        for cycle_index in range(5):
+            out = split_dataframe_by_group_key(
+                df,
+                "label",
+                0.6,
+                0.2,
+                0.2,
+                seed=42,
+                group_key=[str.casefold],
+                balanced_cycle_index=cycle_index,
+                balanced_cycle_length=5,
+            )
+            assignments.append(out.set_index("label")["split"].to_dict())
+
+        # In a five-slot 60/20/20 cycle, every canonical word should appear in
+        # train three times, validation once, and test once. This is the split
+        # policy used by multi-seed held-out-target analysis; convergence can
+        # later filter which trained seed checkpoints are included in plots.
+        for word in df["label"]:
+            word_splits = [assignment[word] for assignment in assignments]
+            assert word_splits.count("train") == 3
+            assert word_splits.count("validation") == 1
+            assert word_splits.count("test") == 1
+
+    def test_balanced_cycle_prioritizes_previous_heldout_words_as_next_train(self):
+        df = pd.DataFrame({"label": [f"w{i}" for i in range(10)]})
+        first = split_dataframe_by_group_key(
+            df,
+            "label",
+            0.6,
+            0.2,
+            0.2,
+            seed=42,
+            group_key=[str.casefold],
+            balanced_cycle_index=0,
+            balanced_cycle_length=2,
+        ).set_index("label")["split"].to_dict()
+        second = split_dataframe_by_group_key(
+            df,
+            "label",
+            0.6,
+            0.2,
+            0.2,
+            seed=42,
+            group_key=[str.casefold],
+            balanced_cycle_index=1,
+            balanced_cycle_length=2,
+        ).set_index("label")["split"].to_dict()
+
+        # With only two seed slots, perfect 60/20/20 coverage per word is
+        # impossible. The balanced policy therefore maximizes useful reuse:
+        # every word held out in the first run is pulled into training in the
+        # second run, and the second run's held-out set comes from the first
+        # run's training words.
+        first_heldout = {word for word, split in first.items() if split != "train"}
+        second_heldout = {word for word, split in second.items() if split != "train"}
+        assert first_heldout
+        assert all(second[word] == "train" for word in first_heldout)
+        assert second_heldout <= {word for word, split in first.items() if split == "train"}
+
 
 class TestResplitUnified:
     def test_casefold_groups_white_variants(self):
@@ -374,6 +437,51 @@ class TestTrainerVocabularyResplit:
         other_map = trainer._combined_data.set_index(UNIFIED_FACTUAL)[UNIFIED_SPLIT].to_dict()
         assert per_seed_map != other_map or stable_map != other_map
 
+    def test_balanced_cycle_refresh_uses_explicit_cycle_slot_not_model_seed(self):
+        from gradiend import TrainingArguments
+
+        trainer = TextPredictionTrainer(
+            model="distilbert-base-cased",
+            target_classes=["white", "black"],
+            split_col=None,
+            split_group_key=[str.casefold],
+            split_ratios=(0.6, 0.2, 0.2),
+            args=TrainingArguments(
+                seed=100,
+                max_seeds=5,
+                split_resplit_per_seed=True,
+                split_resplit_strategy="balanced_cycle",
+                min_convergent_seeds=5,
+                experiment_dir=None,
+            ),
+        )
+        rows = []
+        for i, tok in enumerate([f"w{i}" for i in range(8)]):
+            rows.append(
+                {
+                    UNIFIED_MASKED: f"Person {i} [MASK].",
+                    UNIFIED_SPLIT: "train",
+                    UNIFIED_FACTUAL_CLASS: "white",
+                    UNIFIED_ALTERNATIVE_CLASS: "black",
+                    UNIFIED_FACTUAL: tok,
+                    UNIFIED_ALTERNATIVE: "black",
+                    UNIFIED_TRANSITION: transition_id("white", "black"),
+                }
+            )
+        trainer._combined_data_template = pd.DataFrame(rows)
+        trainer._data_loaded = True
+
+        trainer._refresh_data_splits_for_seed(100, trainer.training_args, split_cycle_index=2, split_cycle_length=5)
+        first = trainer._combined_data.set_index(UNIFIED_FACTUAL)[UNIFIED_SPLIT].to_dict()
+        trainer._refresh_data_splits_for_seed(999, trainer.training_args, split_cycle_index=2, split_cycle_length=5)
+        second = trainer._combined_data.set_index(UNIFIED_FACTUAL)[UNIFIED_SPLIT].to_dict()
+
+        # During managed multi-seed training, model seed and data split slot are
+        # deliberately decoupled. A failed model seed can move its split slot to
+        # the back of the queue; later evaluation must reconstruct the same
+        # slot from seed-report metadata rather than from seed_value - base_seed.
+        assert second == first
+
 
 class TestEncoderSplitOptions:
     @pytest.mark.parametrize(
@@ -405,7 +513,7 @@ class TestEncoderSplitOptions:
         assert "black" in sg["agreement_by_feature_class"]
 
     def test_create_training_data_preserves_data_split_for_split_all(self):
-        from transformers import AutoTokenizer
+        from tests.conftest import MockTokenizer
 
         rows = []
         for cls, tok, split in (
@@ -435,7 +543,7 @@ class TestEncoderSplitOptions:
         )
         trainer._combined_data = pd.DataFrame(rows)
         trainer._data_loaded = True
-        tokenizer = AutoTokenizer.from_pretrained("distilbert-base-cased")
+        tokenizer = MockTokenizer()
         ds = trainer.create_training_data(tokenizer, split="all", batch_size=1)
         splits_seen: set[str] = set()
         for i in range(len(ds)):

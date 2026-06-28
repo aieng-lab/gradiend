@@ -18,6 +18,7 @@ import pandas as pd
 from gradiend.evaluator.decoder import DecoderEvaluator
 from gradiend.evaluator.encoder import EncoderEvaluator
 from gradiend.trainer.core.dataset import GradientTrainingDataset
+from gradiend.trainer.core.feature_definition import FeatureLearningDefinition
 from tests.conftest import MockTokenizer
 
 
@@ -28,7 +29,7 @@ class MockTrainer:
         self._training_args = training_args or MockTrainingArguments()
         self.experiment_dir = None
         self.run_id = None
-        self.target_classes = ["positive", "negative"]
+        self.target_classes = ["positive"]
         self._model = None
     
     def get_model(self):
@@ -39,6 +40,9 @@ class MockTrainer:
         if value is not None:
             return value
         return getattr(self._training_args, name, fallback)
+
+    def _resolve_artifact_use_cache(self, value=None, *, fallback=False):
+        return FeatureLearningDefinition._resolve_artifact_use_cache(self, value, fallback=fallback)
     
     def _get_decoder_eval_dataframe(self, tokenizer, **kwargs):
         """Mock decoder eval dataframe creation."""
@@ -110,6 +114,10 @@ class MockTrainer:
     def get_target_feature_classes(self):
         """Return target feature classes."""
         return self.target_classes
+
+    def _resolve_decoder_eval_targets(self, training_like_df=None):
+        """Mock class-based decoder targets."""
+        return {"positive": ["positive"]}, False
 
 
 class MockTrainingArguments:
@@ -264,6 +272,30 @@ class TestEncoderEvaluator:
             # (cache file should exist)
             cache_files = [f for f in os.listdir(temp_dir) if f.endswith('.json')]
             assert len(cache_files) > 0
+
+    def test_evaluate_encoder_with_encoder_df_ignores_stale_json_cache(self, temp_dir):
+        evaluator = EncoderEvaluator()
+        training_args = MockTrainingArguments()
+        training_args.use_cache = True
+        trainer = MockTrainer(training_args=training_args)
+        trainer.experiment_dir = temp_dir
+
+        with open(os.path.join(temp_dir, "encoded_values_split_test.json"), "w", encoding="utf-8") as handle:
+            json.dump({"n_samples": 999, "correlation": 0.0}, handle)
+
+        encoder_df = pd.DataFrame(
+            {
+                "encoded": [0.8, -0.4],
+                "label": [1, -1],
+                "type": ["training", "training"],
+                "source_id": ["positive", "negative"],
+                "target_id": ["negative", "positive"],
+            }
+        )
+
+        result = evaluator.evaluate_encoder(trainer, encoder_df=encoder_df, split="test", use_cache=True)
+
+        assert result["n_samples"] == 2
     
     def test_evaluate_encoder_correlation_computation(self):
         """Test that correlation is computed correctly."""
@@ -355,6 +387,7 @@ class TestDecoderEvaluator:
             m * 10 ** e
             for e in range(2, -4, -1)
             for m in [5, 2, 1]
+            if m * 10 ** e <= 100
         ]
 
     @staticmethod
@@ -468,6 +501,7 @@ class TestDecoderEvaluator:
         """Test that custom feature factors expand the decoder grid."""
         evaluator = DecoderEvaluator()
         trainer = MockTrainer()
+        trainer.target_classes = []
         trainer._model = MockModelWithGradiend()
 
         custom_factors = [0.5, 1.0, 1.5]
@@ -489,6 +523,7 @@ class TestDecoderEvaluator:
         result = evaluator.evaluate_decoder(
             trainer,
             feature_factors=[-1.0],
+            target_class="positive",
         )
 
         assert self._grid_pairs(result) == {(-1.0, lr) for lr in self._default_decoder_lrs()}
@@ -560,3 +595,30 @@ class TestDecoderEvaluator:
 
         factors = default_decoder_feature_factors(trainer, model_with_gradiend=trainer._model)
         assert factors == [-1.0, 1.0]  # -direction["positive"], -direction["negative"] from model
+
+
+def test_plot_all_target_classes_forwards_plot_kwargs():
+    """plot_kwargs from evaluate_decoder(plot=True) are forwarded to plot_probability_shifts."""
+    from gradiend.evaluator.decoder import _plot_all_target_classes
+
+    trainer = MockTrainer()
+    trainer.config = type("Config", (), {"img_format": "png"})()
+    trainer.plot_probability_shifts = Mock(return_value="/tmp/decoder_probability_shifts_positive.png")
+
+    summary = {"positive": {"value": 0.7, "feature_factor": -1.0, "learning_rate": 0.01}}
+    relevant_results = {"base": {"lms": {"lms": 0.5}}}
+
+    paths = _plot_all_target_classes(
+        trainer,
+        summary,
+        relevant_results,
+        plot_kwargs={"figsize": (5, 3), "show": False},
+        show=True,
+    )
+
+    trainer.plot_probability_shifts.assert_called_once()
+    call_kwargs = trainer.plot_probability_shifts.call_args.kwargs
+    assert call_kwargs["figsize"] == (5, 3)
+    assert call_kwargs["show"] is True
+    assert call_kwargs["target_class"] == "positive"
+    assert paths == ["/tmp/decoder_probability_shifts_positive.png"]

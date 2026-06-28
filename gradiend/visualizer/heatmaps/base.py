@@ -10,7 +10,21 @@ import math
 from gradiend.visualizer.heatmaps.ordering import _reorder_comparison_data
 from gradiend.visualizer.plot_optional import _require_matplotlib, _require_seaborn
 from gradiend.visualizer.plot_style import disable_usetex_for_axis_text
-from gradiend.visualizer.labels import format_label_with_convergence, converged_for_model_path
+from gradiend.visualizer.labels import (
+    converged_for_trainer,
+    format_label_with_convergence,
+    resolve_axis_convergence_for_comparison_heatmap,
+)
+
+# Matrix-computation options that must not be forwarded to plot_comparison_heatmap.
+_MATRIX_COMPUTE_KWARGS = frozenset({"seed_aggregate", "dispersion", "seed_selection"})
+
+
+def filter_comparison_heatmap_plot_kwargs(kwargs: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Drop matrix-computation kwargs that high-level plot wrappers may receive."""
+    if not kwargs:
+        return {}
+    return {k: v for k, v in kwargs.items() if k not in _MATRIX_COMPUTE_KWARGS}
 
 
 def _encoding_measure_is_signed(measure: Optional[str]) -> bool:
@@ -18,7 +32,11 @@ def _encoding_measure_is_signed(measure: Optional[str]) -> bool:
     if not measure:
         return False
     name = str(measure)
-    if name in {"cross_encoding_positive_minus_negative", "gradiend_feature_cross_encoding_mean"}:
+    if name in {
+        "cross_encoding_positive_minus_negative",
+        "gradiend_feature_cross_encoding_mean",
+        "gradiend_transition_cross_encoding_mean",
+    }:
         return True
     if name.startswith("anchor_aligned_encoding_"):
         return not (name.endswith("_count") or name.endswith("_raw_count"))
@@ -76,11 +94,14 @@ def plot_comparison_heatmap(
     scale_gamma: Optional[float] = None,
     annot_fontsize: Optional[Union[int, float]] = None,
     tick_label_fontsize: Optional[Union[int, float]] = None,
+    axis_label_fontsize: Optional[Union[int, float]] = None,
     group_label_fontsize: Optional[Union[int, float]] = None,
     group_label_rotation_top: Union[int, float] = 0,
     group_label_rotation_right: Union[int, float] = 0,
     cbar_pad: Optional[float] = None,
     cbar_fontsize: Optional[Union[int, float]] = None,
+    cbar_shrink: Optional[float] = None,
+    cbar_label: Optional[str] = None,
     percentages: bool = False,
     row_metric: Optional[Dict[str, float]] = None,
     row_metric_label: Optional[str] = None,
@@ -89,8 +110,8 @@ def plot_comparison_heatmap(
     row_metric_vmax: Optional[float] = None,
     row_label_mapping: Optional[Dict[str, str]] = None,
     column_label_mapping: Optional[Dict[str, str]] = None,
-    seed_aggregate: str = "mean",
-    dispersion: str = "none",
+    xlabel: Optional[str] = None,
+    ylabel: Optional[str] = None,
     dispersion_display: str = "none",
     seed_annotation: Union[bool, Dict[str, Any]] = False,
     models: Optional[Dict[str, object]] = None,
@@ -120,11 +141,16 @@ def plot_comparison_heatmap(
         scale_gamma: Optional gamma for power scaling.
         annot_fontsize: Optional annotation font size.
         tick_label_fontsize: Optional tick-label font size.
+        axis_label_fontsize: Optional x/y axis title font size. When omitted but
+            ``tick_label_fontsize`` is set, defaults to tick size + 4 and is never
+            smaller than tick size + 1.
         group_label_fontsize: Optional group-label font size.
         group_label_rotation_top: Rotation for top group labels.
         group_label_rotation_right: Rotation for right group labels.
         cbar_pad: Optional colorbar padding.
-        cbar_fontsize: Optional colorbar font size.
+        cbar_fontsize: Optional colorbar tick and label font size.
+        cbar_shrink: Optional colorbar shrink factor (width relative to heatmap).
+        cbar_label: Optional colorbar axis label.
         percentages: Whether to show values as percentages.
         row_metric: Optional side metric by row id.
         row_metric_label: Label for the side metric.
@@ -133,8 +159,8 @@ def plot_comparison_heatmap(
         row_metric_vmax: Optional side-metric upper bound.
         row_label_mapping: Optional mapping for row labels.
         column_label_mapping: Optional mapping for column labels.
-        seed_aggregate: Seed aggregation label stored in returned data.
-        dispersion: Dispersion mode stored in returned data.
+        xlabel: Optional x-axis label (heatmap columns).
+        ylabel: Optional y-axis label (heatmap rows).
         dispersion_display: How to show dispersion values.
         seed_annotation: Whether/how to annotate seed counts.
         models: Optional model mapping for non-convergence label lookup.
@@ -157,11 +183,13 @@ def plot_comparison_heatmap(
     _validate_numeric_optional("scale_gamma", scale_gamma)
     _validate_fontsize_optional("annot_fontsize", annot_fontsize)
     _validate_fontsize_optional("tick_label_fontsize", tick_label_fontsize)
+    _validate_fontsize_optional("axis_label_fontsize", axis_label_fontsize)
     _validate_fontsize_optional("group_label_fontsize", group_label_fontsize)
     _validate_numeric_optional("group_label_rotation_top", group_label_rotation_top)
     _validate_numeric_optional("group_label_rotation_right", group_label_rotation_right)
     _validate_fontsize_optional("cbar_fontsize", cbar_fontsize)
     _validate_numeric_optional("cbar_pad", cbar_pad)
+    _validate_numeric_optional("cbar_shrink", cbar_shrink)
     _validate_numeric_optional("row_metric_vmin", row_metric_vmin)
     _validate_numeric_optional("row_metric_vmax", row_metric_vmax)
     if scale not in {"linear", "log", "sqrt", "power"}:
@@ -193,19 +221,39 @@ def plot_comparison_heatmap(
     row_ticklabels = [row_labels_map.get(mid, mid) for mid in row_ids]
     column_ticklabels = [column_labels_map.get(mid, mid) for mid in col_ids]
     if highlight_non_convergence:
-        def _maybe_mark(label: str, mid: str) -> str:
+        row_convergence, col_convergence = resolve_axis_convergence_for_comparison_heatmap(
+            comparison_data,
+            models=models,
+            row_ids=row_ids,
+            column_ids=col_ids,
+        )
+
+        def _maybe_mark(
+            label: str,
+            mid: str,
+            *,
+            axis_convergence: Dict[str, Optional[bool]],
+        ) -> str:
             converged = None
+            key = str(mid)
             if models is not None and mid in models:
-                converged = converged_for_model_path(getattr(models[mid], "name_or_path", None))
+                converged = converged_for_trainer(models[mid])
+            elif key in axis_convergence:
+                converged = axis_convergence[key]
             return format_label_with_convergence(
                 str(label),
                 converged=converged,
                 highlight_non_convergence=highlight_non_convergence,
             )
 
-        row_ticklabels = [_maybe_mark(lbl, mid) for lbl, mid in zip(row_ticklabels, row_ids)]
-        if not rectangular:
-            column_ticklabels = [_maybe_mark(lbl, mid) for lbl, mid in zip(column_ticklabels, col_ids)]
+        row_ticklabels = [
+            _maybe_mark(lbl, mid, axis_convergence=row_convergence)
+            for lbl, mid in zip(row_ticklabels, row_ids)
+        ]
+        column_ticklabels = [
+            _maybe_mark(lbl, mid, axis_convergence=col_convergence)
+            for lbl, mid in zip(column_ticklabels, col_ids)
+        ]
     n_rows = len(row_ids)
     n_cols = len(col_ids)
     custom_vmin = vmin is not None
@@ -279,6 +327,8 @@ def plot_comparison_heatmap(
             "cross_encoding_positive_minus_negative": "Cross-encoding true-minus-false mean",
             "gradiend_feature_cross_encoding_mean": "GRADIEND × feature-class cross-encoding (mean)",
             "gradiend_feature_cross_encoding_count": "GRADIEND × feature-class cross-encoding (eval count)",
+            "gradiend_transition_cross_encoding_mean": "GRADIEND × transition cross-encoding (mean)",
+            "gradiend_transition_cross_encoding_count": "GRADIEND × transition cross-encoding (eval count)",
         }
         if str(measure).startswith("anchor_aligned_encoding_"):
             parts = str(measure).split("_")
@@ -345,9 +395,11 @@ def plot_comparison_heatmap(
     if annot_fontsize is not None:
         annot_kws["fontsize"] = annot_fontsize
 
-    cbar_kws = {"shrink": 0.75}
+    cbar_kws = {"shrink": 0.75 if cbar_shrink is None else float(cbar_shrink)}
     if cbar_pad is not None:
         cbar_kws["pad"] = cbar_pad
+    if cbar_label:
+        cbar_kws["label"] = cbar_label
 
     if ax is None:
         _, ax = plt.subplots(figsize=figsize)
@@ -409,6 +461,21 @@ def plot_comparison_heatmap(
 
     if isinstance(title, str):
         ax.set_title(title, usetex=False)
+
+    resolved_axis_label_fontsize = axis_label_fontsize
+    if resolved_axis_label_fontsize is None and tick_label_fontsize is not None:
+        resolved_axis_label_fontsize = float(tick_label_fontsize) + 4
+    elif (
+        resolved_axis_label_fontsize is not None
+        and tick_label_fontsize is not None
+        and float(resolved_axis_label_fontsize) <= float(tick_label_fontsize)
+    ):
+        resolved_axis_label_fontsize = float(tick_label_fontsize) + 2
+
+    if xlabel:
+        ax.set_xlabel(xlabel, fontsize=resolved_axis_label_fontsize)
+    if ylabel:
+        ax.set_ylabel(ylabel, fontsize=resolved_axis_label_fontsize)
 
     active_groups = comparison_data.get("pretty_groups")
     if active_groups is not None:
@@ -478,8 +545,11 @@ def plot_comparison_heatmap(
             )
         disable_usetex_for_axis_text(ax_right)
 
-    if cbar_fontsize is not None and cbar_ax is not None:
-        cbar_ax.tick_params(labelsize=cbar_fontsize)
+    if cbar_ax is not None:
+        if cbar_fontsize is not None:
+            cbar_ax.tick_params(labelsize=cbar_fontsize)
+            if cbar_label:
+                cbar_ax.set_ylabel(cbar_label, fontsize=cbar_fontsize)
 
     if custom_cell_annotation:
         def _format_secondary(stat: Dict[str, Any]) -> str:

@@ -2,8 +2,36 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+from typing import Any, Dict
+
 from .base import TrainerSuite
 from .definitions import *
+
+
+@contextmanager
+def _quiet_expected_suite_reload(trainers: Dict[str, Any]):
+    previous_flags = {
+        trainer: getattr(trainer, "_suppress_expected_reload_warning", False)
+        for trainer in trainers.values()
+    }
+    previous_transformers_verbosity = None
+    try:
+        from transformers.utils import logging as transformers_logging
+
+        previous_transformers_verbosity = transformers_logging.get_verbosity()
+        transformers_logging.set_verbosity_error()
+    except Exception:
+        transformers_logging = None
+    try:
+        for trainer in trainers.values():
+            setattr(trainer, "_suppress_expected_reload_warning", True)
+        yield
+    finally:
+        for trainer, previous in previous_flags.items():
+            setattr(trainer, "_suppress_expected_reload_warning", previous)
+        if previous_transformers_verbosity is not None:
+            transformers_logging.set_verbosity(previous_transformers_verbosity)
 
 
 class PositiveTrainerSuite(TrainerSuite):
@@ -152,6 +180,22 @@ class PositiveTrainerSuite(TrainerSuite):
             return self._build_all_but_one_feature_pair_definitions(features)
         raise ValueError(f"Unsupported PositiveTrainerSuite mode: {self.mode!r}")
 
+    def _prepare_child_trainer_kwargs(
+        self,
+        child_kwargs: Dict[str, Any],
+        *,
+        definition: SuitePairDefinition,
+        child_id: str,
+    ) -> Dict[str, Any]:
+        args = child_kwargs.get("args")
+        if args is not None and hasattr(args, "include_other_classes"):
+            args.include_other_classes = True
+        return child_kwargs
+
+    def evaluate_encoder(self, *args: Any, **kwargs: Any) -> Dict[str, Any]:
+        with _quiet_expected_suite_reload(self.trainers):
+            return super().evaluate_encoder(*args, **kwargs)
+
     def compute_cross_encoding_matrix(
         self,
         *,
@@ -176,16 +220,25 @@ class PositiveTrainerSuite(TrainerSuite):
         resolved_run_evaluation = bool(run_evaluation or not allow_incomplete)
         resolved_seed_selection = self._resolve_suite_seed_selection(kwargs.get("seed_selection"))
         if resolved_run_evaluation and resolved_seed_selection == "best":
-            self.evaluate_encoder(
-                split=split,
-                max_size=kwargs.get("max_size"),
-                use_cache=eval_use_cache,
-                plot=False,
-                return_df=False,
-                full_eval=full_eval,
-            )
+            with _quiet_expected_suite_reload(self.trainers):
+                self.evaluate_encoder(
+                    split=split,
+                    max_size=kwargs.get("max_size"),
+                    use_cache=eval_use_cache,
+                    plot=False,
+                    return_df=False,
+                    full_eval=full_eval,
+                )
         kwargs = dict(kwargs)
         kwargs["seed_selection"] = resolved_seed_selection
+        kwargs.setdefault(
+            "positive_class_by_trainer",
+            {
+                child_id: definition.positive_class
+                for child_id, definition in self.pair_definitions.items()
+                if definition.positive_class is not None
+            },
+        )
         if kwargs.get("dispersion") is None:
             kwargs["dispersion"] = self._resolve_suite_dispersion(None)
         return compute_cross_encoding_matrix(

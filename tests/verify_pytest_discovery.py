@@ -27,11 +27,12 @@ def main():
         print("Install with: pip install pytest")
         return 1
     
-    # Try to collect tests
-    print("\nCollecting tests...")
+    # Smoke-check discovery on one lightweight file.
+    print("\nCollecting tests (single-file smoke check)...")
     try:
+        smoke_file = test_dir / "test_training_arguments.py"
         result = subprocess.run(
-            [sys.executable, "-m", "pytest", str(test_dir), "--collect-only", "-q"],
+            [sys.executable, "-m", "pytest", str(smoke_file), "--collect-only", "-q"],
             cwd=str(project_root),
             capture_output=True,
             text=True,

@@ -35,6 +35,7 @@ from gradiend.comparison import (
     compute_grouped_similarity_matrices,
     compute_cross_encoding_matrix,
     normalize_cross_encoding_rows_by_diagonal,
+    source_by_id_from_trainers,
 )
 from gradiend.trainer.core.unified_data import (
     _load_dataframe_from_path,
@@ -47,13 +48,44 @@ from gradiend.trainer.core.unified_schema import (
     UNIFIED_SPLIT,
 )
 from gradiend.trainer.trainer import Trainer
-from gradiend.trainer.core.multi_seed import load_seed_model_group, resolve_default_seed_selection
+from gradiend.trainer.core.multi_seed import (
+    load_seed_model_group,
+    resolve_default_seed_selection,
+    resolve_dispersion_for_trainers,
+    resolve_seed_selection_for_trainers,
+)
+from gradiend.comparison.seed_policy import enter_analysis_mode, models_for_comparison
 from gradiend.util.logging import get_logger
+from gradiend.model import ParamMappedGradiendModel
 from gradiend.visualizer.heatmaps import plot_comparison_heatmap, plot_similarity_heatmap
 from gradiend.visualizer.topk.pairwise_heatmap import plot_topk_overlap_heatmap
 
 
 logger = get_logger(__name__)
+
+
+class _GradiendOnlyModel:
+    """Small adapter for comparing saved GRADIEND weights without loading the base model."""
+
+    def __init__(self, gradiend: ParamMappedGradiendModel) -> None:
+        self.gradiend = gradiend
+        self.name_or_path = getattr(gradiend, "name_or_path", None)
+
+    def get_topk_weights(self, *args: Any, **kwargs: Any) -> Any:
+        return self.gradiend.get_topk_weights(*args, **kwargs)
+
+    def get_weight_importance(self, *args: Any, **kwargs: Any) -> Any:
+        return self.gradiend.get_weight_importance(*args, **kwargs)
+
+
+def _load_gradiend_only_model(model_path: str, *, device: str = "cpu") -> _GradiendOnlyModel:
+    dev = torch.device(device)
+    gradiend = ParamMappedGradiendModel.from_pretrained(
+        model_path,
+        device_encoder=dev,
+        device_decoder=dev,
+    )
+    return _GradiendOnlyModel(gradiend)
 
 
 def _default_child_id(pair: Tuple[str, str]) -> str:

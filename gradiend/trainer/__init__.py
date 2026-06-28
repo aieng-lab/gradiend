@@ -16,7 +16,8 @@ Core components:
 
 # Trainer and reproducibility
 from .trainer import Trainer, set_seed
-from .core.multi_seed import MultiSeedTrainerView
+from .core.multi_seed import MultiSeedTrainerView, is_multi_seed_view
+from .core.seed_models import SeedModelGroup
 
 # Load training stats from saved model directory
 from .core.stats import load_training_stats
@@ -50,12 +51,22 @@ from .text.common.dataset import TextGradientTrainingDataset
 from .factory import create_model_with_gradiend
 
 # Suite (after datasets — text stack imports GradientTrainingDataset from gradiend.trainer)
-from .suite import TrainerSuite, PositiveTrainerSuite, SymmetricTrainerSuite, SuitePairDefinition, PositiveFeatureDefinition
+from .suite import (
+    TrainerSuite,
+    TrainerCollection,
+    PositiveTrainerSuite,
+    SymmetricTrainerSuite,
+    SuitePairDefinition,
+    PositiveFeatureDefinition,
+)
 
 __all__ = [
     "Trainer",
     "MultiSeedTrainerView",
+    "is_multi_seed_view",
+    "SeedModelGroup",
     "TrainerSuite",
+    "TrainerCollection",
     "PositiveTrainerSuite",
     "SymmetricTrainerSuite",
     "SuitePairDefinition",

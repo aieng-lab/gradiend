@@ -3,7 +3,28 @@ Decoder evaluation utilities for decoder grid analysis.
 """
 
 import json
-from typing import Any, Dict
+from typing import Any, Dict, Optional, Tuple
+
+
+def parse_grid_candidate_id(id_key: Any, entry: Optional[Dict[str, Any]] = None) -> Optional[Tuple[float, float]]:
+    """Extract ``(feature_factor, learning_rate)`` from a decoder grid key or entry id."""
+    if id_key == "base":
+        return None
+    if isinstance(id_key, tuple) and len(id_key) == 2:
+        return float(id_key[0]), float(id_key[1])
+    if isinstance(id_key, dict):
+        ff = id_key.get("feature_factor")
+        lr = id_key.get("learning_rate")
+        if ff is not None and lr is not None:
+            return float(ff), float(lr)
+    if entry:
+        id_payload = entry.get("id")
+        if isinstance(id_payload, dict):
+            ff = id_payload.get("feature_factor")
+            lr = id_payload.get("learning_rate")
+            if ff is not None and lr is not None:
+                return float(ff), float(lr)
+    return None
 
 
 def convert_results_to_dict(list_results):

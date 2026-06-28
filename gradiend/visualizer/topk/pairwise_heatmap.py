@@ -33,11 +33,13 @@ def plot_topk_overlap_heatmap(
     scale_gamma: Optional[float] = None,
     annot_fontsize: Optional[Union[int, float]] = None,
     tick_label_fontsize: Optional[Union[int, float]] = None,
+    axis_label_fontsize: Optional[Union[int, float]] = None,
     group_label_fontsize: Optional[Union[int, float]] = None,
     group_label_rotation_top: Union[int, float] = 0,
     group_label_rotation_right: Union[int, float] = 0,
     cbar_pad: Optional[float] = None,
     cbar_fontsize: Optional[Union[int, float]] = None,
+    cbar_shrink: Optional[float] = None,
     percentages: bool = True,
     row_metric: Optional[Dict[str, float]] = None,
     row_metric_label: Optional[str] = "corr",
@@ -47,6 +49,9 @@ def plot_topk_overlap_heatmap(
     row_label_mapping: Optional[Dict[str, str]] = None,
     column_label_mapping: Optional[Dict[str, str]] = None,
     highlight_non_convergence: bool = True,
+    seed_aggregate: str = "mean",
+    dispersion: str = "none",
+    dispersion_display: str = "none",
 ):
     """
     Plot pairwise top-k overlap between GRADIEND models.
@@ -81,6 +86,7 @@ def plot_topk_overlap_heatmap(
         group_label_rotation_right: Rotation for right group labels.
         cbar_pad: Optional colorbar padding.
         cbar_fontsize: Optional colorbar font size.
+        cbar_shrink: Optional colorbar shrink factor (width relative to heatmap).
         percentages: Whether overlap values are shown as percentages.
         row_metric: Optional side metric by row id.
         row_metric_label: Label for the side metric.
@@ -117,11 +123,13 @@ def plot_topk_overlap_heatmap(
         scale_gamma=scale_gamma,
         annot_fontsize=annot_fontsize,
         tick_label_fontsize=tick_label_fontsize,
+        axis_label_fontsize=axis_label_fontsize,
         group_label_fontsize=group_label_fontsize,
         group_label_rotation_top=group_label_rotation_top,
         group_label_rotation_right=group_label_rotation_right,
         cbar_pad=cbar_pad,
         cbar_fontsize=cbar_fontsize,
+        cbar_shrink=cbar_shrink,
         percentages=percentages,
         row_metric=row_metric,
         row_metric_label=row_metric_label,
@@ -131,6 +139,9 @@ def plot_topk_overlap_heatmap(
         row_label_mapping=row_label_mapping,
         column_label_mapping=column_label_mapping,
         highlight_non_convergence=highlight_non_convergence,
+        seed_aggregate=seed_aggregate,
+        dispersion=dispersion,
+        dispersion_display=dispersion_display,
     )
 
 
@@ -159,11 +170,13 @@ def plot_topk_overlap_heatmap_with_correlation(
     scale_gamma: Optional[float] = None,
     annot_fontsize: Optional[Union[int, float]] = None,
     tick_label_fontsize: Optional[Union[int, float]] = None,
+    axis_label_fontsize: Optional[Union[int, float]] = None,
     group_label_fontsize: Optional[Union[int, float]] = None,
     group_label_rotation_top: Union[int, float] = 0,
     group_label_rotation_right: Union[int, float] = 0,
     cbar_pad: Optional[float] = None,
     cbar_fontsize: Optional[Union[int, float]] = None,
+    cbar_shrink: Optional[float] = None,
     percentages: bool = False,
     row_label_mapping: Optional[Dict[str, str]] = None,
     column_label_mapping: Optional[Dict[str, str]] = None,
@@ -232,11 +245,13 @@ def plot_topk_overlap_heatmap_with_correlation(
         scale_gamma=scale_gamma,
         annot_fontsize=annot_fontsize,
         tick_label_fontsize=tick_label_fontsize,
+        axis_label_fontsize=axis_label_fontsize,
         group_label_fontsize=group_label_fontsize,
         group_label_rotation_top=group_label_rotation_top,
         group_label_rotation_right=group_label_rotation_right,
         cbar_pad=cbar_pad,
         cbar_fontsize=cbar_fontsize,
+        cbar_shrink=cbar_shrink,
         percentages=percentages,
         row_metric=row_metric or None,
         row_metric_label="corr",

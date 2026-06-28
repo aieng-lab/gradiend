@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from gradiend.visualizer.probability_shifts import plot_probability_shifts
+from gradiend.visualizer.probability_shifts import plot_probability_shifts, _lr_axis_config
 
 
 def _make_plotting_data(lrs=(1e-5, 0.001, 0.1, 1.0, 10.0, 100.0, 1000.0), ff=-1.0):
@@ -67,44 +67,49 @@ class TestPlotProbabilityShifts:
         assert path == output
         assert os.path.exists(output)
 
-    def test_counterfactual_uses_p_other_on_metric_dataset(self, tmp_path):
+    def test_strengthen_star_on_other_factual_dataset_panel(self):
         """
-        Selection star is drawn on P(other_class) on target_class dataset.
-        For target_class=3PL: use P(3SG) on 3PL (orange line in Dataset 3PL subplot).
+        Strengthen 3SG: star on P(3SG) in the Dataset 3PL panel (factual 3PL context).
         """
         pytest.importorskip("matplotlib")
-        # Distinct probs so we can verify which value is used for the star
         grid = _make_plotting_data()["plotting_data"]
-        grid[(1.0, 0.1)] = {
-            "id": {"feature_factor": 1.0, "learning_rate": 0.1},
+        grid[(-1.0, 0.1)] = {
+            "id": {"feature_factor": -1.0, "learning_rate": 0.1},
             "probs_by_dataset": {
                 "3SG": {"3SG": 0.9, "3PL": 0.1},
-                "3PL": {"3SG": 0.4, "3PL": 0.6},  # P(3SG) on 3PL = 0.4 (counterfactual)
+                "3PL": {"3SG": 0.55, "3PL": 0.45},
             },
             "lms": {"lms": 0.5},
         }
         plotting_data = {"plotting_data": grid}
-        decoder_results = _make_decoder_results(selected_lr=0.1)
+        decoder_results = {
+            "3SG": {"learning_rate": 0.1, "feature_factor": -1.0, "value": 0.55},
+            "grid": {},
+        }
 
+        import matplotlib.axes
+
+        real_scatter = matplotlib.axes.Axes.scatter
         scatter_calls = []
 
-        def track_scatter(*args, **kwargs):
-            scatter_calls.append((args, kwargs))
+        def track_scatter(self_ax, *args, **kwargs):
+            scatter_calls.append((self_ax, args, kwargs))
+            return real_scatter(self_ax, *args, **kwargs)
 
         with patch("matplotlib.pyplot.show"):
-            with patch("matplotlib.axes.Axes.scatter", side_effect=track_scatter):
+            with patch.object(matplotlib.axes.Axes, "scatter", track_scatter):
                 plot_probability_shifts(
                     decoder_results=decoder_results,
                     plotting_data=plotting_data,
                     class_ids=["3SG", "3PL"],
-                    target_class="3PL",
-                    output=str(tmp_path / "out.pdf"),
+                    target_class="3SG",
                     show=False,
                 )
 
-        # Should have scatter for the selection star (marker="*")
-        star_scatters = [c for c in scatter_calls if len(c[0]) >= 2 and "marker" in c[1] and c[1]["marker"] == "*"]
-        assert len(star_scatters) >= 1, "Expected at least one star scatter for selected config"
+        star_scatters = [c for c in scatter_calls if len(c[1]) >= 2 and c[2].get("marker") == "*"]
+        assert len(star_scatters) == 1
+        _ax, args, _kwargs = star_scatters[0]
+        assert args[1] == [0.55]
 
     def test_vertical_line_at_selected_lr(self, tmp_path):
         """Vertical line (axvline) is drawn at selected learning rate on all subplots."""
@@ -162,6 +167,17 @@ class TestPlotProbabilityShifts:
                 assert kwargs["right"] <= max_lr * 2, "xlim right should not extend far beyond max_lr"
                 assert kwargs["right"] < 1e6, "xlim right should not be 1e7"
 
+    def test_lr_axis_labels_only_base_and_powers_of_ten(self):
+        scale, linthresh, lr0_x, _x_min, _x_max, ticks, labels = _lr_axis_config(
+            [0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0]
+        )
+
+        assert scale == "log"
+        assert linthresh is None
+        assert lr0_x == pytest.approx(0.0001)
+        assert ticks == [0.0001, 0.001, 0.01, 0.1, 1.0, 10.0, 100.0]
+        assert labels == ["base", "$10^{-3}$", "$10^{-2}$", "$10^{-1}$", "$10^{0}$", "$10^{1}$", "$10^{2}$"]
+
     def test_plot_subplot_count(self, tmp_path):
         """Plot has LMS + one subplot per dataset class (no separate selection-metrics subplot)."""
         pytest.importorskip("matplotlib")
@@ -190,6 +206,65 @@ class TestPlotProbabilityShifts:
         # n_subplots = 1 + len(dataset_classes) = 1 + 2 = 3 (LMS + 3SG + 3PL)
         assert subplot_calls, "subplots should be called"
         assert subplot_calls[0] == 3, "Expected 3 subplots (LMS + 2 dataset classes)"
+
+    def test_plot_uses_legacy_titles_and_top_legend(self):
+        """Probability-shift plot keeps the old compact title and legend layout."""
+        pytest.importorskip("matplotlib")
+        plotting_data = _make_plotting_data()
+        decoder_results = _make_decoder_results()
+
+        with patch("matplotlib.pyplot.show"):
+            fig, axes = plot_probability_shifts(
+                decoder_results=decoder_results,
+                plotting_data=plotting_data,
+                class_ids=["3PL", "3SG"],
+                target_class="3PL",
+                show=False,
+                return_fig_ax=True,
+            )
+
+        try:
+            assert fig._suptitle is None
+            assert axes[0].get_title() == "LMS (Language Modeling Score)"
+            assert axes[1].get_title() == "Dataset: 3PL — P(class)"
+            assert axes[2].get_title() == "Dataset: 3SG — P(class)"
+            assert fig.legends
+            legend = fig.legends[0]
+            assert legend._loc == 9  # upper center
+            assert [text.get_text() for text in legend.get_texts()] == ["3PL", "3SG"]
+        finally:
+            __import__("matplotlib").pyplot.close(fig)
+
+    def test_plot_negative_learning_rates_uses_symlog_scale(self, tmp_path):
+        """Negative LR sweeps use symlog so lr=0 and sign are visible on a log-like axis."""
+        pytest.importorskip("matplotlib")
+        lrs = (-10.0, -1.0, -0.1, -0.01, -0.001)
+        plotting_data = _make_plotting_data(lrs=lrs)
+        decoder_results = _make_decoder_results(selected_lr=-0.1)
+
+        scale_calls = []
+
+        def track_set_xscale(scale, *args, **kwargs):
+            scale_calls.append((scale, kwargs))
+
+        with patch("matplotlib.pyplot.show"):
+            with patch("matplotlib.axes.Axes.set_xscale", side_effect=track_set_xscale):
+                plot_probability_shifts(
+                    decoder_results=decoder_results,
+                    plotting_data=plotting_data,
+                    class_ids=["3SG", "3PL"],
+                    target_class="3SG",
+                    output=str(tmp_path / "neg_lrs.pdf"),
+                    show=False,
+                )
+
+        assert scale_calls
+        assert all(scale == "symlog" for scale, _ in scale_calls)
+        scale, linthresh, lr0_x, _, _, _, labels = _lr_axis_config(list(lrs))
+        assert scale == "symlog"
+        assert linthresh is not None and linthresh > 0
+        assert lr0_x == 0.0
+        assert labels[-1] == "base"
 
     def test_evaluate_base_model_counterfactual_p_other_on_metric_dataset(self):
         """Trainer produces probs[class] = P(other) on target_class dataset for selection."""
@@ -234,8 +309,8 @@ class TestPlotProbabilityShifts:
             "gradiend.trainer.text.prediction.prediction_objective.PredictionObjective.score_probability_shift"
         ) as mock_eval:
             mock_eval.return_value = {
-                "3SG": {"3SG": 0.8, "3PL": 0.2},
-                "3PL": {"3SG": 0.3, "3PL": 0.7},
+                "3PL": {"3SG": 0.8, "3PL": 0.2},
+                "3SG": {"3SG": 0.6, "3PL": 0.4},
             }
             with patch(
                 "gradiend.trainer.text.prediction.prediction_objective.PredictionObjective.compute_lms",
@@ -265,7 +340,6 @@ class TestPlotProbabilityShifts:
                     use_cache=False,
                 )
 
-        # probs["3PL"] = P(3SG) on 3PL = 0.3
-        assert result["probs"]["3PL"] == 0.3
-        # probs["3SG"] = P(3PL) on 3SG = 0.2
-        assert result["probs"]["3SG"] == 0.2
+        # Strengthen 3SG: P(3SG) on factual 3PL rows
+        assert result["probs"]["3SG"] == 0.8
+        assert result["probs"]["3PL"] == 0.4

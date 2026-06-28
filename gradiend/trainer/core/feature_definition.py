@@ -15,6 +15,7 @@ import pandas as pd
 import os
 
 from gradiend.trainer.core.protocols import DataProvider
+from gradiend.trainer.core.config import validate_source_target
 from gradiend.trainer.core.unified_schema import UNIFIED_SPLIT
 from gradiend.util.paths import (
     resolve_custom_prediction_head_dir,
@@ -515,6 +516,8 @@ class FeatureLearningDefinition(DataProvider, ABC):
         """
         source = self._default_from_training_args(source, "source", fallback="factual")
         target = self._default_from_training_args(None, "target", fallback="diff")
+        validate_source_target("source", source)
+        validate_source_target("target", target)
         max_size = self._default_from_training_args(max_size, "encoder_eval_max_size")
         pre_load_gradients = self._default_from_training_args(pre_load_gradients, "use_cached_gradients", fallback=False)
         encoder_eval_balance = self._default_from_training_args(

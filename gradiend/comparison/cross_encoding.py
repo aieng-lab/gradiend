@@ -9,7 +9,17 @@ import pandas as pd
 import torch
 
 from gradiend.comparison.common import _aggregate_seed_scores, _validate_aggregate_dispersion_combo
-from gradiend.util.paths import resolve_encoder_analysis_path
+from gradiend.trainer.core.multi_seed import (
+    resolve_dispersion_for_trainers,
+    resolve_seed_run_entries,
+    resolve_seed_selection_for_trainers,
+)
+from gradiend.util.paths import (
+    ARTIFACT_MODEL,
+    has_saved_model,
+    resolve_encoder_analysis_path,
+    resolve_output_path,
+)
 
 
 def _infer_positive_class_from_pair(target_classes: Sequence[str], explicit_positive_class: Optional[str] = None) -> str:
@@ -75,13 +85,59 @@ def _extract_negative_mean_from_df(encoder_df: Any, negative_class: str) -> floa
     return float(df["encoded"].astype(float).mean())
 
 
+def _is_gradiend_checkpoint(path: Optional[str]) -> bool:
+    if not path or not os.path.isdir(path):
+        return False
+    if os.path.isfile(os.path.join(path, "gradiend_context.json")):
+        return True
+    return has_saved_model(path)
+
+
+def _resolve_trainer_load_directory(trainer: object, *, load_directory: Optional[str] = None) -> str:
+    """Resolve a GRADIEND checkpoint directory for cross-encoding evaluation."""
+    candidates: List[str] = []
+    if load_directory:
+        candidates.append(str(load_directory))
+    experiment_dir = getattr(trainer, "experiment_dir", None)
+    if callable(experiment_dir):
+        experiment_dir = experiment_dir()
+    if experiment_dir:
+        artifact_path = resolve_output_path(str(experiment_dir), None, ARTIFACT_MODEL)
+        if artifact_path:
+            candidates.append(artifact_path)
+    model_path = getattr(trainer, "model_path", None)
+    if model_path:
+        candidates.append(str(model_path))
+
+    seen: set[str] = set()
+    for path in candidates:
+        norm = os.path.normpath(path)
+        if norm in seen:
+            continue
+        seen.add(norm)
+        if _is_gradiend_checkpoint(norm):
+            return norm
+
+    if candidates:
+        return os.path.normpath(candidates[0])
+    run_id = getattr(trainer, "run_id", None)
+    raise ValueError(
+        f"Trainer {run_id!r} has no saved GRADIEND checkpoint. "
+        "Train the model first or pass a checkpoint path via load_directory."
+    )
+
+
 def _load_eval_model_for_trainer(trainer: object, *, load_directory: Optional[str] = None) -> Any:
+    from gradiend.comparison.seed_policy import unwrap_trainer
+
+    trainer = unwrap_trainer(trainer)
     training_args = getattr(trainer, "training_args", None) or getattr(trainer, "_training_args", None)
     kwargs: Dict[str, Any] = {"definition": trainer}
     if training_args is not None:
         kwargs["training_args"] = training_args
         kwargs["trust_remote_code"] = getattr(training_args, "trust_remote_code", False)
-    return trainer.load_model(load_directory or trainer.model_path, **kwargs)
+    checkpoint_path = _resolve_trainer_load_directory(trainer, load_directory=load_directory)
+    return trainer.load_model(checkpoint_path, **kwargs)
 
 
 def _load_cached_encoder_df(trainer: object, *, split: str, max_size: Optional[int]) -> Optional[pd.DataFrame]:
@@ -128,12 +184,45 @@ def _resolve_full_eval(full_eval: Optional[bool], split: str) -> bool:
     return bool(full_eval)
 
 
+def _matrix_row_ids(comparison_data: Dict[str, Any]) -> Optional[List[Any]]:
+    row_ids = comparison_data.get("model_ids")
+    if row_ids is None:
+        row_ids = comparison_data.get("rows")
+    return list(row_ids) if isinstance(row_ids, list) else None
+
+
+def _matrix_column_ids(comparison_data: Dict[str, Any]) -> Optional[List[Any]]:
+    col_ids = comparison_data.get("column_ids")
+    if col_ids is None:
+        col_ids = comparison_data.get("columns")
+    if col_ids is None:
+        return _matrix_row_ids(comparison_data)
+    return list(col_ids) if isinstance(col_ids, list) else None
+
+
+def can_normalize_cross_encoding_by_diagonal(comparison_data: Dict[str, Any]) -> bool:
+    """True when row ``i`` and column ``i`` refer to the same id (square self-axis)."""
+    row_ids = _matrix_row_ids(comparison_data)
+    col_ids = _matrix_column_ids(comparison_data)
+    matrix = comparison_data.get("matrix")
+    if row_ids is None or col_ids is None or not isinstance(matrix, list):
+        return False
+    if len(row_ids) != len(col_ids) or len(matrix) != len(row_ids):
+        return False
+    for row in matrix:
+        if not isinstance(row, list) or len(row) != len(row_ids):
+            return False
+    return row_ids == col_ids
+
+
 def normalize_cross_encoding_rows_by_diagonal(comparison_data: Dict[str, Any]) -> Dict[str, Any]:
     """Normalize each row of cross-encoding data by its diagonal value.
 
     Args:
-        comparison_data: Payload returned by :func:`compute_cross_encoding_matrix`.
-            It must contain list-valued ``matrix`` and ``model_ids`` entries.
+        comparison_data: Payload with list-valued ``matrix`` and ``model_ids``.
+            For oriented matrices, ``column_ids`` must match ``model_ids`` so
+            ``matrix[i][i]`` is the anchor self-encoding. Use
+            :func:`can_normalize_cross_encoding_by_diagonal` to check first.
             Optional ``cell_stats`` entries are scaled consistently for numeric
             aggregate fields.
 
@@ -147,11 +236,19 @@ def normalize_cross_encoding_rows_by_diagonal(comparison_data: Dict[str, Any]) -
     Raises:
         TypeError: If the payload does not contain list-valued ``matrix`` and
             ``model_ids`` entries.
-        ValueError: If any diagonal value is zero.
+        ValueError: If row/column ids are not aligned for a square diagonal, or
+            any diagonal value is zero.
     """
+    if not can_normalize_cross_encoding_by_diagonal(comparison_data):
+        row_ids = _matrix_row_ids(comparison_data)
+        col_ids = _matrix_column_ids(comparison_data)
+        raise ValueError(
+            "Cannot normalize by diagonal: matrix must be square with "
+            f"matching row and column ids (got rows={row_ids!r}, columns={col_ids!r})."
+        )
     matrix = comparison_data.get("matrix")
-    model_ids = comparison_data.get("model_ids")
-    if not isinstance(matrix, list) or not isinstance(model_ids, list):
+    model_ids = _matrix_row_ids(comparison_data)
+    if not isinstance(matrix, list) or model_ids is None:
         raise TypeError("comparison_data must contain list-valued 'matrix' and 'model_ids'")
     normalized = dict(comparison_data)
     normalized_matrix: List[List[float]] = []
@@ -187,6 +284,9 @@ def normalize_cross_encoding_rows_by_diagonal(comparison_data: Dict[str, Any]) -
     if normalized_cell_stats:
         normalized["cell_stats"] = normalized_cell_stats
     normalized["row_normalized_by_diagonal"] = True
+    measure = normalized.get("measure")
+    if isinstance(measure, str) and not measure.endswith("_row_normalized"):
+        normalized["measure"] = f"{measure}_row_normalized"
     return normalized
 
 
@@ -200,9 +300,10 @@ def compute_cross_encoding_matrix(
     full_eval: Optional[bool] = None,
     run_evaluation: bool = True,
     allow_incomplete: bool = False,
-    seed_selection: str = "best",
+    seed_selection: Optional[str] = None,
     seed_aggregate: str = "mean",
-    dispersion: str = "none",
+    dispersion: Optional[str] = None,
+    positive_class_by_trainer: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     """Compare how trainers encode each other's binary target-pair data.
 
@@ -241,6 +342,9 @@ def compute_cross_encoding_matrix(
         dispersion: Optional dispersion metadata for multi-seed cells.
             Supported values are ``"none"``, ``"std"``, ``"range"``, and
             ``"minmax"``.
+        positive_class_by_trainer: Optional explicit positive class by trainer
+            id. This is used by positive trainer suites whose positive/negative
+            pairs do not follow the ``non_``/``non-`` naming heuristic.
 
     Returns:
         A comparison payload with ``measure``, ``model_ids``, ``rows``,
@@ -265,12 +369,17 @@ def compute_cross_encoding_matrix(
             "Currently supported cross-encoding metrics are "
             "'positive_mean', 'negative_mean', and 'positive_minus_negative'"
         )
-    seed_selection = str(seed_selection).strip().lower()
-    if seed_selection not in {"best", "all_convergent"}:
-        raise ValueError("seed_selection must be 'best' or 'all_convergent'")
+    seed_selection = resolve_seed_selection_for_trainers(trainers, seed_selection)
+    if dispersion is None:
+        dispersion = resolve_dispersion_for_trainers(trainers, None)
     _validate_aggregate_dispersion_combo(seed_aggregate, dispersion)
     include_other_classes = _resolve_full_eval(full_eval, split)
     ids = list(trainers.keys())
+    explicit_positive_by_trainer = {
+        str(key): str(value)
+        for key, value in (positive_class_by_trainer or {}).items()
+        if value is not None
+    }
     positive_by_col: Dict[str, str] = {}
     negative_by_col: Dict[str, str] = {}
     pair_by_col: Dict[str, List[str]] = {}
@@ -279,7 +388,9 @@ def compute_cross_encoding_matrix(
         trainer = trainers[trainer_id]
         target_classes = [str(c) for c in (trainer.target_classes or [])]
         training_args = getattr(trainer, "training_args", None) or getattr(trainer, "_training_args", None)
-        explicit_positive = getattr(training_args, "positive_class", None) if training_args is not None else None
+        explicit_positive = explicit_positive_by_trainer.get(str(trainer_id))
+        if explicit_positive is None and training_args is not None:
+            explicit_positive = getattr(training_args, "positive_class", None)
         positive_by_col[trainer_id] = _infer_positive_class_from_pair(target_classes, explicit_positive)
         negative_by_col[trainer_id] = next(
             cls for cls in target_classes if str(cls) != str(positive_by_col[trainer_id])
@@ -306,7 +417,12 @@ def compute_cross_encoding_matrix(
                 encoder_df = eval_result.get("encoder_df") if isinstance(eval_result, dict) else None
             row_encoder_dfs[trainer_id] = encoder_df
         else:
-            seed_paths = trainer.get_saved_seed_run_paths("all_convergent") if hasattr(trainer, "get_saved_seed_run_paths") else [trainer.model_path]
+            seed_paths = [
+                seed_path
+                for _, seed_path in resolve_seed_run_entries(trainer, seed_selection)
+            ]
+            if not seed_paths:
+                seed_paths = [trainer.model_path]
             encoder_dfs: List[Any] = []
             best_seed_path = trainer.get_best_seed_run_path() if hasattr(trainer, "get_best_seed_run_path") else None
             reused_best_cache = False
@@ -414,6 +530,7 @@ def compute_cross_encoding_matrix(
         "seed_selection": seed_selection,
         "seed_aggregate": seed_aggregate,
         "dispersion": dispersion,
+        "explicit_positive_class_by_trainer": explicit_positive_by_trainer,
         "n_matrix": n_matrix,
         "cell_stats": cell_stats,
         "multi_seed": seed_selection != "best",

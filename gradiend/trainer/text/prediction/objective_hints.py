@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 _SEQ2SEQ_OBJECTIVE_DESCRIPTIONS: tuple[tuple[str, str], ...] = (
-    ("seq2seq_decoder", "single-token decoder"),
-    ("seq2seq_decoder_sequence_cloze", "[MASK] multi-token decoder cloze"),
-    ("seq2seq_encoder_mlm", "encoder-side MLM"),
+    ("seq2seq_encoder_mlm", "encoder-side MLM (default for auto)"),
+    ("seq2seq_decoder", "single-token decoder (experimental)"),
+    ("seq2seq_decoder_sequence_cloze", "multi-token decoder cloze (experimental)"),
 )
 
 

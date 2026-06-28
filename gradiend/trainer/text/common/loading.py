@@ -17,10 +17,51 @@ from transformers import (
     AutoModelForSeq2SeqLM,
 )
 
+from gradiend.util import get_logger
 from gradiend.util.util import set_requires_grad_true
 from gradiend.trainer.text.prediction.decoder_only_mlm import DecoderModelWithMLMHead
 
+try:
+    from transformers import Gemma3ForCausalLM as _Gemma3ForCausalLM
+except ImportError:
+    _Gemma3ForCausalLM = None
+
 HF_TOKEN = os.getenv("HF_TOKEN")
+logger = get_logger(__name__)
+
+
+def _is_gemma3_multimodal_text_checkpoint(config) -> bool:
+    """True for Gemma 3 4B/12B/27B checkpoints that include a vision tower in config."""
+    return (
+        getattr(config, "model_type", None) == "gemma3"
+        and getattr(config, "vision_config", None) is not None
+    )
+
+
+def _load_causal_lm_for_config(name_or_path, config, load_kwargs):
+    """
+    Load a causal LM, preferring text-only wrappers for multimodal HF auto mappings.
+
+    Transformers maps ``gemma3`` to ``Gemma3ForConditionalGeneration`` in
+    ``AutoModelForCausalLM``, which loads the vision tower even for text-only GRADIEND
+    training and can yield unusable backbone gradients. ``Gemma3ForCausalLM`` omits
+    vision weights and uses the standard text forward path.
+    """
+    if _is_gemma3_multimodal_text_checkpoint(config):
+        if _Gemma3ForCausalLM is None:
+            logger.warning(
+                "Gemma 3 multimodal checkpoint %r should use Gemma3ForCausalLM for text-only "
+                "training, but the installed Transformers build does not provide it; falling "
+                "back to AutoModelForCausalLM.",
+                name_or_path,
+            )
+        else:
+            logger.info(
+                "Loading %r with Gemma3ForCausalLM (text-only; vision tower omitted).",
+                name_or_path,
+            )
+            return _Gemma3ForCausalLM.from_pretrained(name_or_path, token=HF_TOKEN, **load_kwargs)
+    return AutoModelForCausalLM.from_pretrained(name_or_path, token=HF_TOKEN, **load_kwargs)
 
 
 def _is_unknown_transformers_architecture_error(error: Exception) -> bool:
@@ -89,7 +130,7 @@ class AutoModelForLM(nn.Module):
                 model = DecoderModelWithMLMHead.from_pretrained(name_or_path, **load_kwargs)
             else:
                 try:
-                    model = AutoModelForCausalLM.from_pretrained(name_or_path, token=HF_TOKEN, **load_kwargs)
+                    model = _load_causal_lm_for_config(name_or_path, config, load_kwargs)
                 except Exception as causal_error:
                     if _is_unknown_transformers_architecture_error(causal_error):
                         _raise_unknown_transformers_architecture_error(name_or_path, causal_error)

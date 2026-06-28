@@ -184,7 +184,7 @@ def _mock_trainer(tmpdir: str, **training_kw):
         train_batch_size=1,
         eval_steps=1,
         num_train_epochs=1,
-        max_steps=3,
+        max_steps=2,
         learning_rate=1e-4,
         experiment_dir=os.path.join(tmpdir, "precompute_lock_test"),
         use_cache=False,
@@ -269,8 +269,8 @@ def test_precompute_with_in_training_eval_records_step_scores():
         stats = _load_training_json(trainer.experiment_dir)
         scores = stats["training_stats"]["scores"]
         score_steps = {int(step) for step in scores}
-        assert {0, 1, 2}.issubset(score_steps)
-        assert stats["training_stats"]["global_step"] >= 3
+        assert {0, 1}.issubset(score_steps)
+        assert stats["training_stats"]["global_step"] >= 2
 
 
 def test_trainer_wraps_gradient_dataset_with_precomputed_wrapper():

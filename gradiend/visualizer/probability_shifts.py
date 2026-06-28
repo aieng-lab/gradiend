@@ -1,22 +1,105 @@
 """
-Probability shifts plot: target token probabilities vs learning rate,
-grouped by dataset class with selection metrics highlighted.
+Probability shifts plot: target token probabilities vs learning rate.
+
+Each subplot is keyed by **factual** class (``label_class`` / ``factual_id``):
+``probs_by_dataset["3PL"]["3SG"]`` is P(3SG) on rows where the factual class is 3PL.
+Strengthening class T with ``decoder_eval_prob_on_other_class`` selects P(T) on the
+other factual class's panel (star on that curve).
 
 Requires matplotlib. If missing, raises ImportError with install instructions.
 """
 
 import os
+import math
 from typing import Any, Dict, List, Optional, Tuple
 
 from gradiend.visualizer.plot_optional import _require_matplotlib
-from gradiend.visualizer.labels import (
-    converged_for_trainer,
-    format_label_with_convergence,
-    resolve_highlight_non_convergence,
+from gradiend.model._source_target import (
+    feature_factor_from_encoding_direction,
+    resolve_model_source,
 )
 from gradiend.util.logging import get_logger
 
 logger = get_logger(__name__)
+
+
+def _with_base_point(
+    xs: List[float],
+    ys: List[float],
+    base_x: float,
+    base_y: float,
+) -> Tuple[List[float], List[float]]:
+    """Return (x, y) with the base point included, sorted by x."""
+    points = sorted(zip(list(xs) + [base_x], list(ys) + [base_y]), key=lambda t: t[0])
+    return [p[0] for p in points], [p[1] for p in points]
+
+
+def _apply_lr_xscale(ax: Any, scale: str, linthresh: Optional[float]) -> None:
+    """Apply learning-rate x-axis scale (log or symmetric log around zero)."""
+    if scale == "log":
+        ax.set_xscale("log")
+    elif scale == "symlog":
+        ax.set_xscale("symlog", linthresh=linthresh if linthresh is not None else 1e-6, base=10)
+    else:
+        ax.set_xscale("linear")
+
+
+def _lr_axis_config(
+    lrs: List[float],
+) -> Tuple[str, Optional[float], float, float, float, List[float], List[str]]:
+    """
+    Choose x-axis scale and tick layout for learning-rate sweeps.
+
+    - All LRs > 0: standard log scale, base anchor at min(lr)/10.
+    - Otherwise: symmetric log (symlog) so lr=0 and negative LRs remain readable.
+    """
+    if not lrs:
+        raise ValueError("No learning rates to plot")
+
+    def _power_ticks(min_abs: float, max_abs: float) -> List[float]:
+        lo = math.ceil(math.log10(min_abs))
+        hi = math.floor(math.log10(max_abs))
+        return [10.0 ** exp for exp in range(lo, hi + 1)]
+
+    def _power_label(value: float) -> str:
+        if value == 0:
+            return "base"
+        sign = "-" if value < 0 else ""
+        exp = int(round(math.log10(abs(value))))
+        return f"${sign}10^{{{exp}}}$"
+
+    if all(lr > 0 for lr in lrs):
+        min_lr = min(lrs)
+        max_lr = max(lrs)
+        lr0_x = min_lr / 10.0
+        x_min, x_max = lr0_x * 0.5, max_lr * 1.5
+        decade_ticks = _power_ticks(min_lr, max_lr)
+        x_ticks = [lr0_x] + decade_ticks
+        x_labels = ["base"] + [_power_label(tick) for tick in decade_ticks]
+        return "log", None, lr0_x, x_min, x_max, x_ticks, x_labels
+
+    lr0_x = 0.0
+    abs_nonzero = [abs(lr) for lr in lrs if lr != 0]
+    linthresh = min(abs_nonzero) / 10.0 if abs_nonzero else 1e-6
+    linthresh = max(linthresh, 1e-12)
+
+    neg_lrs = [lr for lr in lrs if lr < 0]
+    pos_lrs = [lr for lr in lrs if lr > 0]
+    neg_ticks = [-tick for tick in reversed(_power_ticks(min(abs(lr) for lr in neg_lrs), max(abs(lr) for lr in neg_lrs)))] if neg_lrs else []
+    pos_ticks = _power_ticks(min(pos_lrs), max(pos_lrs)) if pos_lrs else []
+    x_ticks = neg_ticks + [lr0_x] + pos_ticks
+    x_labels = [_power_label(tick) for tick in neg_ticks] + ["base"] + [_power_label(tick) for tick in pos_ticks]
+
+    if neg_lrs and pos_lrs:
+        x_min, x_max = min(neg_lrs) * 1.5, max(pos_lrs) * 1.5
+    elif neg_lrs:
+        x_min, x_max = min(neg_lrs) * 1.5, linthresh * 2
+    elif pos_lrs:
+        x_min, x_max = -linthresh * 2, max(pos_lrs) * 1.5
+    else:
+        x_min, x_max = -linthresh * 2, linthresh * 2
+
+    return "symlog", linthresh, lr0_x, x_min, x_max, x_ticks, x_labels
 
 
 def plot_probability_shifts(
@@ -54,8 +137,8 @@ def plot_probability_shifts(
         output: Path to save plot. If None and trainer.experiment_dir is set, saves there.
         show: Whether to display the plot
         figsize: Figure size in inches. If None, auto-calculated.
-        highlight_non_convergence: When True, append a non-convergence marker to the figure title
-            for non-converged runs. ``None`` uses ``TrainingArguments.highlight_non_convergence``.
+        highlight_non_convergence: Accepted for API compatibility. Probability-shift plots do
+            not add a figure-level title.
         return_fig_ax: If True, return ``(fig, axes)`` and leave the figure open for
             caller-side customization.
         **kwargs: Additional arguments passed to matplotlib
@@ -195,37 +278,43 @@ def plot_probability_shifts(
     
     feature_factors = sorted(set(lr_data.keys()))
     
-    # Determine which feature_factor to use for each target class (class -> ff that pushes toward that class)
-    class_to_feature_factor = {}
+    # ff per class for strengthen plots (same rule as evaluate_decoder; see _source_target.py).
+    class_to_feature_factor: Dict[str, float] = {}
     if trainer is not None and hasattr(trainer, "get_model"):
         try:
             model = trainer.get_model()
-            if model and hasattr(model, "feature_class_encoding_direction"):
-                direction = model.feature_class_encoding_direction
-                if direction:
-                    for class_name in class_ids:
-                        if class_name in direction:
-                            class_to_feature_factor[class_name] = -direction[class_name]
+            direction = getattr(model, "feature_class_encoding_direction", None)
+            if isinstance(direction, dict):
+                source = resolve_model_source(model, trainer)
+                for class_name in class_ids:
+                    if class_name in direction:
+                        class_to_feature_factor[class_name] = feature_factor_from_encoding_direction(
+                            direction[class_name], source
+                        )
         except Exception:
             pass
     if not class_to_feature_factor and feature_factors:
         default_ff = feature_factors[0]
         class_to_feature_factor = {class_name: default_ff for class_name in class_ids}
     
-    # Single feature factor for chosen target (consistent across all plots)
-    # For _weaken keys, use ff from summary (opposite direction)
-    ff = None
-    if summary_key and summary_key in (summary or {}):
+    # Strengthen: plot only the derived ff for this target class (never another class's orientation).
+    is_weaken = summary_key and summary_key.endswith("_weaken")
+    ff = class_to_feature_factor.get(base_metric)
+    if is_weaken and summary_key and summary_key in (summary or {}):
         ff = summary[summary_key].get("feature_factor")
     if ff is None:
-        ff = class_to_feature_factor.get(base_metric, feature_factors[0] if feature_factors else None)
+        ff = feature_factors[0] if feature_factors else None
     if ff is None or ff not in lr_data:
-        raise ValueError(f"No data for target_class={target_class}. Ensure class_to_feature_factor maps it to an evaluated feature factor.")
+        derived = class_to_feature_factor.get(base_metric)
+        raise ValueError(
+            f"No grid data for strengthen target_class={target_class!r} with feature_factor={derived!r}. "
+            f"Grid was evaluated for feature_factors={feature_factors}. "
+            f"Re-run evaluate_decoder(target_class={target_class!r}, use_cache=False)."
+        )
     
-    # lr=0 (base) x-position — one step left of min lr on log scale
+    # lr=0 (base) anchor on the x-axis
     lrs_ff = sorted(lr_data[ff].keys())
-    min_lr = min(lrs_ff) if lrs_ff else 1e-5
-    lr0_x = min_lr / 10
+    x_scale, linthresh, lr0_x, x_min, x_max, x_ticks, x_labels = _lr_axis_config(lrs_ff)
     
     # Base model data
     base_entry = grid.get("base", {})
@@ -243,14 +332,13 @@ def plot_probability_shifts(
     else:
         base_lms_val = float(lm)
     
-    def _prepend_base(xs, ys, x0, y0):
-        """Prepend base point so line connects from base."""
-        return [x0] + list(xs), [y0] + list(ys)
+    def _with_base(xs, ys, x0, y0):
+        """Include base point in line data, sorted by x."""
+        return _with_base_point(xs, ys, x0, y0)
     
     # Subplots: 1) LMS, 2+) Dataset probability shifts (selection star on counterfactual or factual line)
     lrs = sorted(lr_data[ff].keys())
     other_classes = [c for c in class_ids if c != base_metric]
-    is_weaken = summary_key and summary_key.endswith("_weaken")
     n_subplots = 1 + len(dataset_classes)
     if figsize is None:
         figsize = (8, 2 * n_subplots)
@@ -262,24 +350,23 @@ def plot_probability_shifts(
     ax_lms = axes[0]
     lms_vals = [metrics_data[ff][lr].get("lms", 0.0) for lr in lrs]
     base_lms = base_lms_val if base_lms_val is not None else (lms_vals[0] if lms_vals else 0.0)
-    x_lms, y_lms = _prepend_base(lrs, lms_vals, lr0_x, base_lms)
+    x_lms, y_lms = _with_base(lrs, lms_vals, lr0_x, base_lms)
     ax_lms.plot(x_lms, y_lms, marker="o", label="LMS", alpha=0.7, color="#2ca02c")
     ax_lms.set_ylabel("LMS")
     ax_lms.set_title("LMS (Language Modeling Score)")
     ax_lms.legend(loc="best", fontsize=8)
-    ax_lms.set_xscale("log")
+    _apply_lr_xscale(ax_lms, x_scale, linthresh)
     ax_lms.grid(True, alpha=0.3)
     
-    # Selection metric:
-    # - strengthen (increase_target_probabilities=True):
-    #       P(target_class) on the *other* class dataset (e.g. P(3SG) on 3PL)
-    # - weaken (increase_target_probabilities=False):
-    #       P(target_class) on its own dataset (e.g. P(3SG) on 3SG)
+    # Selection metric (strengthen 3SG → P(3SG) on factual 3PL panel, 3SG curve).
+    # Panel keys are factual label_class; see evaluate_base_model probs_by_dataset contract.
     selection_metric_class = base_metric
     if is_weaken:
         selection_dataset_class = base_metric
-    else:
+    elif getattr(getattr(trainer, "config", None), "decoder_eval_prob_on_other_class", True):
         selection_dataset_class = other_classes[0] if other_classes else base_metric
+    else:
+        selection_dataset_class = base_metric
     selection_metric_label = f"P({selection_metric_class})"
 
     # Plot 2+: Dataset probability shifts — P(3PL) and P(3SG) on each dataset; highlight selection metric
@@ -294,11 +381,10 @@ def plot_probability_shifts(
                 probs_c.append(prob)
             d_base = base_probs_by_dataset.get(dataset_class, {})
             base_p = d_base.get(class_name, 0.0) if isinstance(d_base, dict) else 0.0
-            x_p, y_p = _prepend_base(lrs, probs_c, lr0_x, base_p)
+            x_p, y_p = _with_base(lrs, probs_c, lr0_x, base_p)
             # Emphasize the curve that is the selection metric (used to choose learning rate)
             is_selection_curve = is_selection_dataset and class_name == selection_metric_class
-            label = f"{class_name} (target)" if is_selection_curve else class_name
-            ax.plot(x_p, y_p, marker="o", label=label, alpha=0.7, linewidth=2.5 if is_selection_curve else 1.5)
+            ax.plot(x_p, y_p, marker="o", label=class_name, alpha=0.7, linewidth=2.5 if is_selection_curve else 1.5)
         if summary_key in (summary or {}) and is_selection_dataset:
             selected_lr = summary[summary_key].get("learning_rate")
             if selected_lr is not None:
@@ -307,22 +393,22 @@ def plot_probability_shifts(
                 sp = entry.get(selection_metric_class, 0.0) if isinstance(entry, dict) else 0.0
                 ax.scatter([selected_lr], [sp], marker="*", s=280, zorder=5, alpha=0.95, color="red", label="Selected")
         ax.set_ylabel("Probability")
-        title = f"Dataset: {dataset_class} — P(class)"
-        ax.set_title(title)
-        ax.set_xscale("log")
+        ax.set_title(f"Dataset: {dataset_class} — P(class)")
+        _apply_lr_xscale(ax, x_scale, linthresh)
         ax.grid(True, alpha=0.3)
         if dataset_idx == len(dataset_classes) - 1:
             ax.set_xlabel("Learning Rate")
     
-    # X-axis: clamp to actual data range, use data lrs as ticks
-    max_lr = max(lrs) if lrs else lr0_x
-    x_min, x_max = lr0_x * 0.5, max_lr * 1.5
-    x_ticks = [lr0_x] + list(lrs)
-    x_labels = ["base"] + [f"{lr:g}" for lr in lrs]
     for ax in axes:
         ax.set_xlim(left=x_min, right=x_max)
         ax.set_xticks(x_ticks)
         ax.set_xticklabels(x_labels)
+        try:
+            from matplotlib.ticker import NullFormatter
+
+            ax.xaxis.set_minor_formatter(NullFormatter())
+        except Exception:
+            pass
 
     # Vertical line at selected learning rate (all subplots)
     selected_lr = None
@@ -332,22 +418,18 @@ def plot_probability_shifts(
         for ax in axes:
             ax.axvline(x=selected_lr, color="gray", linestyle="--", alpha=0.7, zorder=1)
     
-    highlight = resolve_highlight_non_convergence(highlight_non_convergence, trainer=trainer)
-    suptitle = None
-    if trainer is not None and highlight:
-        run_id = getattr(trainer, "run_id", None) or "Probability shifts"
-        suptitle = format_label_with_convergence(
-            str(run_id),
-            converged=converged_for_trainer(trainer),
-            highlight_non_convergence=True,
-        )
-
-    # Shared legend for dataset probability plots (below subplots so suptitle stays on top)
+    # Shared legend for dataset probability plots, restored above the subplots.
     if len(dataset_classes) > 0:
-        handles, labels = axes[-1].get_legend_handles_labels()
+        handles, labels = [], []
+        for ax in axes[1:]:
+            ax_handles, ax_labels = ax.get_legend_handles_labels()
+            handles.extend(ax_handles)
+            labels.extend(ax_labels)
         seen = set()
         unique_handles, unique_labels = [], []
         for h, l in zip(handles, labels):
+            if l == "Selected":
+                continue
             if l not in seen:
                 seen.add(l)
                 unique_handles.append(h)
@@ -355,18 +437,14 @@ def plot_probability_shifts(
         fig.legend(
             unique_handles,
             unique_labels,
-            loc="lower center",
-            bbox_to_anchor=(0.5, 0.0),
+            loc="upper center",
+            bbox_to_anchor=(0.5, 1.0),
             ncol=min(len(unique_labels), 6),
             fontsize=8,
         )
 
-    bottom_margin = 0.06 if len(dataset_classes) > 0 else 0.0
-    top_margin = 0.93 if suptitle else 1.0
-    plt.tight_layout(rect=[0, bottom_margin, 1, top_margin])
-
-    if suptitle:
-        fig.suptitle(suptitle, fontsize=10, y=top_margin)
+    top_margin = 0.94 if len(dataset_classes) > 0 else 1.0
+    plt.tight_layout(rect=[0, 0, 1, top_margin])
     
     # Save plot
     output_path = None

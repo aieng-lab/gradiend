@@ -6,7 +6,7 @@ import re
 from itertools import islice
 from typing import Dict, Iterable, List, Optional, Tuple, Union
 
-from tqdm import tqdm
+from gradiend.util.tqdm_utils import gradiend_tqdm
 
 from gradiend.data.core.spacy_util import load_spacy_model
 from gradiend.data.text import SpacyTagSpec
@@ -58,9 +58,8 @@ def _filter_neutral(
     excluded_count = 0
     total_count = 0
     it = iter(sentences)
-    pbar = tqdm(
-        it, desc="Neutral filter", unit=" sent", leave=True, position=0, dynamic_ncols=True,
-        mininterval=2.0,
+    pbar = gradiend_tqdm(
+        it, desc="Neutral filter", unit=" sent", leave=True, position=0, mininterval=2.0,
     )
     try:
         for sent in pbar:

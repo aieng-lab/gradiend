@@ -1,2 +1,4 @@
 # Shell scripts must use LF (run on Linux SLURM login/compute nodes).
 slurm/** text eol=lf
+*.sh text eol=lf
+*.sbatch text eol=lf

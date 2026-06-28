@@ -148,6 +148,7 @@ class PredictionObjective:
         *,
         key_text: str,
         dataset_class_col: Optional[str],
+        factual_dataset_class_col: Optional[str] = None,
         use_row_wise: bool,
         return_per_row_df: bool,
         trainer: Any,
@@ -160,6 +161,7 @@ class PredictionObjective:
             eval_data_df=eval_data_df,
             key_text=key_text,
             dataset_class_col=dataset_class_col,
+            factual_dataset_class_col=factual_dataset_class_col,
             use_row_wise=use_row_wise,
             return_per_row_df=return_per_row_df,
             objective=self.name,
@@ -253,7 +255,7 @@ def resolve_prediction_objective(trainer: Any, model_or_tokenizer: Any = None) -
         if head_dir and has_saved_decoder_mlm_head(head_dir):
             objective = DecoderMLMHeadObjective()
         elif model_or_tokenizer is not None and is_seq2seq_model(model_or_tokenizer):
-            objective = PredictionObjective("seq2seq_decoder")
+            objective = PredictionObjective("seq2seq_encoder_mlm")
         elif model_or_tokenizer is not None and is_decoder_only_model(model_or_tokenizer):
             objective = PredictionObjective("clm_next_token")
         else:

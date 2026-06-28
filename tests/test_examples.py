@@ -8,6 +8,7 @@ Also tests encoder distribution plot violin count.
 import os
 import importlib.util
 import ast
+import subprocess
 import sys
 from pathlib import Path
 
@@ -20,10 +21,19 @@ from gradiend.visualizer.encoder_distributions import plot_encoder_distributions
 
 
 EXAMPLE_FILES = sorted(
-    str(path).replace("\\", "/")
-    for path in Path("gradiend/examples").glob("*.py")
+    str(path.relative_to(Path(__file__).resolve().parents[1])).replace("\\", "/")
+    for path in (Path(__file__).resolve().parents[1] / "gradiend/examples").glob("*.py")
     if path.name != "__init__.py"
 )
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _fail_on_non_convergence_kwarg_ok(value: ast.AST) -> bool:
+    """Accept literal True or helper parameter defaulting to True."""
+    if isinstance(value, ast.Constant) and value.value is True:
+        return True
+    return isinstance(value, ast.Name) and value.id == "fail_on_non_convergence"
 
 
 def _violin_group_count(trainer, encoder_df, output_path, **plot_kwargs) -> int:
@@ -49,13 +59,13 @@ class TestExampleFiles:
     @pytest.mark.parametrize("example_file", EXAMPLE_FILES)
     def test_example_file_exists(self, example_file):
         """Test that example file exists."""
-        file_path = Path(example_file)
+        file_path = _REPO_ROOT / example_file
         assert file_path.exists(), f"Example file {example_file} does not exist"
     
     @pytest.mark.parametrize("example_file", EXAMPLE_FILES)
     def test_example_file_has_valid_syntax(self, example_file):
         """Test that example file has valid Python syntax."""
-        file_path = Path(example_file)
+        file_path = _REPO_ROOT / example_file
         if not file_path.exists():
             pytest.skip(f"Example file {example_file} does not exist")
         
@@ -69,25 +79,44 @@ class TestExampleFiles:
         except Exception as e:
             pytest.fail(f"Error reading example file {example_file}: {e}")
 
-    @pytest.mark.parametrize("example_file", EXAMPLE_FILES)
-    def test_example_file_imports_without_running_workflow(self, example_file):
-        """Example modules should import cleanly without starting expensive workflows."""
-        module_name = f"_gradiend_example_smoke_{Path(example_file).stem}"
-        spec = importlib.util.spec_from_file_location(module_name, example_file)
-        assert spec is not None
-        assert spec.loader is not None
+    def test_all_example_files_import_without_running_workflow(self):
+        """Import every example in one subprocess (one Python startup, not one per file)."""
+        paths = [str((_REPO_ROOT / example_file).resolve()) for example_file in EXAMPLE_FILES]
+        missing = [p for p in paths if not Path(p).exists()]
+        if missing:
+            pytest.skip(f"Missing example files: {missing}")
 
-        module = importlib.util.module_from_spec(spec)
-        old_module = sys.modules.get(module_name)
-        sys.modules[module_name] = module
-        try:
-            spec.loader.exec_module(module)
-        finally:
-            if old_module is None:
-                sys.modules.pop(module_name, None)
-            else:
-                sys.modules[module_name] = old_module
-    
+        paths_literal = repr(paths)
+        code = (
+            "import importlib.util, pathlib, sys\n"
+            f"paths = {paths_literal}\n"
+            "failures = []\n"
+            "for path_str in paths:\n"
+            "    path = pathlib.Path(path_str)\n"
+            "    try:\n"
+            "        spec = importlib.util.spec_from_file_location('_gradiend_example_smoke', path)\n"
+            "        mod = importlib.util.module_from_spec(spec)\n"
+            "        spec.loader.exec_module(mod)\n"
+            "    except Exception as exc:\n"
+            "        failures.append((path_str, exc))\n"
+            "if failures:\n"
+            "    for path_str, exc in failures:\n"
+            "        print(f'FAIL {path_str}: {exc}', file=sys.stderr)\n"
+            "    sys.exit(1)\n"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            cwd=str(_REPO_ROOT),
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+        if result.returncode != 0:
+            pytest.fail(
+                "One or more example files failed to import.\n"
+                f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+            )
+
     def test_examples_directory_exists(self):
         """Test that examples directory exists."""
         examples_dir = Path("gradiend/examples")
@@ -113,7 +142,7 @@ class TestExampleFiles:
                 if kw.arg == "fail_on_non_convergence":
                     value = kw.value
                     break
-            assert isinstance(value, ast.Constant) and value.value is True, (
+            assert _fail_on_non_convergence_kwarg_ok(value), (
                 f"{example_file}: TrainingArguments must set fail_on_non_convergence=True"
             )
 

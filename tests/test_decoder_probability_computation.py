@@ -66,8 +66,8 @@ class TestEvaluateBaseModelProbabilityComputation:
         def fake_score(self, *args, **kwargs):
             calls["score_kwargs"] = kwargs
             return {
-                "3SG": {"3SG": 0.8, "3PL": 0.2},
-                "3PL": {"3SG": 0.7, "3PL": 0.3},
+                "3PL": {"3SG": 0.8, "3PL": 0.2},
+                "3SG": {"3SG": 0.6, "3PL": 0.4},
             }
 
         monkeypatch.setattr(PredictionObjective, "score_probability_shift", fake_score)
@@ -86,7 +86,7 @@ class TestEvaluateBaseModelProbabilityComputation:
             use_cache=False,
         )
 
-        assert result["probs"] == {"3SG": 0.2, "3PL": 0.7}
+        assert result["probs"] == {"3SG": 0.8, "3PL": 0.4}
         assert result["lms"] == {"lms": 0.5}
         assert calls["score_kwargs"]["dataset_class_col"] == "label_class"
 
@@ -103,7 +103,7 @@ class TestEvaluateBaseModelProbabilityComputation:
         monkeypatch.setattr(
             PredictionObjective,
             "score_probability_shift",
-            lambda *args, **kwargs: {"3SG": {"3SG": 0.8, "3PL": 0.2}, "3PL": {"3SG": 0.6, "3PL": 0.4}},
+            lambda *args, **kwargs: {"3PL": {"3SG": 0.8, "3PL": 0.2}, "3SG": {"3SG": 0.6, "3PL": 0.4}},
         )
         monkeypatch.setattr(PredictionObjective, "compute_lms", lambda *args, **kwargs: {"lms": 0.5})
 
@@ -120,8 +120,8 @@ class TestEvaluateBaseModelProbabilityComputation:
             use_cache=False,
         )
 
-        assert result["probs"]["3SG"] == 0.2
-        assert result["probs"]["3PL"] == 0.6
+        assert result["probs"]["3SG"] == 0.8
+        assert result["probs"]["3PL"] == 0.4
 
     def test_evaluate_base_model_multiple_tokens_per_class(self, monkeypatch):
         config = TextPredictionConfig(
@@ -136,8 +136,8 @@ class TestEvaluateBaseModelProbabilityComputation:
         def fake_score(self, *args, **kwargs):
             calls["targets"] = kwargs["targets"]
             return {
-                "masc_nom": {"masc_nom": 0.8, "fem_nom": 0.2},
-                "fem_nom": {"masc_nom": 0.2, "fem_nom": 0.8},
+                "fem_nom": {"masc_nom": 0.8, "fem_nom": 0.2},
+                "masc_nom": {"masc_nom": 0.2, "fem_nom": 0.8},
             }
 
         monkeypatch.setattr(PredictionObjective, "score_probability_shift", fake_score)
@@ -157,7 +157,7 @@ class TestEvaluateBaseModelProbabilityComputation:
         )
 
         assert calls["targets"] == {"masc_nom": ["der", "Der"], "fem_nom": ["die", "Die"]}
-        assert result["probs"] == {"masc_nom": 0.2, "fem_nom": 0.2}
+        assert result["probs"] == {"masc_nom": 0.8, "fem_nom": 0.8}
 
     def test_explicit_decoder_targets_with_overlap_warns_not_errors(self):
         config = TextPredictionConfig(

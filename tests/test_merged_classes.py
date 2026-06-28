@@ -149,8 +149,8 @@ class TestClassMergeMapCreateTrainingData:
 
     @pytest.fixture(scope="class")
     def tokenizer(self):
-        from transformers import AutoTokenizer
-        return AutoTokenizer.from_pretrained("bert-base-uncased")
+        from tests.conftest import MockTokenizer
+        return MockTokenizer()
 
     def test_create_training_data_merged_pipeline(self, tokenizer):
         config = TextPredictionConfig(
@@ -303,7 +303,7 @@ class TestClassMergeMapSuiteIntegration:
     def test_suite_child_create_training_data_with_merged_pair(self):
         from gradiend.trainer.core.arguments import TrainingArguments
         from gradiend.trainer.suite import SymmetricTrainerSuite, SuitePairDefinition
-        from transformers import AutoTokenizer
+        from tests.conftest import MockTokenizer
 
         pair_definitions = [
             SuitePairDefinition(
@@ -324,7 +324,7 @@ class TestClassMergeMapSuiteIntegration:
             args=TrainingArguments(do_eval=False, output_dir="tmp_test_suite_merge"),
         )
         trainer = suite.get_trainer("pronoun_number_singular_plural")
-        tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
+        tokenizer = MockTokenizer()
         training_data = trainer.create_training_data(tokenizer, split="train", batch_size=1)
         assert training_data is not None
         assert len(training_data) >= 1

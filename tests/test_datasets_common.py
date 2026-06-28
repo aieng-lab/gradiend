@@ -135,6 +135,80 @@ class TestGradientTrainingDataset:
         
         batch = dataset[0]
         assert torch.equal(batch["source"], alternative_grad)
+
+    def test_dataset_source_alternative_inverts_numeric_label_metadata(self):
+        """Alternative-source rows should carry the alternative/source-side binary label.
+
+        The raw row label belongs to the factual side. When source="alternative",
+        the encoded gradient is the opposite side of a binary feature pair, so
+        the label metadata must flip too. Otherwise correlation and plots compare
+        alternative gradients against factual labels.
+        """
+        factual_grad = torch.randn(100)
+        alternative_grad = torch.randn(100)
+
+        def gradient_creator(inputs):
+            if torch.equal(inputs, torch.tensor([1.0])):
+                return factual_grad
+            return alternative_grad
+
+        training_data = MockTrainingData([
+            {"factual": torch.tensor([1.0]), "alternative": torch.tensor([2.0]), "label": 1}
+        ])
+
+        dataset = GradientTrainingDataset(
+            training_data=training_data,
+            gradient_creator=gradient_creator,
+            source="alternative",
+            target="diff",
+        )
+
+        batch = dataset[0]
+        assert batch["label"] == -1
+
+    def test_dataset_source_alternative_inverts_batched_numeric_label_metadata(self):
+        """Batched alternative-source labels should be inverted elementwise.
+
+        This covers the normal dataloader path where a batch contains several
+        factual labels. +1 and -1 swap for the alternative source; neutral 0
+        stays neutral.
+        """
+        items = [
+            {"factual": torch.tensor([1.0]), "alternative": torch.tensor([2.0]), "label": 1},
+            {"factual": torch.tensor([3.0]), "alternative": torch.tensor([4.0]), "label": -1},
+            {"factual": torch.tensor([5.0]), "alternative": torch.tensor([6.0]), "label": 0},
+        ]
+        training_data = MockTrainingData(items, batch_size=3)
+
+        dataset = GradientTrainingDataset(
+            training_data=training_data,
+            gradient_creator=lambda inputs: torch.randn(100),
+            source="alternative",
+            target="diff",
+        )
+
+        batch = dataset[0]
+        assert batch["label"] == [-1, 1, 0]
+
+    def test_dataset_source_alternative_does_not_invert_non_binary_numeric_labels(self):
+        """Only GRADIEND binary labels (-1, 0, +1) are source-flipped.
+
+        Some generic callers may carry numeric metadata that is not a binary
+        feature label. Those values must pass through unchanged.
+        """
+        training_data = MockTrainingData([
+            {"factual": torch.tensor([1.0]), "alternative": torch.tensor([2.0]), "label": 7}
+        ])
+
+        dataset = GradientTrainingDataset(
+            training_data=training_data,
+            gradient_creator=lambda inputs: torch.randn(100),
+            source="alternative",
+            target="diff",
+        )
+
+        batch = dataset[0]
+        assert batch["label"] == 7
     
     def test_dataset_target_diff(self):
         """Test that dataset computes diff as target."""

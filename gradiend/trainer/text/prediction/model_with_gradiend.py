@@ -136,6 +136,27 @@ class TextPredictionModelWithGradiend(TextModelWithGradiend):
                         base_model=self.base_model,
                     )
                 return self._place_inputs_for_base_forward(item)
+            base_forward = self._get_base_forward_model()
+            from gradiend.trainer.text.prediction.decoder_only_mlm import DecoderModelWithMLMHead
+
+            if isinstance(base_forward, DecoderModelWithMLMHead) and base_forward.target_labels:
+                masked = str(masked_text)
+                mask_token = self.tokenizer.mask_token
+                if mask_token and "[MASK]" in masked and mask_token != "[MASK]":
+                    masked = masked.replace("[MASK]", mask_token, 1)
+                max_len = _effective_max_length(self.tokenizer, self.base_model)
+                item = self.tokenizer(
+                    masked, return_tensors="pt", max_length=max_len, truncation=True, padding="max_length"
+                )
+                label_str = str(label).strip()
+                label_map = {lab: idx for idx, lab in enumerate(base_forward.target_labels)}
+                if label_str not in label_map:
+                    raise ValueError(
+                        f"Label {label_str!r} is not a target of the decoder MLM head. "
+                        f"Known labels: {base_forward.target_labels}"
+                    )
+                item["labels"] = torch.tensor([[label_map[label_str]]], dtype=torch.long)
+                return self._place_inputs_for_base_forward(item)
             max_len = _effective_max_length(self.tokenizer, self.base_model)
             item = self.tokenizer(masked_text, return_tensors="pt", max_length=max_len, truncation=True)
             item = self._place_inputs_for_base_forward(item)
@@ -147,8 +168,10 @@ class TextPredictionModelWithGradiend(TextModelWithGradiend):
                 label_token_id = self.tokenizer(f' {label}', add_special_tokens=False)['input_ids']
             else:
                 label_token_id = self.tokenizer(f'{label}', add_special_tokens=False)['input_ids']
-            if not len(label_token_id) == 1:
+            if len(label_token_id) > 1:
                 raise ValueError('Only a single label token is supported', label_token_id, label)
+            elif not label_token_id:
+                raise ValueError(f"Could not tokenize label {label!r} to any token id.")
             label_token_id = label_token_id[0]
             if self.is_decoder_only_model:
                 item['labels'] = torch.full_like(item['input_ids'], -100)
@@ -204,6 +227,37 @@ class TextPredictionModelWithGradiend(TextModelWithGradiend):
                     logger.debug('Predicted next tokens: %s', next_tokens)
                 loss_base_model = outputs.loss
 
+            target_device = kwargs.pop("target_device", self.gradiend.device_encoder)
+            return self._extract_base_gradients_from_loss(
+                loss_base_model,
+                return_dict=return_dict,
+                target_device=target_device,
+            )
+
+    def forward_clm_gradients(self, inputs, return_dict=False, **kwargs):
+        """Compute base gradients via the original causal LM (not the auxiliary MLM head).
+
+        Used for neutral encoder rows when training with ``clm_mlm_head``: those rows use
+        CLM-style labels that are outside the auxiliary head's class vocabulary.
+        """
+        from gradiend.trainer.text.prediction.decoder_only_mlm import DecoderModelWithMLMHead
+
+        with self.exclusive_base_gradient_access():
+            base_forward = self._get_base_forward_model()
+            if not isinstance(base_forward, DecoderModelWithMLMHead):
+                return self.forward(inputs, return_dict=return_dict, **kwargs)
+
+            inputs = self._place_inputs_for_base_forward(inputs)
+            inputs = {
+                k: v.unsqueeze(0) if v.ndim == 1 else (v.squeeze(dim=1) if v.ndim == 3 and v.shape[1] == 1 else v)
+                for k, v in inputs.items()
+            }
+            outputs = base_forward.decoder(**inputs)
+            loss_base_model = outputs.loss
+            if loss_base_model is None:
+                raise ValueError(
+                    "Original decoder CLM forward returned no loss for neutral encoder gradients."
+                )
             target_device = kwargs.pop("target_device", self.gradiend.device_encoder)
             return self._extract_base_gradients_from_loss(
                 loss_base_model,

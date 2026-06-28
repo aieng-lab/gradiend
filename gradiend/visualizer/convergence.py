@@ -6,7 +6,7 @@ Requires matplotlib. If missing, raises ImportError with install instructions.
 """
 
 import os
-from typing import Any, Dict, List, Optional, Tuple, Union, Set
+from typing import Any, Dict, List, Literal, Optional, Tuple, Union, Set
 
 import numpy as np
 
@@ -17,6 +17,34 @@ from gradiend.trainer.core.stats import load_training_stats
 from gradiend.util.logging import get_logger
 
 logger = get_logger(__name__)
+
+ClassSpreadMode = Optional[Literal["minmax", "iqr", "ci95"]]
+
+
+def _validate_class_spread(class_spread: Any) -> ClassSpreadMode:
+    if class_spread is None or class_spread in {"minmax", "iqr", "ci95"}:
+        return class_spread
+    raise ValueError("class_spread must be one of None, 'minmax', 'iqr', or 'ci95'")
+
+
+def _class_spread_keys(mode: Literal["minmax", "iqr"]) -> Tuple[str, str]:
+    if mode == "iqr":
+        return "q1_by_class", "q3_by_class"
+    return "min_by_class", "max_by_class"
+
+
+def _feature_class_spread_keys(mode: Literal["minmax", "iqr"]) -> Tuple[str, str]:
+    if mode == "iqr":
+        return "q1_by_feature_class", "q3_by_feature_class"
+    return "min_by_feature_class", "max_by_feature_class"
+
+
+def _class_spread_title_suffix(mode: Literal["minmax", "iqr", "ci95"]) -> str:
+    if mode == "iqr":
+        return " (shaded: IQR)"
+    if mode == "ci95":
+        return " (shaded: 95% CI)"
+    return " (shaded: min-max)"
 
 
 def _normalize_step_keys(d: Dict[str, Any]) -> Dict[int, Any]:
@@ -85,6 +113,121 @@ def _steps_and_values(
     return steps, series_by_class, series_by_fc
 
 
+def _range_series(
+    training_stats: Dict[str, Any],
+    min_key: str,
+    max_key: str,
+) -> Dict[str, List[Tuple[int, float, float]]]:
+    """Build step -> (min, max) series keyed by label/feature class."""
+    mins = training_stats.get(min_key) or {}
+    maxs = training_stats.get(max_key) or {}
+    mins = _normalize_step_keys(mins) if isinstance(mins, dict) else {}
+    maxs = _normalize_step_keys(maxs) if isinstance(maxs, dict) else {}
+    if not mins or not maxs:
+        return {}
+
+    series: Dict[str, List[Tuple[int, float, float]]] = {}
+    for step, label_mins in mins.items():
+        label_maxs = maxs.get(step)
+        if not isinstance(label_mins, dict) or not isinstance(label_maxs, dict):
+            continue
+        for label, min_val in label_mins.items():
+            max_val = label_maxs.get(label)
+            if isinstance(min_val, (int, float)) and isinstance(max_val, (int, float)):
+                key = str(label)
+                if key not in series:
+                    series[key] = []
+                series[key].append((step, float(min_val), float(max_val)))
+    return series
+
+
+def _confidence_interval_series(
+    training_stats: Dict[str, Any],
+    mean_key: str,
+    std_key: str,
+    n_key: str,
+    *,
+    z: float = 1.96,
+) -> Dict[str, List[Tuple[int, float, float]]]:
+    """Build step -> mean +/- z * standard error series keyed by label/feature class."""
+    means = training_stats.get(mean_key) or {}
+    stds = training_stats.get(std_key) or {}
+    ns = training_stats.get(n_key) or {}
+    means = _normalize_step_keys(means) if isinstance(means, dict) else {}
+    stds = _normalize_step_keys(stds) if isinstance(stds, dict) else {}
+    ns = _normalize_step_keys(ns) if isinstance(ns, dict) else {}
+    if not means or not stds or not ns:
+        return {}
+
+    series: Dict[str, List[Tuple[int, float, float]]] = {}
+    for step, label_means in means.items():
+        label_stds = stds.get(step)
+        label_ns = ns.get(step)
+        if not isinstance(label_means, dict) or not isinstance(label_stds, dict) or not isinstance(label_ns, dict):
+            continue
+        for label, mean_val in label_means.items():
+            std_val = label_stds.get(label)
+            n_val = label_ns.get(label)
+            if std_val is None and not isinstance(label, str):
+                std_val = label_stds.get(str(label))
+            if n_val is None and not isinstance(label, str):
+                n_val = label_ns.get(str(label))
+            if not isinstance(mean_val, (int, float)) or not isinstance(std_val, (int, float)):
+                continue
+            try:
+                n = int(n_val)
+            except (TypeError, ValueError):
+                continue
+            if n <= 0:
+                continue
+            half_width = 0.0 if n <= 1 else float(z) * float(std_val) / float(np.sqrt(n))
+            key = str(label)
+            if key not in series:
+                series[key] = []
+            mean = float(mean_val)
+            series[key].append((step, mean - half_width, mean + half_width))
+    return series
+
+
+def _plot_mean_series_with_range(
+    ax: Any,
+    series: Dict[str, List[Tuple[int, float]]],
+    range_series: Optional[Dict[str, List[Tuple[int, float, float]]]],
+    *,
+    show_range: bool,
+    name_fn: Any,
+) -> None:
+    """Plot mean lines per key, optionally shading min-max range per step."""
+    for label_key, points in sorted(series.items(), key=lambda x: (x[0],)):
+        pts = sorted(points)
+        if not pts:
+            continue
+        xs, ys = zip(*pts)
+        (line,) = ax.plot(xs, ys, label=name_fn(label_key), marker=".", markersize=2)
+        if show_range and range_series:
+            range_pts = sorted(range_series.get(label_key, []))
+            if range_pts:
+                range_by_step = {step: (lo, hi) for step, lo, hi in range_pts}
+                ymins = []
+                ymaxs = []
+                for step in xs:
+                    bounds = range_by_step.get(step)
+                    if bounds is None:
+                        ymins.append(np.nan)
+                        ymaxs.append(np.nan)
+                    else:
+                        ymins.append(bounds[0])
+                        ymaxs.append(bounds[1])
+                ax.fill_between(
+                    xs,
+                    ymins,
+                    ymaxs,
+                    color=line.get_color(),
+                    alpha=0.2,
+                    linewidth=0,
+                )
+
+
 def _class_names_from_series(
     series_by_class: Dict[str, List],
     label_value_to_class_name: Optional[Dict[str, str]],
@@ -147,6 +290,7 @@ def draw_convergence_axes(
     plot_mean_by_class: bool = True,
     plot_mean_by_feature_class: Optional[bool] = None,
     plot_correlation: bool = True,
+    class_spread: ClassSpreadMode = None,
     legend_ncol: Optional[int] = None,
     legend_bbox_to_anchor: Optional[Tuple[float, float]] = None,
     legend_loc: Optional[str] = None,
@@ -166,6 +310,11 @@ def draw_convergence_axes(
         plot_mean_by_feature_class: Whether to draw the mean-by-feature-class subplot.
             ``None`` auto-disables it when it would duplicate ``mean_by_class``.
         plot_correlation: Whether to draw the correlation subplot.
+        class_spread: Optional spread to shade behind each mean line.
+            ``"minmax"`` shades the min-max encoded value range per class
+            (and per feature class), ``"iqr"`` shades the interquartile range (Q1-Q3),
+            and ``"ci95"`` shades mean +/- 1.96 standard errors.
+            Requires the corresponding keys in training stats (recorded from new runs).
         legend_ncol: Number of columns for the external legend when many series are shown.
         legend_bbox_to_anchor: Matplotlib legend anchor used for the external legend.
         legend_loc: Matplotlib legend location used for legends.
@@ -177,6 +326,22 @@ def draw_convergence_axes(
     if plot_mean_by_feature_class is None:
         plot_mean_by_feature_class = not _is_mean_by_feature_class_redundant(ts, series_by_class, series_by_fc)
     corr_series = _correlation_series(ts) if plot_correlation else []
+    spread_mode = _validate_class_spread(class_spread)
+    if spread_mode == "ci95":
+        range_by_class = _confidence_interval_series(ts, "mean_by_class", "std_by_class", "n_by_class")
+        range_by_fc = _confidence_interval_series(
+            ts,
+            "mean_by_feature_class",
+            "std_by_feature_class",
+            "n_by_feature_class",
+        )
+    else:
+        range_by_class = (
+            _range_series(ts, *_class_spread_keys(spread_mode)) if spread_mode else {}
+        )
+        range_by_fc = (
+            _range_series(ts, *_feature_class_spread_keys(spread_mode)) if spread_mode else {}
+        )
 
     def _name(k: str) -> str:
         if label_name_mapping is not None and k in label_name_mapping:
@@ -210,12 +375,13 @@ def draw_convergence_axes(
     if plot_mean_by_class and series_by_class and ax_idx < len(axes):
         ax = axes[ax_idx]
         ax.clear()
-        for label_key, points in sorted(series_by_class.items(), key=lambda x: (x[0],)):
-            pts = sorted(points)
-            if not pts:
-                continue
-            xs, ys = zip(*pts)
-            ax.plot(xs, ys, label=_name(label_key), marker=".", markersize=2)
+        _plot_mean_series_with_range(
+            ax,
+            series_by_class,
+            range_by_class,
+            show_range=spread_mode is not None and bool(range_by_class),
+            name_fn=_name,
+        )
         if best_step_val is not None:
             ax.axvline(x=best_step_val, color="gray", linestyle="--", alpha=0.8, label="best step")
         ax.set_ylabel("encoded value")
@@ -226,7 +392,10 @@ def draw_convergence_axes(
                 leg_kw["bbox_to_anchor"] = leg_bbox
             ax.legend(**leg_kw)
         ax.grid(True, alpha=0.3)
-        ax.set_title("Mean by class")
+        title = "Mean by class"
+        if spread_mode and range_by_class:
+            title += _class_spread_title_suffix(spread_mode)
+        ax.set_title(title)
         ax_idx += 1
 
     legend_fontsize_fc = 6 if use_external_legend else 8
@@ -236,12 +405,13 @@ def draw_convergence_axes(
     if plot_mean_by_feature_class and series_by_fc and ax_idx < len(axes):
         ax = axes[ax_idx]
         ax.clear()
-        for fc, points in sorted(series_by_fc.items(), key=lambda x: x[0]):
-            pts = sorted(points)
-            if not pts:
-                continue
-            xs, ys = zip(*pts)
-            ax.plot(xs, ys, label=_name(fc), marker=".", markersize=2)
+        _plot_mean_series_with_range(
+            ax,
+            series_by_fc,
+            range_by_fc,
+            show_range=spread_mode is not None and bool(range_by_fc),
+            name_fn=_name,
+        )
         if best_step_val is not None:
             ax.axvline(x=best_step_val, color="gray", linestyle="--", alpha=0.8, label="best step")
         ax.set_ylabel("Mean encoded value")
@@ -252,7 +422,10 @@ def draw_convergence_axes(
                 leg_kw_fc["bbox_to_anchor"] = leg_bbox_fc
             ax.legend(**leg_kw_fc)
         ax.grid(True, alpha=0.3)
-        ax.set_title("Mean by feature class")
+        title = "Mean by feature class"
+        if spread_mode and range_by_fc:
+            title += _class_spread_title_suffix(spread_mode)
+        ax.set_title(title)
         ax_idx += 1
 
     if use_external_legend and axes:
@@ -306,6 +479,7 @@ def plot_training_convergence(
     plot_mean_by_class: bool = True,
     plot_mean_by_feature_class: Optional[bool] = None,
     plot_correlation: bool = True,
+    class_spread: ClassSpreadMode = None,
     best_step: bool = True,
     label_name_mapping: Optional[Dict[str, str]] = None,
     output: Optional[str] = None,
@@ -334,6 +508,8 @@ def plot_training_convergence(
     - plot_mean_by_class: mean encoded value per label over steps.
     - plot_mean_by_feature_class: mean encoded value per feature class over steps.
     - plot_correlation: correlation over steps. Best checkpoint step is marked in each subplot.
+    - class_spread: shade encoded value spread per class behind each mean line
+      (``"minmax"`` = min-max, ``"iqr"`` = Q1-Q3, ``"ci95"`` = 95% confidence interval).
 
     Args:
         trainer: Trainer instance with get_training_stats(model_path) or similar.
@@ -343,6 +519,11 @@ def plot_training_convergence(
         plot_mean_by_feature_class: Add a subplot for mean_by_feature_class.
             None = auto (False when redundant with mean_by_class, True otherwise).
         plot_correlation: Add a subplot for correlation.
+        class_spread: Shade spread per class (and feature class) behind mean lines.
+            ``"minmax"``: min-max band. ``"iqr"``: interquartile range (Q1-Q3).
+            ``"ci95"``: 95% confidence interval around the mean (mean +/- 1.96 SE).
+            ``None`` disables spread shading.
+            Requires matching keys in training stats (recorded from new runs).
         best_step: Mark the best checkpoint step (vertical line + point on correlation).
         label_name_mapping: Optional display names for label values.
         output: Explicit output path for the plot file.
@@ -429,122 +610,28 @@ def plot_training_convergence(
     # Leave space for figure-level legend when >= 6 series
     if n_legend_entries >= 6:
         fig.subplots_adjust(right=0.72)
-    ax_idx = 0
 
-    def _name(k: str) -> str:
-        if label_name_mapping is not None and k in label_name_mapping:
-            return label_name_mapping[k]
-        lv2name = ts.get("label_value_to_class_name")
-        if isinstance(lv2name, dict):
-            v = lv2name.get(k)
-            if isinstance(v, str):
-                if label_name_mapping is not None and v in label_name_mapping:
-                    return label_name_mapping[v]
-                return v
-            try:
-                k_float = float(k)
-            except (TypeError, ValueError):
-                k_float = None
-            if k_float is not None:
-                v = lv2name.get(k_float)
-                if isinstance(v, str):
-                    if label_name_mapping is not None and v in label_name_mapping:
-                        return label_name_mapping[v]
-                    return v
-        return str(k)
+    best_corr_val = bsc.get("correlation")
+    if best_corr_val is not None:
+        try:
+            best_corr_val = float(best_corr_val)
+        except (TypeError, ValueError):
+            best_corr_val = None
 
-    use_external_legend = n_legend_entries >= 6
-    n_mbc = len(series_by_class) if series_by_class else 0
-    leg_fs_mbc = 6 if use_external_legend else 8
-    leg_loc_mbc = "center left" if use_external_legend else "best"
-    leg_bbox_mbc = (1.02, 1.0) if use_external_legend else None
-
-    if has_mbc:
-        ax = axes[ax_idx]
-        ax_idx += 1
-        for label_key, points in sorted(series_by_class.items(), key=lambda x: (x[0],)):
-            pts = sorted(points)
-            if not pts:
-                continue
-            xs, ys = zip(*pts)
-            ax.plot(xs, ys, label=_name(label_key), marker=".", markersize=2)
-        if best_step and best_step_val is not None:
-            ax.axvline(x=best_step_val, color="gray", linestyle="--", alpha=0.8, label="best step")
-        ax.set_ylabel("Mean encoded value")
-        ax.set_xlabel("Step" if not (has_mbfc or has_corr) else "")
-        if not use_external_legend:
-            leg_kw = {"loc": leg_loc_mbc, "fontsize": leg_fs_mbc}
-            if leg_bbox_mbc is not None:
-                leg_kw["bbox_to_anchor"] = leg_bbox_mbc
-            ax.legend(**leg_kw)
-        ax.grid(True, alpha=0.3)
-        ax.set_title("Mean by class")
-
-    n_fc = len(series_by_fc) if series_by_fc else 0
-    leg_fs_fc = 6 if use_external_legend else 8
-    leg_loc_fc = "center left" if use_external_legend else "best"
-    leg_bbox_fc = (1.02, 1.0) if use_external_legend else None
-
-    if has_mbfc:
-        ax = axes[ax_idx]
-        ax_idx += 1
-        for fc, points in sorted(series_by_fc.items(), key=lambda x: x[0]):
-            pts = sorted(points)
-            if not pts:
-                continue
-            xs, ys = zip(*pts)
-            ax.plot(xs, ys, label=_name(fc), marker=".", markersize=2)
-        if best_step and best_step_val is not None:
-            ax.axvline(x=best_step_val, color="gray", linestyle="--", alpha=0.8, label="best step")
-        ax.set_ylabel("Mean encoded value")
-        ax.set_xlabel("Step" if not has_corr else "")
-        if not use_external_legend:
-            leg_kw = {"loc": leg_loc_fc, "fontsize": leg_fs_fc}
-            if leg_bbox_fc is not None:
-                leg_kw["bbox_to_anchor"] = leg_bbox_fc
-            ax.legend(**leg_kw)
-        ax.grid(True, alpha=0.3)
-        ax.set_title("Mean by feature class")
-
-    if use_external_legend:
-        legend_axes = []
-        i = 0
-        if has_mbc:
-            legend_axes.append(axes[i])
-            i += 1
-        if has_mbfc:
-            legend_axes.append(axes[i])
-        all_handles, all_labels = [], []
-        for ax in legend_axes:
-            h, l = ax.get_legend_handles_labels()
-            for hi, li in zip(h, l):
-                if li == "best step" and "best step" in all_labels:
-                    continue
-                all_handles.append(hi)
-                all_labels.append(li)
-        fig.legend(
-            all_handles,
-            all_labels,
-            loc=legend_loc or "center left",
-            bbox_to_anchor=legend_bbox_to_anchor or (1.02, 0.5),
-            ncol=legend_ncol if legend_ncol is not None else 1,
-            fontsize=6,
-        )
-
-    if has_corr:
-        ax = axes[ax_idx]
-        xs, ys = zip(*corr_series)
-        ax.plot(xs, ys, color="C0", marker=".", markersize=2, label="correlation")
-        if best_step and best_step_val is not None:
-            ax.axvline(x=best_step_val, color="gray", linestyle="--", alpha=0.8, label="best step")
-            best_corr_val = bsc.get("correlation")
-            if best_corr_val is not None:
-                ax.scatter([best_step_val], [float(best_corr_val)], color="red", s=40, zorder=5, label="best")
-        ax.set_ylabel("Correlation")
-        ax.set_xlabel("Step")
-        ax.legend(loc="best", fontsize=8)
-        ax.grid(True, alpha=0.3)
-        ax.set_title("Correlation")
+    draw_convergence_axes(
+        ts,
+        axes,
+        best_step_val=best_step_val if best_step else None,
+        best_corr=best_corr_val if best_step else None,
+        label_name_mapping=label_name_mapping,
+        plot_mean_by_class=has_mbc,
+        plot_mean_by_feature_class=has_mbfc,
+        plot_correlation=has_corr,
+        class_spread=class_spread,
+        legend_ncol=legend_ncol,
+        legend_bbox_to_anchor=legend_bbox_to_anchor,
+        legend_loc=legend_loc,
+    )
 
     highlight = resolve_highlight_non_convergence(highlight_non_convergence, trainer=trainer)
     resolved_title = resolve_plot_title_with_convergence(

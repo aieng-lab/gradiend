@@ -8,11 +8,13 @@ site/
 build/
 dist/
 runs/
+docs/design/
 test_artifacts/
 manual_test_tmp/
 manual_test_tmp_dbg/
 experiments/gender_de
 experiments/scale_encoder_benchmark
+.cursor/
 
 *.pdf
 *.png
@@ -40,5 +42,14 @@ slurm/
 .pytest_tmp_local/test_custom_font_from_env_path0/
 
 .pytest_tmp_local/
+.pytest*
 
 docs/design/
+
+AGENTS.md
+
+docs/paper/
+
+heavy_tests_report.txt
+
+scripts/

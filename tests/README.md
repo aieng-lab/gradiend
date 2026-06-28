@@ -75,6 +75,31 @@ Shared fixtures are in `conftest.py`:
 
 - **Unit tests**: Fast tests using mocked/toy networks
 - **Integration tests**: Marked with `@pytest.mark.integration` (run actual training)
-- **Slow tests**: Marked with `@pytest.mark.slow`; default pytest runs deselect them via `-m "not slow"`.
+- **Slow tests**: Marked with `@pytest.mark.slow`; default pytest runs deselect them via `-m "not slow and not integration"`.
   Slow tests should include a marker reason or nearby docstring explaining whether they use real HF models,
   network/cache-dependent assets, or intentionally heavier wrapper/integration paths.
+- **Integration tests**: Marked with `@pytest.mark.integration` (real HF weights or full training). Excluded by default like slow tests.
+
+### Memory-safe testing for agents and local dev
+
+Prefer running only the test file you changed:
+
+```bash
+pytest tests/test_foo.py -q
+```
+
+Full CI-equivalent unit suite (~1000 tests; can use substantial RAM):
+
+```bash
+pytest tests/ -m "not slow and not integration" -q
+```
+
+Do **not** run slow/integration tests or `python -m gradiend.examples.train_*` unless you explicitly need them. See `AGENTS.md`.
+
+### Memory profiling
+
+`tests/conftest.py` releases matplotlib/torch allocations between tests. To log per-test RSS growth:
+
+```bash
+GRADIEND_PROFILE_TEST_MEMORY=1 pytest tests/ -m "not slow and not integration" -q
+```

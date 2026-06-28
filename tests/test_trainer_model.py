@@ -217,11 +217,7 @@ class _FakeTopKModel:
 
 class TestMultiSeedTopkStability:
     def test_fail_on_non_convergence_waits_until_max_seeds_exhausted(self):
-        local_tmp_root = os.path.join(os.getcwd(), "test_artifacts")
-        os.makedirs(local_tmp_root, exist_ok=True)
-        temp_dir = os.path.join(local_tmp_root, "multi_seed_fail_waits")
-        shutil.rmtree(temp_dir, ignore_errors=True)
-        os.makedirs(temp_dir, exist_ok=True)
+        temp_dir = tempfile.mkdtemp(prefix="multi_seed_fail_waits_")
         try:
             args = TrainingArguments(
                 experiment_dir=temp_dir,
@@ -278,11 +274,7 @@ class TestMultiSeedTopkStability:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_train_reports_topk_stability_for_multiple_convergent_seeds(self):
-        local_tmp_root = os.path.join(os.getcwd(), "test_artifacts")
-        os.makedirs(local_tmp_root, exist_ok=True)
-        temp_dir = os.path.join(local_tmp_root, "topk_stability_case")
-        shutil.rmtree(temp_dir, ignore_errors=True)
-        os.makedirs(temp_dir, exist_ok=True)
+        temp_dir = tempfile.mkdtemp(prefix="topk_stability_case_")
         try:
             args = TrainingArguments(
                 experiment_dir=temp_dir,
@@ -369,6 +361,10 @@ class TestMultiSeedTopkStability:
             assert topk_stability["mean_pairwise_overlap_fraction"] == pytest.approx(0.75)
 
             assert write_calls, "write_training_stats should be called to persist training.json updates"
+            written_convergence_info = write_calls[-1]["kwargs"].get("convergence_info")
+            assert written_convergence_info is not None
+            assert written_convergence_info["convergent_mean_by_class_threshold"] == 0.1
+            assert written_convergence_info["convergent_min_target_class_abs_mean"] == 0.4
             written_seed_stability = write_calls[-1]["kwargs"].get("seed_stability")
             assert written_seed_stability is not None
             assert written_seed_stability["intersection_size"] == 3
@@ -379,11 +375,7 @@ class TestMultiSeedTopkStability:
 
 class TestMultiSeedSelectionFallback:
     def test_train_does_not_count_step_zero_best_checkpoint_as_convergent(self):
-        local_tmp_root = os.path.join(os.getcwd(), "test_artifacts")
-        os.makedirs(local_tmp_root, exist_ok=True)
-        temp_dir = os.path.join(local_tmp_root, "step_zero_best_checkpoint_case")
-        shutil.rmtree(temp_dir, ignore_errors=True)
-        os.makedirs(temp_dir, exist_ok=True)
+        temp_dir = tempfile.mkdtemp(prefix="step_zero_best_checkpoint_case_")
         try:
             args = TrainingArguments(
                 experiment_dir=temp_dir,
@@ -449,12 +441,129 @@ class TestMultiSeedSelectionFallback:
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
+    def test_train_does_not_count_tiny_encoding_magnitude_as_convergent(self):
+        temp_dir = tempfile.mkdtemp(prefix="tiny_magnitude_nonconvergent_")
+        try:
+            args = TrainingArguments(
+                experiment_dir=temp_dir,
+                max_seeds=2,
+                min_convergent_seeds=1,
+                convergent_score_threshold=0.5,
+                seed=20,
+            )
+            trainer = MockTrainerForTest(model="mock-base", args=args)
+            output_dir = os.path.join(temp_dir, "selected_model")
+            stats_by_seed_path = {}
+
+            def _make_stats() -> dict:
+                return {
+                    "training_stats": {
+                        "correlation": 0.94,
+                        "mean_by_class": {
+                            1: {
+                                -1: -0.045,
+                                1: 0.026,
+                            }
+                        },
+                    },
+                    "best_score_checkpoint": {
+                        "correlation": 0.94,
+                        "global_step": 1,
+                    },
+                    "abs_mean_by_type": {
+                        "training": 0.036,
+                    },
+                }
+
+            def _fake_train(self, output_dir=None, args=None, model=None, model_with_gradiend_cls=None, callbacks=None, runtime_monitor=None, **kwargs):
+                os.makedirs(output_dir, exist_ok=True)
+                stats_by_seed_path[output_dir] = _make_stats()
+                return output_dir
+
+            def _fake_get_training_stats(path):
+                return stats_by_seed_path.get(path)
+
+            def _fake_copytree(src, dst, *args_, **kwargs_):
+                os.makedirs(dst, exist_ok=True)
+                return dst
+
+            with patch.object(MockTrainerForTest, "_train", new=_fake_train):
+                with patch.object(trainer, "get_training_stats", side_effect=_fake_get_training_stats):
+                    with patch.object(trainer, "evaluate_encoder", return_value={"correlation": 0.94}):
+                        with patch.object(MockTrainerForTest, "plot_training_convergence", return_value=None):
+                            with patch("shutil.copytree", side_effect=_fake_copytree):
+                                trainer.train(output_dir=output_dir, use_cache=False)
+
+            seed_report_path = os.path.join(temp_dir, "seeds", "seed_report.json")
+            assert os.path.exists(seed_report_path)
+            with open(seed_report_path, "r", encoding="utf-8") as handle:
+                seed_report = json.load(handle)
+
+            assert seed_report["convergent_count"] == 0
+            assert seed_report["convergent_seeds"] == []
+            assert seed_report["runs"][0]["converged"] is False
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_train_does_not_count_one_weak_target_class_as_convergent(self):
+        temp_dir = tempfile.mkdtemp(prefix="weak_target_class_nonconvergent_")
+        try:
+            args = TrainingArguments(
+                experiment_dir=temp_dir,
+                max_seeds=2,
+                min_convergent_seeds=2,
+                convergent_score_threshold=0.5,
+                seed=20,
+            )
+            trainer = MockTrainerForTest(model="mock-base", args=args)
+            output_dir = os.path.join(temp_dir, "selected_model")
+            stats_by_seed_path = {}
+            weak_stats = {
+                "training_stats": {
+                    "correlation": 0.82,
+                    "mean_by_class": {
+                        500: {
+                            -1.0: -0.3,
+                            1.0: 1.0,
+                        }
+                    },
+                },
+                "best_score_checkpoint": {
+                    "correlation": 0.82,
+                    "global_step": 500,
+                },
+                "abs_mean_by_type": {
+                    "training": 0.65,
+                },
+            }
+
+            def _fake_train(self, output_dir=None, args=None, model=None, model_with_gradiend_cls=None, callbacks=None, runtime_monitor=None, **kwargs):
+                os.makedirs(output_dir, exist_ok=True)
+                stats_by_seed_path[output_dir] = weak_stats
+                return output_dir
+
+            def _fake_get_training_stats(path):
+                return stats_by_seed_path.get(path)
+
+            with patch.object(MockTrainerForTest, "_train", new=_fake_train):
+                with patch.object(trainer, "get_training_stats", side_effect=_fake_get_training_stats):
+                    with patch.object(trainer, "evaluate_encoder", return_value={"correlation": 0.82}):
+                        with patch.object(MockTrainerForTest, "plot_training_convergence", return_value=None):
+                            with patch("shutil.copytree", side_effect=lambda src, dst, *a, **k: dst):
+                                trainer.train(output_dir=output_dir, use_cache=False)
+
+            seed_report_path = os.path.join(temp_dir, "seeds", "seed_report.json")
+            with open(seed_report_path, "r", encoding="utf-8") as handle:
+                seed_report = json.load(handle)
+
+            assert seed_report["convergent_count"] == 0
+            assert all(run["converged"] is False for run in seed_report["runs"])
+            assert seed_report["runs"][0]["convergent_min_target_class_abs_mean"] == pytest.approx(0.3)
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
     def test_train_uses_highest_correlation_when_no_seed_converges(self):
-        local_tmp_root = os.path.join(os.getcwd(), "test_artifacts")
-        os.makedirs(local_tmp_root, exist_ok=True)
-        temp_dir = os.path.join(local_tmp_root, "no_convergent_seed_case")
-        shutil.rmtree(temp_dir, ignore_errors=True)
-        os.makedirs(temp_dir, exist_ok=True)
+        temp_dir = tempfile.mkdtemp(prefix="no_convergent_seed_case_")
         try:
             args = TrainingArguments(
                 experiment_dir=temp_dir,
@@ -530,6 +639,74 @@ class TestMultiSeedSelectionFallback:
             assert seed_report["best_seed"] == 11
             assert seed_report["best_selection_score"] == pytest.approx(0.81)
             assert seed_report["best_seed_selection_strategy"] == "highest_correlation_fallback"
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_balanced_split_cycle_requeues_non_convergent_split_slot(self):
+        temp_dir = tempfile.mkdtemp(prefix="balanced_split_cycle_requeue_")
+        try:
+            args = TrainingArguments(
+                experiment_dir=temp_dir,
+                max_seeds=5,
+                min_convergent_seeds=3,
+                convergent_score_threshold=0.8,
+                seed=10,
+                split_resplit_per_seed=True,
+                split_resplit_strategy="balanced_cycle",
+            )
+            trainer = MockTrainerForTest(model="mock-base", args=args)
+            output_dir = os.path.join(temp_dir, "selected_model")
+
+            correlations = {
+                10: 0.2,  # slot 0 fails and should move behind slots 1 and 2
+                11: 0.9,
+                12: 0.9,
+                13: 0.9,
+            }
+            stats_by_seed_path = {}
+
+            def _make_stats(correlation: float) -> dict:
+                return {
+                    "training_stats": {
+                        "correlation": correlation,
+                        "mean_by_class": {1: {-1: -0.6, 1: 0.6}},
+                    },
+                    "best_score_checkpoint": {
+                        "correlation": correlation,
+                        "global_step": 1,
+                    },
+                    "abs_mean_by_type": {"training": 0.7},
+                }
+
+            def _fake_train(self, output_dir=None, args=None, model=None, model_with_gradiend_cls=None, callbacks=None, runtime_monitor=None, **kwargs):
+                os.makedirs(output_dir, exist_ok=True)
+                seed_value = int(os.path.basename(output_dir).split("_")[-1])
+                stats_by_seed_path[output_dir] = _make_stats(correlations[seed_value])
+                return output_dir
+
+            def _fake_get_training_stats(path):
+                return stats_by_seed_path.get(path)
+
+            def _fake_copytree(src, dst, *args_, **kwargs_):
+                os.makedirs(dst, exist_ok=True)
+                return dst
+
+            with patch.object(MockTrainerForTest, "_train", new=_fake_train):
+                with patch.object(trainer, "get_training_stats", side_effect=_fake_get_training_stats):
+                    with patch.object(trainer, "evaluate_encoder", return_value={"correlation": 0.9}):
+                        with patch.object(MockTrainerForTest, "plot_training_convergence", return_value=None):
+                            with patch("shutil.copytree", side_effect=_fake_copytree):
+                                trainer.train(output_dir=output_dir, use_cache=False)
+
+            seed_report_path = os.path.join(temp_dir, "seeds", "seed_report.json")
+            with open(seed_report_path, "r", encoding="utf-8") as handle:
+                seed_report = json.load(handle)
+
+            runs = seed_report["runs"]
+            assert [run["seed"] for run in runs] == [10, 11, 12, 13]
+            assert [run["split_cycle_index"] for run in runs] == [0, 1, 2, 0]
+            assert [run["seed"] for run in runs if run["converged"]] == [11, 12, 13]
+            assert [run["split_cycle_index"] for run in runs if run["converged"]] == [1, 2, 0]
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 

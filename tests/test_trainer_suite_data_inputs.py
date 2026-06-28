@@ -176,8 +176,9 @@ class TestResolveSuiteTrainingView:
         assert UNIFIED_FACTUAL_CLASS in resolved.columns
         assert UNIFIED_ALTERNATIVE_CLASS in resolved.columns
 
+    @patch.object(TextPredictionTrainer, "peek_unified_training_data", return_value=None)
     @patch("gradiend.trainer.suite.load_hf_per_class")
-    def test_resolve_hf_per_class_id(self, mock_load_hf):
+    def test_resolve_hf_per_class_id(self, mock_load_hf, _mock_peek):
         class_dfs = _per_class_dict()
         mock_load_hf.return_value = class_dfs
         resolved = _resolve_suite_training_view(
@@ -354,7 +355,7 @@ class TestSymmetricTrainerSuiteDataInputs:
             split_col="split",
         )
         assert suite.target_classes == ["3SG", "3PL"]
-        assert ("3SG", "3PL") in suite.pairs
+        assert suite.pairs == [("3PL", "3SG")]
 
     def test_uses_all_classes_for_unresolved_path(self, data_dir):
         path = data_dir / "training.csv"
@@ -399,6 +400,18 @@ class TestSymmetricTrainerSuiteDataInputs:
         )
         assert suite.target_classes == ["3SG", "3PL", "Other"]
         assert len(suite.pairs) == 3
+
+    def test_default_child_ids_sort_class_names_alphabetically(self):
+        suite = SymmetricTrainerSuite(
+            TextPredictionTrainer,
+            model="bert-base-uncased",
+            data=_per_class_dict_three_classes(),
+            use_class_names_as_columns=True,
+            target_pairs=[("3SG", "3PL"), ("Other", "3SG")],
+        )
+        assert set(suite.trainers) == {"3PL__3SG", "3SG__Other"}
+        assert suite.pair_by_id["3PL__3SG"] == ("3PL", "3SG")
+        assert ("3SG", "3PL") not in suite.pairs
 
     def test_infers_from_config_data_path(self, data_dir):
         path = data_dir / "training.csv"

@@ -19,6 +19,7 @@ from gradiend.trainer.core.arguments import TrainingArguments
 from gradiend.trainer.core.dataset import GradientTrainingDataset
 from gradiend.trainer.core.stats import (
     _best_checkpoint_step_is_after_initial,
+    _best_step_min_target_class_abs_mean,
     _best_step_target_class_mean_product,
     load_training_stats,
 )
@@ -653,6 +654,37 @@ class TestConvergenceCriteria:
         product = _best_step_target_class_mean_product(training_stats, best_score_checkpoint)
 
         assert product is None
+
+    def test_min_target_class_abs_mean_requires_each_class_above_threshold(self):
+        training_stats = {
+            "mean_by_class": {
+                500: {
+                    1.0: 1.0,
+                    -1.0: -0.3,
+                }
+            }
+        }
+        best_score_checkpoint = {"global_step": 500}
+
+        min_abs = _best_step_min_target_class_abs_mean(training_stats, best_score_checkpoint)
+
+        assert min_abs == pytest.approx(0.3)
+
+    def test_min_target_class_abs_mean_ignores_neutral_class(self):
+        training_stats = {
+            "mean_by_class": {
+                25: {
+                    -1.0: -0.6,
+                    0.0: 0.02,
+                    1.0: 0.8,
+                }
+            }
+        }
+        best_score_checkpoint = {"global_step": 25}
+
+        min_abs = _best_step_min_target_class_abs_mean(training_stats, best_score_checkpoint)
+
+        assert min_abs == pytest.approx(0.6)
 
 
 class TestFinalStepEvaluation:

@@ -118,6 +118,8 @@ class TestTrainingArguments:
         assert args.runtime_monitor_interval == 5.0
         assert args.runtime_monitor_system_stats is True
         assert args.learning_rate == 1e-5
+        assert args.convergent_score_threshold == 0.5
+        assert args.convergent_mean_by_class_threshold == 0.5
         assert args.base_model_device_map is None
         assert args.base_model_max_memory is None
 
@@ -227,6 +229,11 @@ class TestTrainingArguments:
         args5 = TrainingArguments(analyze_seed_stability=True)
         assert args5.analyze_seed_stability is True
         assert args5.saved_seed_runs == "all_convergent"
+
+        args6 = TrainingArguments(split_resplit_per_seed=True, split_resplit_strategy="balanced_cycle")
+        assert args6.split_resplit_strategy == "balanced_cycle"
+        with pytest.raises(ValueError, match="split_resplit_strategy"):
+            TrainingArguments(split_resplit_strategy="weighted")
     
     def test_training_arguments_output_paths(self):
         """Test output directory handling."""

@@ -131,7 +131,7 @@ def test_create_seq2seq_decoder_item_rejects_multi_token_without_sequence_cloze(
 
     tok = AutoTokenizer.from_pretrained("t5-small")
     template = "The chef tasted the soup, then [MASK] added pepper."
-    with pytest.raises(ValueError, match="seq2seq_decoder.*seq2seq_decoder_sequence_cloze.*seq2seq_encoder_mlm"):
+    with pytest.raises(ValueError, match="seq2seq_encoder_mlm.*seq2seq_decoder"):
         create_seq2seq_decoder_item(template, "he quickly", tok)
 
 

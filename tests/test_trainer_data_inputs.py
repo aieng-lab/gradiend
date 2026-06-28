@@ -12,7 +12,9 @@ from gradiend.trainer.core.unified_data import (
     UNIFIED_ALTERNATIVE_CLASS,
     UNIFIED_FACTUAL,
     UNIFIED_FACTUAL_CLASS,
+    UNIFIED_TRANSITION,
     resolve_dataframe,
+    transition_id,
 )
 
 
@@ -69,6 +71,20 @@ def _per_class_dict_three_classes():
             "Other": ["they"],
         }),
     }
+
+
+def _per_class_dict_four_classes():
+    return {
+        "good": pd.DataFrame({"masked": ["[MASK] one"], "split": ["test"], "good": ["good"]}),
+        "bad": pd.DataFrame({"masked": ["[MASK] two"], "split": ["test"], "bad": ["bad"]}),
+        "happy": pd.DataFrame({"masked": ["[MASK] three"], "split": ["test"], "happy": ["happy"]}),
+        "sad": pd.DataFrame({"masked": ["[MASK] four"], "split": ["test"], "sad": ["sad"]}),
+    }
+
+
+class _DummyPredictionTokenizer:
+    mask_token = "[MASK]"
+    mask_token_id = 103
 
 
 class TestTrainerDataAsPath:
@@ -159,6 +175,38 @@ class TestTrainerDataAsDataFrame:
         assert UNIFIED_FACTUAL in trainer._combined_data.columns
         assert UNIFIED_ALTERNATIVE in trainer._combined_data.columns
 
+    def test_feature_class_ids_follow_target_class_order_not_row_order(self):
+        df = pd.DataFrame(
+            [
+                {
+                    "masked": "[MASK] first",
+                    "split": "train",
+                    "label_class": "negative",
+                    "label": "bad",
+                    "alternative_class": "positive",
+                    "alternative": "good",
+                },
+                {
+                    "masked": "[MASK] second",
+                    "split": "train",
+                    "label_class": "positive",
+                    "label": "good",
+                    "alternative_class": "negative",
+                    "alternative": "bad",
+                },
+            ]
+        )
+        config = TextPredictionConfig(data=df, target_classes=["positive", "negative"])
+        trainer = TextPredictionTrainer(model="bert-base-uncased", config=config)
+
+        dataset = trainer.create_training_data(_DummyPredictionTokenizer(), split="train")
+        by_source = dataset.data.set_index("factual_id")
+
+        assert by_source.loc["positive", "label"] == 1
+        assert by_source.loc["positive", "feature_class_id"] == 0
+        assert by_source.loc["negative", "label"] == -1
+        assert by_source.loc["negative", "feature_class_id"] == 1
+
 
 class TestTrainerDataAsDict:
     """data=dict (per-class) builds merged then unified."""
@@ -243,6 +291,104 @@ class TestTrainerDataAsDict:
         assert targets == {"A": ["x"], "B": ["x"]}
         assert has_overlap is True
 
+    def test_per_class_dict_with_all_classes_keeps_pair_transitions_by_default(self):
+        config = TextPredictionConfig(
+            data=_per_class_dict_four_classes(),
+            target_classes=["good", "bad"],
+            all_classes=["good", "bad", "happy", "sad"],
+            use_class_names_as_columns=True,
+        )
+        trainer = TextPredictionTrainer(model="bert-base-uncased", config=config)
+
+        trainer._ensure_data()
+
+        transitions = set(trainer._combined_data[UNIFIED_TRANSITION])
+        assert transition_id("good", "bad") in transitions
+        assert transition_id("happy", "sad") not in transitions
+
+    def test_per_class_dict_with_all_classes_and_include_other_materializes_suite_wide_transitions(self):
+        config = TextPredictionConfig(
+            data=_per_class_dict_four_classes(),
+            target_classes=["good", "bad"],
+            all_classes=["good", "bad", "happy", "sad"],
+            use_class_names_as_columns=True,
+        )
+        trainer = TextPredictionTrainer(
+            model="bert-base-uncased",
+            config=config,
+            training_args=TrainingArguments(include_other_classes=True),
+        )
+
+        trainer._ensure_data()
+
+        transitions = set(trainer._combined_data[UNIFIED_TRANSITION])
+        assert transition_id("good", "bad") in transitions
+        assert transition_id("happy", "sad") in transitions
+
+        eval_data = trainer.create_training_data(
+            _DummyPredictionTokenizer(),
+            split="test",
+            include_other_classes=True,
+            batch_size=1,
+        )
+        eval_pairs = set(zip(eval_data.data["factual_id"], eval_data.data["alternative_id"]))
+        assert ("good", "bad") in eval_pairs
+        assert ("happy", "sad") in eval_pairs
+
+    def test_include_other_upgrades_pair_local_per_class_data_to_suite_wide_transitions(self):
+        config = TextPredictionConfig(
+            data=_per_class_dict_four_classes(),
+            target_classes=["good", "bad"],
+            all_classes=["good", "bad", "happy", "sad"],
+            use_class_names_as_columns=True,
+        )
+        trainer = TextPredictionTrainer(model="bert-base-uncased", config=config)
+
+        trainer._ensure_data()
+        assert transition_id("happy", "sad") not in set(trainer._combined_data[UNIFIED_TRANSITION])
+
+        eval_data = trainer.create_training_data(
+            _DummyPredictionTokenizer(),
+            split="test",
+            include_other_classes=True,
+            batch_size=1,
+        )
+
+        assert transition_id("happy", "sad") in set(trainer._combined_data[UNIFIED_TRANSITION])
+        eval_pairs = set(zip(eval_data.data["factual_id"], eval_data.data["alternative_id"]))
+        assert ("happy", "sad") in eval_pairs
+
+    def test_pair_local_encoder_cache_is_not_valid_for_include_other_request(self):
+        config = TextPredictionConfig(
+            data=_per_class_dict_four_classes(),
+            target_classes=["good", "bad"],
+            all_classes=["good", "bad", "happy", "sad"],
+            use_class_names_as_columns=True,
+        )
+        trainer = TextPredictionTrainer(model="bert-base-uncased", config=config)
+        pair_local_df = pd.DataFrame(
+            [
+                {"type": "training", "source_id": "good", "target_id": "bad"},
+                {"type": "training", "source_id": "bad", "target_id": "good"},
+            ]
+        )
+        full_eval_df = pd.DataFrame(
+            [
+                {"type": "training", "source_id": "good", "target_id": "bad"},
+                {"type": "training", "source_id": "happy", "target_id": "sad"},
+            ]
+        )
+        trainer._ensure_data()
+
+        assert not trainer._cached_encoder_df_matches_request(
+            pair_local_df,
+            include_other_classes=True,
+        )
+        assert trainer._cached_encoder_df_matches_request(
+            full_eval_df,
+            include_other_classes=True,
+        )
+
 
 class TestEvalNeutralDataAsPath:
     """eval_neutral_data=Path or str path is resolved by resolve_dataframe."""
@@ -266,9 +412,9 @@ class TestStandardPipelinePerDataFormat:
 
     @pytest.fixture(scope="class")
     def tokenizer(self):
-        """Load tokenizer once per class to avoid repeated from_pretrained (~10s each)."""
-        from transformers import AutoTokenizer
-        return AutoTokenizer.from_pretrained("bert-base-uncased")
+        """Use mock tokenizer — pipeline tests only need [MASK] tokenization."""
+        from tests.conftest import MockTokenizer
+        return MockTokenizer()
 
     def test_standard_pipeline_per_class_dict(self, tokenizer):
         """Per-class dict: trainer → ensure_data → create_training_data yields non-empty dataset."""
@@ -363,8 +509,8 @@ class TestAddIdentityForOtherClasses:
 
     @pytest.fixture(scope="class")
     def tokenizer(self):
-        from transformers import AutoTokenizer
-        return AutoTokenizer.from_pretrained("bert-base-uncased")
+        from tests.conftest import MockTokenizer
+        return MockTokenizer()
 
     def test_add_identity_not_added_when_all_classes_equal_target_classes(self, tokenizer):
         """When all_classes is set to target_classes, no identity rows are added."""

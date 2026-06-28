@@ -2,14 +2,59 @@
 
 from __future__ import annotations
 
-import sys
 from typing import Any, Callable, Dict, List, Optional
 
-from tqdm import tqdm
-
 from gradiend.util.logging import get_logger
+from gradiend.util.tqdm_utils import gradiend_tqdm
 
 logger = get_logger(__name__)
+
+
+def gradient_entry_to_encoder_row(
+    entry: Dict[str, Any],
+    *,
+    encoded: float,
+    input_type: Optional[str] = "factual",
+    overrides: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Build one encoder-analysis row from a gradient-dataset entry."""
+    if input_type == "alternative":
+        source_id = entry.get("alternative_id")
+        source_token = entry.get("alternative_token")
+    elif input_type == "diff":
+        source_id = entry.get("feature_class_id")
+        source_token = None
+    else:
+        source_id = entry.get("factual_id")
+        source_token = entry.get("factual_token")
+    row: Dict[str, Any] = {
+        "encoded": encoded,
+        "label": float(entry.get("label", 0.0)),
+        "source_id": source_id,
+        "target_id": entry.get("alternative_id"),
+        "factual_id": entry.get("factual_id"),
+        "counterfactual_id": entry.get("alternative_id"),
+        "transition_id": entry.get("feature_class_id"),
+        "feature_class_id": entry.get("feature_class_id"),
+        "input_type": input_type,
+    }
+    if source_token is not None:
+        row["source_token"] = source_token
+    for token_key in ("factual_token", "alternative_token"):
+        if entry.get(token_key) is not None:
+            row[token_key] = entry[token_key]
+    for text_key in ("text", "template", "input_text", "display_text"):
+        if entry.get(text_key) is not None:
+            row[text_key] = entry[text_key]
+    if entry.get("template") is not None and row.get("masked") is None:
+        row["masked"] = entry["template"]
+    if entry.get("data_split") is not None:
+        row["data_split"] = entry["data_split"]
+    if entry.get("neutral_variant") is not None:
+        row["neutral_variant"] = entry["neutral_variant"]
+    if overrides:
+        row.update(overrides)
+    return row
 
 
 def encode_dataset_to_rows(
@@ -30,50 +75,24 @@ def encode_dataset_to_rows(
         total = len(dataset)
     except (TypeError, AttributeError):
         total = None
-    _tqdm_kw = dict(
+    for entry in gradiend_tqdm(
+        dataset,
         desc="Encoding",
         total=total,
         leave=False,
         ncols=80,
-        dynamic_ncols=False,
-        ascii=True,
-        mininterval=0.5,
         position=0,
-        disable=not sys.stderr.isatty(),
-    )
-    for entry in tqdm(dataset, **_tqdm_kw):
+    ):
         grad = entry["source"]
         label = entry["label"]
         encoded_val = model_with_gradiend.encode(grad, return_float=True)
         input_type = getattr(dataset, "source", None)
-        factual_id = entry.get("factual_id")
-        counterfactual_id = entry.get("alternative_id")
-        transition_id = entry.get("feature_class_id")
-        if input_type == "alternative":
-            source_id = counterfactual_id
-        elif input_type == "diff":
-            source_id = transition_id
-        else:
-            source_id = factual_id
-        row: Dict[str, Any] = {
-            "encoded": encoded_val,
-            "label": float(label),
-            "source_id": source_id,
-            "target_id": counterfactual_id,
-            "factual_id": factual_id,
-            "counterfactual_id": counterfactual_id,
-            "transition_id": transition_id,
-            "feature_class_id": transition_id,
-            "input_type": input_type,
-            "eval_group": entry.get("eval_group"),
-        }
-        for token_key in ("factual_token", "alternative_token"):
-            if entry.get(token_key) is not None:
-                row[token_key] = entry[token_key]
-        if entry.get("data_split") is not None:
-            row["data_split"] = entry["data_split"]
-        if entry.get("neutral_variant") is not None:
-            row["neutral_variant"] = entry["neutral_variant"]
+        row = gradient_entry_to_encoder_row(
+            entry,
+            encoded=encoded_val,
+            input_type=input_type,
+        )
+        row["eval_group"] = entry.get("eval_group")
         if row_extractor is not None:
             try:
                 extra = row_extractor(entry)
@@ -85,4 +104,4 @@ def encode_dataset_to_rows(
     return rows
 
 
-__all__ = ["encode_dataset_to_rows"]
+__all__ = ["encode_dataset_to_rows", "gradient_entry_to_encoder_row"]

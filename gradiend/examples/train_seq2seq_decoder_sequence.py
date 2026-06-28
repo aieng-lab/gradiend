@@ -1,6 +1,10 @@
 """
 T5 seq2seq GRADIEND workflow with multi-token decoder sequence cloze.
 
+**Experimental** — ``seq2seq_decoder_sequence_cloze`` does not converge reliably for
+all setups. Prefer ``train_seq2seq_encoder_mlm.py`` (encoder-side MLM, default for
+``prediction_objective="auto"`` on T5/BART).
+
 Uses the same English pronoun data as ``train_english_pronouns.py`` /
 ``create_english_pronoun_data.py``.
 

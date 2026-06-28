@@ -1,4 +1,8 @@
-"""German decoder-only workflow using a trained MLM head for gradients."""
+"""German decoder-only workflow with auxiliary MLM head (``clm_mlm_head``).
+
+For plain decoder-only next-token prediction (``clm_next_token``), see
+``train_gender_en.py`` with ``DECODER_ONLY = True`` or ``--decoder-only``.
+"""
 
 from gradiend import TextPredictionTrainer, TrainingArguments, PrePruneConfig, PostPruneConfig
 

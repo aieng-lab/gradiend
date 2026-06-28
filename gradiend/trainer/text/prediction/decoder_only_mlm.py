@@ -8,26 +8,33 @@ tasks by adding a classification head over target tokens.
 """
 
 import json
+import os
 from dataclasses import dataclass
+from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple, Union
 
 import pandas as pd
 import torch
 import torch.nn as nn
 from torch.nn import Parameter
-from torch.utils.data import Dataset, DataLoader
-from tqdm import tqdm
-from transformers import PreTrainedModel, PretrainedConfig, AutoConfig, AutoModelForCausalLM, AutoTokenizer
+from torch.utils.data import DataLoader, Dataset
+from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, PreTrainedModel, PretrainedConfig
 from transformers.utils import ModelOutput
-from typing import Any, Optional, Union, List, Iterator, Tuple, Dict, Sequence
-import os
 
 from gradiend.model.utils import load_model_weights, save_model_weights
 from gradiend.util.device import validate_cuda_usable_if_visible
 from gradiend.util.logging import get_logger
+from gradiend.util.paths import ensure_writable_dir
+from gradiend.util.tqdm_utils import gradiend_tqdm
 
 logger = get_logger(__name__)
 
 PoolingLengthSpec = Union[int, Sequence[int]]
+
+
+def load_decoder_mlm_head_meta(path: Union[str, os.PathLike]) -> Dict[str, Any]:
+    meta_path = os.path.join(path, "config_mlm_head.json")
+    with open(meta_path, encoding="utf-8") as handle:
+        return json.load(handle)
 
 
 def _normalize_pooling_lengths(pooling_length: PoolingLengthSpec) -> List[int]:
@@ -68,12 +75,17 @@ def _evaluate_mlm_head_val_loss(
     batch_size: int,
     max_length: int,
     use_cache: Optional[bool],
+    label_class_map: Optional[Dict[str, int]] = None,
 ) -> float:
     if val_df is None or len(val_df) == 0:
         return float("inf")
+    if label_class_map is None and model.target_labels:
+        label_class_map = {lab: idx for idx, lab in enumerate(model.target_labels)}
     cuda_available, _ = validate_cuda_usable_if_visible()
     device = "cuda" if cuda_available else "cpu"
-    dataset = DataFrameMLMDataset(tokenizer, val_df, max_length=max_length)
+    dataset = DataFrameMLMDataset(
+        tokenizer, val_df, max_length=max_length, label_class_map=label_class_map
+    )
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
     model.eval()
     total_loss = 0.0
@@ -141,13 +153,56 @@ _HF_MODEL_LOAD_KWARGS = {
     "local_files_only",
 }
 
+_WRAPPER_ONLY_KWARGS = frozenset(
+    {
+        "target_token_ids",
+        "target_labels",
+        "mask_token_id",
+        "pooling_length",
+    }
+)
+
 
 def _config_kwargs(kwargs: Dict) -> Dict:
     return {
         k: v
         for k, v in kwargs.items()
         if k not in {"device_map", "max_memory", "low_cpu_mem_usage", "token"}
+        and k not in _WRAPPER_ONLY_KWARGS
     }
+
+
+def _hf_model_load_kwargs(kwargs: Dict) -> Dict:
+    return {
+        k: v
+        for k, v in kwargs.items()
+        if k in _HF_MODEL_LOAD_KWARGS and k not in _WRAPPER_ONLY_KWARGS and v is not False
+    }
+
+
+def _resolve_wrapper_init_kwargs(
+    kwargs: Dict,
+    *,
+    target_token_ids: Optional[List[int]],
+    target_labels: Optional[List[str]],
+    mask_token_id: Optional[int],
+    pooling_length: int,
+) -> Tuple[Optional[List[int]], Optional[List[str]], Optional[int], int]:
+    if target_labels is None:
+        target_labels = kwargs.pop("target_labels", None)
+    else:
+        kwargs.pop("target_labels", None)
+    if target_token_ids is None:
+        target_token_ids = kwargs.pop("target_token_ids", None)
+    else:
+        kwargs.pop("target_token_ids", None)
+    if mask_token_id is None:
+        mask_token_id = kwargs.pop("mask_token_id", None)
+    else:
+        kwargs.pop("mask_token_id", None)
+    if "pooling_length" in kwargs:
+        pooling_length = int(kwargs.pop("pooling_length"))
+    return target_token_ids, target_labels, mask_token_id, pooling_length
 
 
 def _load_selected_checkpoint_tensors(directory: Union[str, os.PathLike], names: List[str]) -> Dict[str, torch.Tensor]:
@@ -241,10 +296,12 @@ class DataFrameMLMDataset(Dataset):
         tokenizer,
         df: pd.DataFrame,
         max_length: int = 128,
+        label_class_map: Optional[Dict[str, int]] = None,
     ):
         self.tokenizer = tokenizer
         self.df = df.reset_index(drop=True)
         self.max_length = max_length
+        self.label_class_map = label_class_map or {}
 
     def __len__(self):
         return len(self.df)
@@ -265,9 +322,13 @@ class DataFrameMLMDataset(Dataset):
         )
         input_ids = enc.input_ids.squeeze(0)
         attn_mask = enc.attention_mask.squeeze(0)
-        label_ids = self.tokenizer(
-            label, add_special_tokens=False, return_tensors="pt"
-        ).input_ids.squeeze(0)
+        if label not in self.label_class_map:
+            raise ValueError(
+                f"Label {label!r} is not in the MLM head class map. "
+                f"Known labels: {sorted(self.label_class_map)}"
+            )
+        class_idx = self.label_class_map[label]
+        label_ids = torch.tensor([class_idx], dtype=torch.long)
         return input_ids, attn_mask, label_ids
 
 
@@ -336,6 +397,7 @@ def train_mlm_head(
             batch_size=batch_size,
             max_length=max_length,
             use_cache=use_cache,
+            label_class_map={lab: idx for idx, lab in enumerate(model.target_labels or [])},
         )
         results.append({"pooling_length": int(pl), "val_loss": float(val_loss)})
         logger.info("pooling_length=%s validation loss=%.4f", pl, val_loss)
@@ -382,7 +444,8 @@ def _train_mlm_head_single(
     Train a DecoderModelWithMLMHead on (masked, label) data and save to output_path.
 
     Same data source as GRADIEND training. train_df must have columns 'masked' and
-    'label'; masked must contain [MASK], label must be a single token per row.
+    'label'; masked must contain [MASK]. Each unique label string maps to one
+    classifier output index (multi-token strings are one class).
 
     Args:
         use_cache: If False, disable KV cache in model forward (recommended for training).
@@ -400,29 +463,22 @@ def _train_mlm_head_single(
         tokenizer.add_special_tokens({"mask_token": "[MASK]"})
     tokenizer.pad_token = tokenizer.eos_token
 
-    # Resolve target token IDs from unique values in the 'label' column (one token per label)
-    labels = train_df["label"].astype(str).str.strip().unique().tolist()
-    target_token_ids = []
-    for lab in labels:
-        ids = tokenizer(lab, add_special_tokens=False).get("input_ids", [])
-        if len(ids) != 1:
-            raise ValueError(
-                f"Label '{lab}' must tokenize to a single token (got {len(ids)}). "
-                "Decoder-only MLM requires single-token labels."
-            )
-        target_token_ids.append(ids[0])
-    if len(target_token_ids) < 2:
-        raise ValueError(f"At least two unique labels required; got {len(target_token_ids)} ({labels}).")
+    target_labels = train_df["label"].astype(str).str.strip().unique().tolist()
+    if len(target_labels) < 2:
+        raise ValueError(f"At least two unique labels required; got {len(target_labels)} ({target_labels}).")
+    label_class_map = {lab: idx for idx, lab in enumerate(target_labels)}
 
-    logger.info("Target token IDs: %s", target_token_ids)
+    logger.info("MLM head target labels (class indices): %s", target_labels)
 
-    dataset = DataFrameMLMDataset(tokenizer, train_df, max_length=max_length)
+    dataset = DataFrameMLMDataset(
+        tokenizer, train_df, max_length=max_length, label_class_map=label_class_map
+    )
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
     model = DecoderModelWithMLMHead.from_pretrained(
         base_model,
         mask_token_id=tokenizer.mask_token_id,
-        target_token_ids=target_token_ids,
+        target_labels=target_labels,
         pooling_length=pooling_length,
         trust_remote_code=trust_remote_code,
     )
@@ -436,7 +492,7 @@ def _train_mlm_head_single(
         model.train()
         total_loss = 0.0
         use_cache_val = use_cache if use_cache is not None else False
-        for batch in tqdm(loader, desc=f"Epoch {epoch + 1}/{epochs}"):
+        for batch in gradiend_tqdm(loader, desc=f"Epoch {epoch + 1}/{epochs}"):
             input_ids, attn_mask, labels_b = [b.to(device) for b in batch]
             out = model(
                 input_ids=input_ids,
@@ -453,10 +509,10 @@ def _train_mlm_head_single(
     if save:
         if output_path is None:
             raise ValueError("output_path is required when save=True")
-        os.makedirs(output_path, exist_ok=True)
-        model.save_pretrained(output_path, base_model=base_model)
-        tokenizer.save_pretrained(output_path)
-        return output_path
+        save_path = ensure_writable_dir(output_path)
+        model.save_pretrained(save_path, base_model=base_model)
+        tokenizer.save_pretrained(save_path)
+        return save_path
     return model, tokenizer
 
 
@@ -471,26 +527,25 @@ class DecoderModelWithMLMHead(PreTrainedModel):
     """
     Wrapper for decoder-only models with a custom MLM head.
 
-    This class adds a masked language modeling (MLM) head to decoder-only models,
-    allowing them to be used with GRADIEND. The MLM head can be restricted to
-    specific target tokens (e.g., ["he", "she"]) or use the full vocabulary.
-
-    Args:
-        config: PretrainedConfig for the base decoder model
-        target_token_ids: Optional list of token IDs to restrict the MLM head to.
-                         If None, uses the full vocabulary via the decoder's lm_head.
-
-    Example:
-        >>> from gradiend.trainer.text import DecoderModelWithMLMHead
-        >>> model = DecoderModelWithMLMHead.from_pretrained(
-        ...     "gpt2",
-        ...     target_token_ids=[1234, 5678]  # token IDs for "he" and "she"
-        ... )
+    The auxiliary classifier has one output per target label string. Class index ``i``
+  corresponds to ``target_labels[i]`` and is not tied to a single vocabulary token id.
     """
+
     config_class = PretrainedConfig
 
+    @property
+    def uses_label_classes(self) -> bool:
+        return bool(self.target_labels)
+
+    def _restricted_head_size(self) -> int:
+        if self.target_labels is not None:
+            return len(self.target_labels)
+        if self.target_token_ids is not None:
+            return len(self.target_token_ids)
+        return int(self.config.vocab_size)
+
     def _align_classifier_to_decoder(self):
-        if self.target_token_ids is None:
+        if self.target_labels is None and self.target_token_ids is None:
             self.classifier = self.decoder.lm_head
             return
 
@@ -500,7 +555,7 @@ class DecoderModelWithMLMHead(PreTrainedModel):
         self.classifier.to(device=decoder_param.device, dtype=decoder_param.dtype)
 
     def _align_classifier_to_hidden_states(self, hidden_states: torch.Tensor):
-        if self.target_token_ids is None:
+        if self.target_labels is None and self.target_token_ids is None:
             self.classifier = self.decoder.lm_head
             return
         self.classifier.to(device=hidden_states.device, dtype=hidden_states.dtype)
@@ -509,29 +564,28 @@ class DecoderModelWithMLMHead(PreTrainedModel):
             self,
             config: PretrainedConfig,
             target_token_ids: Optional[List[int]] = None,
+            target_labels: Optional[List[str]] = None,
             pooling_length: int = 3,
             decoder: Optional[nn.Module] = None,
     ):
         super().__init__(config)
-        # Base decoder model
         self.decoder = decoder if decoder is not None else AutoModelForCausalLM.from_config(config)
 
         self.config.model_type = f'{self.decoder.config.model_type}-with-mlm-head'
         self.pooling_length = pooling_length
         self.config.pooling_length = pooling_length
+        self.target_labels = list(target_labels) if target_labels else None
         self.target_token_ids = target_token_ids
 
-        if self.target_token_ids is None:
+        if self.target_labels is None and self.target_token_ids is None:
             self.classifier = self.decoder.lm_head
         else:
             hidden_size = _resolve_decoder_hidden_size(self.decoder)
-            self.classifier = nn.Linear(hidden_size, len(self.target_token_ids))
+            self.classifier = nn.Linear(hidden_size, self._restricted_head_size())
             nn.init.normal_(self.classifier.weight, mean=0.0, std=0.02)
             if self.classifier.bias is not None:
                 nn.init.zeros_(self.classifier.bias)
 
-        # Transformers 5.x computes tied-weight metadata in post_init() before
-        # init_weights() calls tie_weights(recompute_mapping=False).
         self.post_init()
 
     @classmethod
@@ -539,37 +593,49 @@ class DecoderModelWithMLMHead(PreTrainedModel):
         cls,
         pretrained_model_name_or_path: Union[str, os.PathLike],
         target_token_ids: Optional[List[int]] = None,
+        target_labels: Optional[List[str]] = None,
         mask_token_id: int = None,
         pooling_length: int = 3,
         *model_args,
         **kwargs
     ):
-        # Detect if this is a custom checkpoint (by presence of our special meta file)
+        target_token_ids, target_labels, mask_token_id, pooling_length = _resolve_wrapper_init_kwargs(
+            kwargs,
+            target_token_ids=target_token_ids,
+            target_labels=target_labels,
+            mask_token_id=mask_token_id,
+            pooling_length=pooling_length,
+        )
         meta_path = os.path.join(pretrained_model_name_or_path, "config_mlm_head.json")
         is_custom_checkpoint = os.path.exists(meta_path)
 
         if is_custom_checkpoint:
-            # --- Load from custom checkpoint ---
             config = AutoConfig.from_pretrained(pretrained_model_name_or_path, **_config_kwargs(kwargs))
             config.mask_token_id = mask_token_id or getattr(config, "mask_token_id", None)
 
-            # Restore target_token_ids from meta file if not provided
-            with open(meta_path) as f:
+            with open(meta_path, encoding="utf-8") as f:
                 meta = json.load(f)
 
+            if target_labels is None and "target_labels" in meta:
+                target_labels = meta["target_labels"]
             if target_token_ids is None and "target_token_ids" in meta:
                 target_token_ids = meta["target_token_ids"]
 
             pooling_length = getattr(config, "pooling_length", pooling_length)
             requested_device_map = kwargs.get("device_map")
             base_model_id = meta.get("base_model") or meta.get("base_model_id")
+            init_kwargs = dict(
+                target_token_ids=target_token_ids,
+                target_labels=target_labels,
+                pooling_length=pooling_length,
+            )
 
             if base_model_id:
-                hf_kwargs = {k: v for k, v in kwargs.items() if k in _HF_MODEL_LOAD_KWARGS and v is not False}
+                hf_kwargs = _hf_model_load_kwargs(kwargs)
                 decoder = AutoModelForCausalLM.from_pretrained(
                     base_model_id, *model_args, **hf_kwargs
                 )
-                model = cls(config, target_token_ids=target_token_ids, pooling_length=pooling_length, decoder=decoder)
+                model = cls(config, decoder=decoder, **init_kwargs)
                 tokenizer = AutoTokenizer.from_pretrained(pretrained_model_name_or_path)
                 if len(tokenizer) != model.decoder.get_input_embeddings().weight.shape[0]:
                     model.decoder.resize_token_embeddings(len(tokenizer))
@@ -598,7 +664,6 @@ class DecoderModelWithMLMHead(PreTrainedModel):
                         "head with a current GRADIEND version, or load with base_model_device_map=False."
                     )
             else:
-                # Load saved weights (safetensors preferred when available)
                 state_dict = load_model_weights(pretrained_model_name_or_path)
 
                 if 'decoder.transformer.wte.weight' in state_dict:
@@ -607,8 +672,7 @@ class DecoderModelWithMLMHead(PreTrainedModel):
                     wte_size = state_dict['decoder.model.embed_tokens.weight'].size(0)
                 else:
                     raise ValueError("Unknown model architecture for loading embeddings.")
-                # resize embeddings if needed
-                model = cls(config, target_token_ids=target_token_ids, pooling_length=pooling_length)
+                model = cls(config, **init_kwargs)
                 current_vocab_size = model.decoder.config.vocab_size
                 if current_vocab_size != wte_size:
                     model.decoder.resize_token_embeddings(wte_size)
@@ -616,21 +680,22 @@ class DecoderModelWithMLMHead(PreTrainedModel):
                 model._align_classifier_to_decoder()
 
         else:
-            # --- Load from a standard LM checkpoint (e.g., "gpt2") ---
             config = AutoConfig.from_pretrained(pretrained_model_name_or_path, **_config_kwargs(kwargs))
             config.mask_token_id = mask_token_id or getattr(config, "mask_token_id", None)
 
-            # Init wrapper — this will internally freeze decoder and init head
-            model = cls(config, target_token_ids=target_token_ids, pooling_length=pooling_length)
+            model = cls(
+                config,
+                target_token_ids=target_token_ids,
+                target_labels=target_labels,
+                pooling_length=pooling_length,
+            )
 
-            # Load decoder from the base LM checkpoint (HF uses torch_dtype)
-            hf_kwargs = {k: v for k, v in kwargs.items()}
+            hf_kwargs = _hf_model_load_kwargs(kwargs)
             model.decoder = AutoModelForCausalLM.from_pretrained(
                 pretrained_model_name_or_path, *model_args, **hf_kwargs
             )
 
-            # Replace classifier if in full vocab mode
-            if target_token_ids is None:
+            if target_labels is None and target_token_ids is None:
                 model.classifier = model.decoder.lm_head
             else:
                 model._align_classifier_to_decoder()
@@ -651,7 +716,11 @@ class DecoderModelWithMLMHead(PreTrainedModel):
         self.config.save_pretrained(save_directory)
 
         # Save wrapper-specific meta
-        meta = {"target_token_ids": self.target_token_ids}
+        meta: Dict[str, Any] = {}
+        if self.target_labels is not None:
+            meta["target_labels"] = self.target_labels
+        if self.target_token_ids is not None:
+            meta["target_token_ids"] = self.target_token_ids
         base_model = kwargs.pop("base_model", None)
         if base_model is not None:
             meta["base_model"] = str(base_model)
@@ -712,7 +781,7 @@ class DecoderModelWithMLMHead(PreTrainedModel):
             logits = torch.stack(logits_list, dim=0)
         else:
             logits = torch.empty(
-                (0, len(self.target_token_ids) if self.target_token_ids else self.config.vocab_size),
+                (0, self._restricted_head_size()),
                 device=hidden_states.device
             )
 
@@ -720,9 +789,22 @@ class DecoderModelWithMLMHead(PreTrainedModel):
         if labels is not None and logits.numel() > 0:
             loss_fct = nn.CrossEntropyLoss(weight=loss_weights)
 
-            if self.target_token_ids is None:
+            if self.target_labels is None and self.target_token_ids is None:
                 selected_labels = labels[mask_pos[:, 0]]
                 loss = loss_fct(logits, selected_labels)
+            elif self.target_labels is not None:
+                if labels.shape[1] == 1:
+                    selected_labels = torch.tensor(
+                        [
+                            int(labels[i, 0].item())
+                            for i in range(labels.size(0))
+                            for _ in range(int((mask_pos[:, 0] == i).sum().item()))
+                        ],
+                        device=logits.device,
+                    )
+                else:
+                    selected_labels = labels[mask_pos[:, 0], mask_pos[:, 1]].to(logits.device)
+                loss = loss_fct(logits, selected_labels.long())
             else:
                 label_map = {tid: idx for idx, tid in enumerate(self.target_token_ids)}
                 if labels.shape[1] == 1:
@@ -792,4 +874,10 @@ class DecoderModelWithMLMHead(PreTrainedModel):
         return self.decoder
 
 
-__all__ = ["DataFrameMLMDataset", "DecoderModelWithMLMHead", "DecoderWithMLMHeadOutput", "train_mlm_head"]
+__all__ = [
+    "DataFrameMLMDataset",
+    "DecoderModelWithMLMHead",
+    "DecoderWithMLMHeadOutput",
+    "load_decoder_mlm_head_meta",
+    "train_mlm_head",
+]

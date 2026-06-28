@@ -15,7 +15,7 @@ import pandas as pd
 import torch
 from torch.utils.data import Dataset
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
-from tqdm import tqdm
+from gradiend.util.tqdm_utils import gradiend_tqdm
 
 from gradiend.trainer.text.classification.data import tokenize_for_classification, _normalize_text_value
 from gradiend.util.logging import get_logger
@@ -220,7 +220,7 @@ def train_classification_head(
         total_loss = 0.0
         correct_per_class: Dict[int, int] = {i: 0 for i in range(n)}
         count_per_class: Dict[int, int] = {i: 0 for i in range(n)}
-        for step, batch in enumerate(tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs}")):
+        for step, batch in enumerate(gradiend_tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs}")):
             batch = {k: v.to(device) for k, v in batch.items()}
             outputs = model(**batch)
             loss = outputs.loss

@@ -2,8 +2,8 @@
 Tests that decoder evaluation uses the correct probability on the correct dataset
 for strengthening and weakening.
 
-- Strengthen class X: maximize P(X) on the *other* class's dataset → eval on other's data,
-  result key = dataset class (e.g. "3PL"), value = P(3SG) on 3PL data; summary aliased to "3SG".
+- Strengthen class X: maximize P(X) on the *other* class's factual dataset (label_class);
+  result key = target class X, value = P(X) on other's rows.
 - Weaken class X: maximize (1 - P(X) on X's dataset) → eval on X's data,
   result key = "X_weaken", value = 1 - P(X) on X data.
 """
@@ -13,7 +13,7 @@ import pandas as pd
 from unittest.mock import MagicMock
 
 from gradiend.evaluator.decoder import DecoderEvaluator
-from tests.conftest import MockTokenizer
+from tests.conftest import MockTokenizer, bind_trainer_cache_resolver
 
 
 class MockModelWithGradiend3SG3PL:
@@ -23,6 +23,7 @@ class MockModelWithGradiend3SG3PL:
         self.name_or_path = "mock-model"
         self.base_model = MagicMock()
         self.tokenizer = MockTokenizer()
+        self.source = "factual"
         self.feature_class_encoding_direction = {"3SG": 1.0, "3PL": -1.0}
 
     def rewrite_base_model(self, **kwargs):
@@ -45,6 +46,7 @@ class TrainerForStrengthenWeakenTest:
         self.target_classes = ["3SG", "3PL"]
         self._model = MockModelWithGradiend3SG3PL()
         self._evaluate_base_model_calls = []
+        bind_trainer_cache_resolver(self)
 
     def _default_from_training_args(self, value, name, fallback=None):
         if value is not None:
@@ -69,6 +71,9 @@ class TrainerForStrengthenWeakenTest:
         neutral_df = pd.DataFrame([{"text": "neutral"}])
         return training_like_df, neutral_df
 
+    def _resolve_decoder_eval_targets(self, training_like_df=None):
+        return ({"3SG": ["he"], "3PL": ["they"]}, False)
+
     def evaluate_base_model(self, base_model, tokenizer, *, training_like_df=None, **kwargs):
         """Record which dataset classes were in training_like_df; return probs for that dataset."""
         if training_like_df is not None and hasattr(training_like_df, "columns"):
@@ -81,17 +86,15 @@ class TrainerForStrengthenWeakenTest:
             dataset_classes = []
         self._evaluate_base_model_calls.append({"dataset_classes": dataset_classes})
 
-        # Return probs keyed by dataset class (convention: probs[dataset_class] = P(other) on that dataset).
-        # For strengthen we need only the other class's data → probs has key "3PL" when eval 3SG.
-        # For weaken we need class's data → probs_factual has key "3SG" when weaken 3SG.
+        # probs[target] = P(target) on the other class's factual dataset rows.
         probs = {}
         probs_factual = {}
         for c in dataset_classes:
-            # Simulate: P(other) on this dataset. For single class "3PL", other = "3SG" → value is P(3SG) on 3PL
             others = [x for x in self.target_classes if x != c]
             if others:
-                probs[c] = 0.9 if c == "3PL" else 0.2  # P(3SG) on 3PL high for strengthen selection
-            probs_factual[c] = 0.1 if c == "3SG" else 0.8  # P(3SG) on 3SG low → 3SG_weaken = 0.9 high
+                target = others[0]
+                probs[target] = 0.9 if c == "3PL" else 0.2
+            probs_factual[c] = 0.1 if c == "3SG" else 0.8
 
         result = {
             "lms": {"lms": 0.99},
@@ -120,6 +123,7 @@ class TrainerForStrengthenWeakenTestGrid:
         self._model = MockModelWithGradiend3SG3PL()
         self._evaluate_base_model_calls = []
         self._call_count = 0
+        bind_trainer_cache_resolver(self)
 
     def _default_from_training_args(self, value, name, fallback=None):
         if value is not None:
@@ -143,6 +147,9 @@ class TrainerForStrengthenWeakenTestGrid:
         neutral_df = pd.DataFrame([{"text": "neutral"}])
         return training_like_df, neutral_df
 
+    def _resolve_decoder_eval_targets(self, training_like_df=None):
+        return ({"3SG": ["he"], "3PL": ["they"]}, False)
+
     def evaluate_base_model(self, base_model, tokenizer, *, training_like_df=None, **kwargs):
         if training_like_df is not None and hasattr(training_like_df, "columns"):
             col = "label_class" if "label_class" in training_like_df.columns else "factual_id"
@@ -161,8 +168,8 @@ class TrainerForStrengthenWeakenTestGrid:
         for c in dataset_classes:
             others = [x for x in self.target_classes if x != c]
             if others:
-                # Strengthen 3SG: we want P(3SG) on 3PL. Base low, modified high so selector picks modified.
-                probs[c] = 0.15 if is_base else 0.85
+                target = others[0]
+                probs[target] = 0.15 if is_base else 0.85
             probs_factual[c] = 0.2 if c == "3SG" else 0.7
             if c == "3SG":
                 probs_factual[c] = 0.1 if is_base else 0.05  # weaken = 1 - factual → high for modified
@@ -200,7 +207,7 @@ class TestDecoderStrengthenWeakenDataset:
         # Summary for 3SG should be present (aliased from 3PL metric)
         assert "3SG" in result
         assert "value" in result["3SG"]
-        assert result["3SG"]["value"] == 0.9  # our mock returns probs["3PL"] = 0.9
+        assert result["3SG"]["value"] == 0.9
 
     def test_strengthen_summary_value_is_p_target_on_other_dataset(self):
         """Selected summary value for strengthen 3SG is the max P(3SG) on 3PL across candidates."""

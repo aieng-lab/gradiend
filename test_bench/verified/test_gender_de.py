@@ -185,3 +185,14 @@ def test_gender_de_gpt2_mlm_verified(temp_output_dir):
     assert score is not None, f"Could not read score from {result_path}/training.json"
     assert score == score, f"Score is NaN in {result_path}"
     assert abs(score) < 10.0, f"Score {score:.4f} seems unreasonable"
+
+    # Post-training encoder eval must include neutral variants (regression: clm_mlm_head + neutral rows).
+    enc_result = trainer.evaluate_encoder(max_size=20, use_cache=False, plot=False)
+    assert enc_result is not None
+    assert "correlation" in enc_result
+    by_type = (enc_result.get("sample_counts") or {}).get("by_type") or {}
+    assert by_type.get("training", 0) > 0
+    assert (
+        by_type.get("neutral_training_masked", 0) > 0
+        or by_type.get("neutral_dataset", 0) > 0
+    ), f"Expected neutral encoder rows, got sample_counts.by_type={by_type}"

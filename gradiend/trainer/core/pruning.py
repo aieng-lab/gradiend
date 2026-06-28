@@ -8,13 +8,13 @@ Post-prune: weight-based prune after training (same prune(), importance from get
 import json
 import os
 import random
-import sys
+import copy
 import dataclasses
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
-from tqdm import tqdm
+from gradiend.util.tqdm_utils import gradiend_tqdm
 
 from gradiend.util import format_count
 from gradiend.util.logging import get_logger
@@ -137,7 +137,7 @@ class PostPruneConfig:
     training and saves the pruned model. You can also call post_prune() manually when not using this config.
     """
 
-    topk: Optional[Union[int, float]] = None
+    topk: Optional[Union[int, float]] = 0.01
     """Same as prune(): int (absolute, top-k dims) or float in (0,1] (relative). topk=1.0 (float) means no pruning. One of topk, threshold, or mask required."""
 
     threshold: Optional[float] = None
@@ -216,10 +216,10 @@ class PrePruneConfig:
     By default use the dataset passed to pre_prune(); set dataset to use different data for this step.
     """
 
-    n_samples: int
+    n_samples: int = 8
     """Total number of samples to use for the gradient mean."""
 
-    topk: Optional[Union[int, float]] = None
+    topk: Optional[Union[int, float]] = 0.1
     """Same as prune(): int (absolute, top-k dims) or float in (0,1] (relative). topk=1.0 (float) means no pruning. One of topk or threshold required."""
 
     threshold: Optional[float] = None
@@ -288,6 +288,16 @@ class PrePruneConfig:
             f"threshold={self.threshold!r}, source={self.source!r}, seed={self.seed!r}, "
             f"use_streaming={streaming})"
         )
+
+
+def _is_noop_pre_prune(config: PrePruneConfig) -> bool:
+    """True when pre-prune would keep every dimension (topk=1.0 float, no threshold)."""
+    if config.threshold is not None:
+        return False
+    topk = config.topk
+    if topk is None:
+        return False
+    return isinstance(topk, float) and topk >= 1.0
 
 
 def _stratified_indices(
@@ -484,10 +494,22 @@ def _streaming_topk_from_accumulators(
     count: int,
     chunk_size: int = 8_000_000,
 ) -> torch.Tensor:
-    best_values: Optional[torch.Tensor] = None
-    best_indices: Optional[torch.Tensor] = None
-    offset = 0
+    """Select an exact global top-k without materializing candidates on the CPU.
 
+    A chunked ``torch.topk`` is only memory efficient when ``k`` itself is small.  For
+    percentage pruning of very large models (for example 1% of a 70B model), the old
+    merge kept billions of float32 values and int64 indices on the host.  Instead we
+    find the kth score with two GPU-side radix histograms over the bits of the
+    non-negative float32 scores.  A final scan transfers only the selected indices.
+
+    The returned indices are unique and sorted in input-space order.  Ties at the kth
+    score are resolved by retaining the lowest input-space indices.
+    """
+    if count <= 0:
+        raise ValueError("count must be positive when selecting streaming top-k.")
+
+    segments: List[Tuple[torch.Tensor, int, int]] = []
+    offset = 0
     for selector in selectors:
         n = int(selector.num_selected)
         acc = accumulators.get(selector.name)
@@ -501,35 +523,105 @@ def _streaming_topk_from_accumulators(
                 "This usually means the parameter is not used by the model forward/loss. Exclude it "
                 "from params/param_map, or fix backbone/head detection if it was included by default."
             )
-
-        flat = acc.detach().flatten()
-        for start in range(0, n, chunk_size):
-            stop = min(start + chunk_size, n)
-            scores = (flat[start:stop] / float(count)).abs()
-            local_k = min(k, int(scores.numel()))
-            values, local = torch.topk(scores, k=local_k, largest=True, sorted=False)
-            indices = (local.to(dtype=torch.long, device="cpu") + offset + start)
-            values = values.detach().float().cpu()
-
-            if best_values is None:
-                best_values = values
-                best_indices = indices
-            else:
-                best_values = torch.cat([best_values, values])
-                best_indices = torch.cat([best_indices, indices])
-                if best_values.numel() > k:
-                    keep_values, keep_pos = torch.topk(best_values, k=k, largest=True, sorted=False)
-                    best_values = keep_values
-                    best_indices = best_indices[keep_pos]
-
+        segments.append((acc.detach().flatten(), offset, n))
         offset += n
 
-    if best_indices is None or best_indices.numel() == 0:
+    if not segments:
         raise RuntimeError("No gradients accumulated in streaming pre-prune.")
-    if best_indices.numel() > k:
-        _, keep_pos = torch.topk(best_values, k=k, largest=True, sorted=False)
-        best_indices = best_indices[keep_pos]
-    return torch.unique(best_indices.to(dtype=torch.long, device="cpu"), sorted=True)
+    if not 0 < k <= offset:
+        raise ValueError(f"k must be in [1, {offset}], got {k}.")
+
+    def _score_bits(flat: torch.Tensor, start: int, stop: int) -> torch.Tensor:
+        # Preserve the old comparison semantics (division in accumulator dtype), then
+        # use float32 only as an order-preserving bit representation for radix select.
+        scores = (flat[start:stop] / float(count)).abs().float()
+        return scores.contiguous().view(torch.int32)
+
+    def _histogram(*, high16: Optional[int] = None) -> torch.Tensor:
+        # One tiny histogram per device lets CUDA devices work concurrently.  Host
+        # synchronization happens only after every chunk has been queued.
+        per_device: Dict[torch.device, torch.Tensor] = {}
+        for flat, _, n in segments:
+            hist = per_device.get(flat.device)
+            if hist is None:
+                hist = torch.zeros(65_536, dtype=torch.int64, device=flat.device)
+                per_device[flat.device] = hist
+            for start in range(0, n, chunk_size):
+                stop = min(start + chunk_size, n)
+                bits = _score_bits(flat, start, stop)
+                if high16 is None:
+                    buckets = (bits >> 16) & 0xFFFF
+                else:
+                    matching = (bits >> 16) == high16
+                    buckets = bits[matching] & 0xFFFF
+                if buckets.numel():
+                    hist.add_(torch.bincount(buckets.long(), minlength=65_536))
+
+        total = torch.zeros(65_536, dtype=torch.int64)
+        for hist in per_device.values():
+            total.add_(hist.cpu())
+        return total
+
+    def _bucket_for_rank(hist: torch.Tensor, rank: int) -> Tuple[int, int]:
+        # rank is one-based among scores in descending order.  Return the selected
+        # bucket and the one-based rank within that bucket.
+        descending_cumulative = hist.flip(0).cumsum(0)
+        position = int(
+            torch.searchsorted(
+                descending_cumulative,
+                torch.tensor(rank, dtype=descending_cumulative.dtype),
+                right=False,
+            ).item()
+        )
+        if position >= int(hist.numel()):
+            raise RuntimeError("Radix top-k histogram did not contain the requested rank.")
+        higher_count = 0 if position == 0 else int(descending_cumulative[position - 1].item())
+        return int(hist.numel()) - 1 - position, rank - higher_count
+
+    logger.info("Streaming pre-prune: GPU radix-select pass 1/3 (high score bits).")
+    high16, rank_within_high = _bucket_for_rank(_histogram(), k)
+    logger.info("Streaming pre-prune: GPU radix-select pass 2/3 (low score bits).")
+    low16, equal_to_keep = _bucket_for_rank(_histogram(high16=high16), rank_within_high)
+    threshold_bits = (high16 << 16) | low16
+
+    logger.info("Streaming pre-prune: GPU radix-select pass 3/3 (selected indices).")
+    try:
+        keep_idx = torch.empty(k, dtype=torch.long, device="cpu")
+    except (RuntimeError, MemoryError) as exc:
+        required = k * torch.empty((), dtype=torch.long).element_size()
+        raise RuntimeError(
+            f"Could not allocate the final top-k index vector ({_format_bytes(required)} for {format_count(k)} indices)."
+        ) from exc
+
+    written = 0
+    equal_written = 0
+    for flat, segment_offset, n in segments:
+        for start in range(0, n, chunk_size):
+            stop = min(start + chunk_size, n)
+            bits = _score_bits(flat, start, stop)
+            selected = bits > threshold_bits
+            remaining_equal = equal_to_keep - equal_written
+            if remaining_equal > 0:
+                equal_positions = (bits == threshold_bits).nonzero(as_tuple=False).flatten()
+                take = min(remaining_equal, int(equal_positions.numel()))
+                if take:
+                    selected[equal_positions[:take]] = True
+                    equal_written += take
+            local_idx = selected.nonzero(as_tuple=False).flatten()
+            n_selected = int(local_idx.numel())
+            if n_selected:
+                keep_idx[written : written + n_selected].copy_(
+                    local_idx.to(dtype=torch.long, device="cpu").add_(segment_offset + start)
+                )
+                written += n_selected
+
+    if written != k or equal_written != equal_to_keep:
+        raise RuntimeError(
+            "GPU radix top-k produced an inconsistent selection: "
+            f"written={written}, expected={k}, equal_written={equal_written}, "
+            f"equal_expected={equal_to_keep}."
+        )
+    return keep_idx
 
 
 def _pre_prune_streaming_topk(
@@ -603,20 +695,16 @@ def _pre_prune_streaming_topk(
             source=source,
         )
 
-    _tqdm_kw = dict(
-        total=len(indices),
-        desc="Pre-prune",
-        unit="datapoint",
-        leave=True,
-        ncols=80,
-        dynamic_ncols=False,
-        ascii=True,
-        mininterval=0.5,
-        position=0,
-        disable=not sys.stderr.isatty(),
-    )
     try:
-        for idx in tqdm(indices, **_tqdm_kw):
+        for idx in gradiend_tqdm(
+            indices,
+            total=len(indices),
+            desc="Pre-prune",
+            unit="datapoint",
+            leave=True,
+            ncols=80,
+            position=0,
+        ):
             item = data[idx]
             if requires_factual:
                 if runtime_monitor is not None:
@@ -661,7 +749,12 @@ def _pre_prune_streaming_topk(
     )
     if runtime_monitor is not None:
         runtime_monitor.mark("pre_prune:prune_gradiend", kept=int(keep_idx.numel()), input_dim=input_dim)
-    pruned = model_with_gradiend.prune_gradiend(keep_idx=keep_idx, inplace=inplace, return_mask=return_mask)
+    pruned = model_with_gradiend.prune_gradiend(
+        keep_idx=keep_idx,
+        keep_idx_sorted_unique=True,
+        inplace=inplace,
+        return_mask=return_mask,
+    )
     if return_keep_idx:
         return pruned, keep_idx.detach().cpu().long()
     return pruned
@@ -743,6 +836,19 @@ def pre_prune(
     Returns:
         model (or copy if not inplace), or (model, combined_mask) if return_mask.
     """
+    if _is_noop_pre_prune(config):
+        logger.debug("Pre-prune: topk=1.0 with no threshold — skipping (no dimensions removed).")
+        if return_keep_idx or return_mask:
+            gradiend = model_with_gradiend.gradiend
+            input_dim = int(getattr(gradiend, "input_dim", 0) or 0)
+            keep_idx = torch.arange(input_dim, dtype=torch.long)
+            m = model_with_gradiend if inplace else copy.deepcopy(model_with_gradiend)
+            if return_keep_idx:
+                return m, keep_idx
+            full_mask = torch.ones(input_dim, dtype=torch.bool)
+            return m, full_mask
+        return model_with_gradiend if inplace else copy.deepcopy(model_with_gradiend)
+
     data = config.dataset if config.dataset is not None else dataset
     if data is None:
         raise ValueError("No dataset: pass dataset to pre_prune() or set config.dataset.")
@@ -822,13 +928,9 @@ def pre_prune(
         unit="datapoint",
         leave=True,
         ncols=80,
-        dynamic_ncols=False,
-        ascii=True,
-        mininterval=0.5,
         position=0,
-        disable=not sys.stderr.isatty(),
     )
-    for idx in tqdm(indices, **_tqdm_kw):
+    for idx in gradiend_tqdm(indices, **_tqdm_kw):
         item = data[idx]
         factual_in = item["factual"]
         alternative_in = item["alternative"]
@@ -913,8 +1015,12 @@ def build_pre_prune_cache_meta(model_with_gradiend: Any, config: PrePruneConfig)
 
 
 def _validate_pre_prune_cache_meta(meta: Dict[str, Any], model_with_gradiend: Any, config: PrePruneConfig) -> None:
+    from gradiend.trainer.core.cache_policy import _normalize_pre_prune_config
+
     expected = build_pre_prune_cache_meta(model_with_gradiend, config)
-    if meta.get("pre_prune_config") != expected["pre_prune_config"]:
+    cached_cfg = _normalize_pre_prune_config(meta.get("pre_prune_config"))
+    expected_cfg = _normalize_pre_prune_config(expected["pre_prune_config"])
+    if cached_cfg != expected_cfg:
         raise ValueError("Pre-prune cache config does not match current PrePruneConfig.")
     if int(meta.get("input_dim", -1)) != int(expected["input_dim"]):
         raise ValueError(
@@ -961,13 +1067,25 @@ def pre_prune_with_cache(
 
     When reuse_cache=True and a valid cache exists, applies cached keep_idx without recomputing gradients.
     """
+    if _is_noop_pre_prune(config):
+        logger.debug("Pre-prune cache: topk=1.0 with no threshold — skipping pre-prune and cache.")
+        return model_with_gradiend if inplace else copy.deepcopy(model_with_gradiend)
+
     if cache_dir and reuse_cache and should_use_cached(cache_dir, True) and has_saved_pre_prune_cache(cache_dir):
         meta, keep_idx = load_pre_prune_cache(cache_dir)
-        _validate_pre_prune_cache_meta(meta, model_with_gradiend, config)
-        logger.info("Reusing cached pre-prune result from %s", cache_dir)
-        if runtime_monitor is not None:
-            runtime_monitor.mark("pre_prune:cache_hit", cache_dir=cache_dir)
-        return model_with_gradiend.prune_gradiend(keep_idx=keep_idx, inplace=inplace)
+        try:
+            _validate_pre_prune_cache_meta(meta, model_with_gradiend, config)
+        except ValueError as exc:
+            logger.warning(
+                "Pre-prune cache at %s is stale (%s); recomputing pre-prune.",
+                cache_dir,
+                exc,
+            )
+        else:
+            logger.info("Reusing cached pre-prune result from %s", cache_dir)
+            if runtime_monitor is not None:
+                runtime_monitor.mark("pre_prune:cache_hit", cache_dir=cache_dir)
+            return model_with_gradiend.prune_gradiend(keep_idx=keep_idx, inplace=inplace)
 
     meta = build_pre_prune_cache_meta(model_with_gradiend, config)
     model_out, keep_idx = pre_prune(

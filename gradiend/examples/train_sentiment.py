@@ -21,6 +21,12 @@ before running (or use scripts/prefetch_hf_datasets.py to warm the cache)::
 Run:
     python -m gradiend.examples.train_sentiment
 
+To reuse vocabulary-held-out splits elsewhere (e.g. before MLM-head training)::
+
+    from gradiend.examples.train_sentiment import load_and_split_sentiment_training_data
+    training_df = load_and_split_sentiment_training_data("data/sentiment_tweets/training.csv", seed=0)
+    # pass training_df to TextPredictionConfig(..., data=training_df, split_col="split")
+
 After training, the script evaluates encoder stability across train/validation/test
 splits (vocabulary-held-out by emotion word) and saves target-grouped strip/box
 plots plus a labeled class-level strip overview.
@@ -29,8 +35,9 @@ plots plus a labeled class-level strip overview.
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
-from typing import List, Tuple
+from typing import Any, List, Optional, Tuple
 
 import pandas as pd
 
@@ -42,12 +49,22 @@ from datasets import load_dataset
 
 from gradiend import (
     PostPruneConfig,
+    PrePruneConfig,
     TextFilterConfig,
     TextPredictionConfig,
     TextPredictionTrainer,
     TrainingArguments,
 )
-from gradiend.data.core import apply_split_group_key
+from gradiend.data.core import SplitGroupKey, apply_split_group_key, resplit_unified_dataframe
+from gradiend.trainer.core.unified_data import (
+    UNIFIED_ALTERNATIVE,
+    UNIFIED_ALTERNATIVE_CLASS,
+    UNIFIED_FACTUAL,
+    UNIFIED_FACTUAL_CLASS,
+    UNIFIED_MASKED,
+    UNIFIED_SPLIT,
+    merged_to_unified,
+)
 from gradiend.examples.nrc_sentiment_lexicon import (
     NRC_CITATION,
     build_sentiment_lexicon_for_corpus,
@@ -57,15 +74,22 @@ from gradiend.util.encoder_splits import order_split_names
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_DATA_DIR = PROJECT_ROOT / "data" / "sentiment_tweets"
-DEFAULT_EXPERIMENT_DIR = PROJECT_ROOT / "runs" / "examples" / "sentiment"
 DEFAULT_MODEL = "google-bert/bert-base-multilingual-cased"
+DEFAULT_MODEL = "gpt2"
+DEFAULT_MODEL = "bert-base-cased"
+DEFAULT_EXPERIMENT_DIR = PROJECT_ROOT / "runs" / "examples" / "sentiment" / DEFAULT_MODEL.split("/")[-1]
 TARGET_CLASSES = ("positive", "negative")
 DEFAULT_LEXICON_WORDS_PER_CLASS = 10
 DEFAULT_MAX_SIZE_PER_CLASS = 3000
 DEFAULT_MIN_OCCURRENCES_PER_TARGET = 50
+DEFAULT_SEED = 0
+DEFAULT_MULTI_SEED_MAX_SEEDS = 10
+DEFAULT_MULTI_SEED_MIN_CONVERGENT = 5
+SENTIMENT_VOCAB_SPLIT_RATIOS = (0.6, 0.2, 0.2)
+RUN_MODE = "single"  # or "multi_seed_heldout" for convergent multi-seed target analysis
+TWEET_EVAL_DATASET = "cardiffnlp/tweet_eval"
 TWEET_EVAL_SPLITS = ("train", "validation", "test")
 _TARGET_KEY = [str.strip, str.casefold]
-
 
 def _canonical_target_word(word: str) -> str:
     return apply_split_group_key(word, _TARGET_KEY)
@@ -88,10 +112,83 @@ def _normalize_training_labels(df):
     return out
 
 
+def load_sentiment_training_data(training_path: Path | str) -> pd.DataFrame:
+    """Load sentiment ``training.csv`` (merged schema) with canonical emotion-word labels."""
+    return _normalize_training_labels(pd.read_csv(training_path))
+
+
+def apply_vocabulary_held_out_split(
+    merged_df: pd.DataFrame,
+    *,
+    seed: int = DEFAULT_SEED,
+    split_ratios: Tuple[float, float, float] = SENTIMENT_VOCAB_SPLIT_RATIOS,
+    split_group_key: SplitGroupKey = None,
+    target_classes: Tuple[str, ...] = TARGET_CLASSES,
+) -> pd.DataFrame:
+    """Assign train/validation/test by held-out emotion word (canonical lemma).
+
+    Same logic as ``TextPredictionTrainer`` with ``split_col=None``, but applied
+    explicitly so the split is fixed before trainer / MLM-head setup and can be
+    reused from other examples (pass the result with ``split_col="split"``).
+    """
+    if split_group_key is None:
+        split_group_key = _TARGET_KEY
+    train_ratio, val_ratio, test_ratio = split_ratios
+    unified = merged_to_unified(
+        merged_df,
+        masked_col="masked",
+        split_col=None,
+        label_class_col="label_class",
+        label_col="label",
+        target_col="alternative",
+        target_class_col="alternative_class",
+        pair=tuple(target_classes),
+    )
+    resplit = resplit_unified_dataframe(
+        unified,
+        group_col=UNIFIED_FACTUAL,
+        train_ratio=train_ratio,
+        val_ratio=val_ratio,
+        test_ratio=test_ratio,
+        seed=int(seed),
+        group_key=split_group_key,
+        per_feature_class=True,
+        feature_class_col=UNIFIED_FACTUAL_CLASS,
+        split_col=UNIFIED_SPLIT,
+        align_alternatives_with_split_vocab=True,
+    )
+    return pd.DataFrame(
+        {
+            "masked": resplit[UNIFIED_MASKED],
+            "split": resplit[UNIFIED_SPLIT],
+            "label_class": resplit[UNIFIED_FACTUAL_CLASS],
+            "label": resplit[UNIFIED_FACTUAL],
+            "alternative_class": resplit[UNIFIED_ALTERNATIVE_CLASS],
+            "alternative": resplit[UNIFIED_ALTERNATIVE],
+        }
+    )
+
+
+def load_and_split_sentiment_training_data(
+    training_path: Path | str,
+    *,
+    seed: int = DEFAULT_SEED,
+    split_ratios: Tuple[float, float, float] = SENTIMENT_VOCAB_SPLIT_RATIOS,
+    split_group_key: SplitGroupKey = None,
+) -> pd.DataFrame:
+    """Load ``training.csv`` and apply vocabulary-held-out splits in one step."""
+    return apply_vocabulary_held_out_split(
+        load_sentiment_training_data(training_path),
+        seed=seed,
+        split_ratios=split_ratios,
+        split_group_key=split_group_key,
+    )
+
+
 def _load_tweet_eval_texts(*, splits: Tuple[str, ...] = TWEET_EVAL_SPLITS) -> List[str]:
     texts: List[str] = []
     for split in splits:
-        df = load_dataset("tweet_eval", "sentiment", split=split).to_pandas()
+        df = load_dataset(TWEET_EVAL_DATASET, "sentiment", split=split).to_pandas()
         df = df[df["label"].isin([0, 2])].copy()
         texts.extend(df["text"].astype(str).tolist())
     return texts
@@ -126,7 +223,7 @@ def generate_data(
     neutral_max_size: int = 1000,
     lexicon_words_per_class: int = DEFAULT_LEXICON_WORDS_PER_CLASS,
     min_occurrences_per_target: int = DEFAULT_MIN_OCCURRENCES_PER_TARGET,
-    seed: int = 42,
+    seed: int = DEFAULT_SEED,
 ) -> Tuple[Path, Path]:
     from gradiend import TextPredictionDataCreator
 
@@ -322,41 +419,80 @@ def _evaluate_split_stability(trainer: TextPredictionTrainer, experiment_dir: Pa
     print(f"  saved {scatter_path or plot_dir / 'encoder_scatter_by_class.pdf'}")
 
 
+def sentiment_training_arguments(
+    *,
+    experiment_dir: str,
+    max_steps: int = 150,
+    train_batch_size: int = 8,
+    learning_rate: float = 1e-4,
+    use_cache: bool | str = False,
+    seed: int = DEFAULT_SEED,
+    fail_on_non_convergence: bool = True,
+    max_seeds: int = 3,
+    min_convergent_seeds: int = 1,
+    **overrides: Any,
+) -> TrainingArguments:
+    """TrainingArguments shared by train_sentiment and multilingual_gradiend_demo sentiment."""
+    args = TrainingArguments(
+        experiment_dir=experiment_dir,
+        train_batch_size=train_batch_size,
+        eval_batch_size=8,
+        eval_steps=100,
+        num_train_epochs=5,
+        max_steps=max_steps,
+        source="alternative",
+        target="diff",
+        encoder_eval_train_max_size=None,
+        encoder_eval_max_size=None,
+        decoder_eval_max_size_training_like=None,
+        decoder_eval_max_size_neutral=None,
+        train_max_size=None,
+        learning_rate=learning_rate,
+        pre_prune_config=PrePruneConfig(n_samples=16, topk=0.1, source="diff"),
+        post_prune_config=PostPruneConfig(topk=0.001, part="decoder-weight"),
+        add_identity_for_other_classes=False,
+        use_cache=use_cache,
+        fail_on_non_convergence=fail_on_non_convergence,
+        seed=seed,
+        max_seeds=max_seeds,
+        min_convergent_seeds=min_convergent_seeds,
+    )
+    if overrides:
+        if "train_batch_size" in overrides and "base_gradient_batch_size" not in overrides:
+            overrides = dict(overrides)
+            overrides["base_gradient_batch_size"] = overrides["train_batch_size"]
+        args = replace(args, **overrides)
+    return args
+
+
 def train(
     *,
     training_path: Path,
     neutral_path: Path,
     model: str = DEFAULT_MODEL,
     experiment_dir: Path = DEFAULT_EXPERIMENT_DIR,
-    max_steps: int = 150,
+    max_steps: int = 500,
     train_batch_size: int = 8,
     learning_rate: float = 1e-4,
     use_cache: bool = True,
+    seed: int = DEFAULT_SEED,
 ) -> TextPredictionTrainer:
+    training_df = load_and_split_sentiment_training_data(training_path, seed=seed)
     config = TextPredictionConfig(
         run_id="sentiment_positive_negative",
-        data=training_path,
+        data=training_df,
         target_classes=list(TARGET_CLASSES),
         eval_neutral_data=neutral_path,
-        split_col=None,
-        split_group_key=[str.strip, str.casefold],
-        split_ratios=(0.6, 0.2, 0.2),
-        img_format="png",
+        split_col=None, #"split",
+        img_format="pdf",
     )
-    args = TrainingArguments(
+    args = sentiment_training_arguments(
         experiment_dir=str(experiment_dir),
-        train_batch_size=train_batch_size,
-        eval_batch_size=8,
-        eval_steps=100,
-        num_train_epochs=3,
         max_steps=max_steps,
-        source="alternative",
-        target="diff",
-        encoder_eval_train_max_size=None,
+        train_batch_size=train_batch_size,
         learning_rate=learning_rate,
-        post_prune_config=PostPruneConfig(topk=0.001, part="decoder-weight"),
         use_cache=use_cache,
-        fail_on_non_convergence=True,
+        seed=seed,
     )
 
     print("\n=== Sentiment training (positive <-> negative) ===")
@@ -372,13 +508,115 @@ def train(
     trainer.evaluate_encoder(plot=True)
     print(f"  {trainer.get_encoder_metrics(use_cache=True)}")
 
-    print("\n=== Decoder evaluation ===")
-    dec = trainer.evaluate_decoder(plot=True)
-    for cls in TARGET_CLASSES:
-        if cls in dec:
-            print(f"  decoder {cls}: {dec[cls]}")
+    #print("\n=== Decoder evaluation ===")
+    #dec = trainer.evaluate_decoder(plot=True)
+    #for cls in TARGET_CLASSES:
+    #    if cls in dec:
+    #        print(f"  decoder {cls}: {dec[cls]}")
 
     _evaluate_split_stability(trainer, experiment_dir)
+
+    return trainer
+
+
+def train_multi_seed_heldout_targets(
+    *,
+    training_path: Path,
+    neutral_path: Path,
+    model: str = DEFAULT_MODEL,
+    experiment_dir: Path = DEFAULT_EXPERIMENT_DIR,
+    max_steps: int = 150,
+    train_batch_size: int = 8,
+    learning_rate: float = 1e-4,
+    use_cache: bool | str = "only_convergent",
+    seed: int = DEFAULT_SEED,
+    max_seeds: int = DEFAULT_MULTI_SEED_MAX_SEEDS,
+    min_convergent_seeds: int = DEFAULT_MULTI_SEED_MIN_CONVERGENT,
+) -> TextPredictionTrainer:
+    config = TextPredictionConfig(
+        run_id="sentiment_positive_negative",
+        data=training_path,
+        target_classes=list(TARGET_CLASSES),
+        eval_neutral_data=neutral_path,
+        split_col=None,
+        split_group_key=[str.strip, str.casefold],
+        split_ratios=(0.6, 0.2, 0.2),
+        img_format="pdf",
+    )
+    args = TrainingArguments(
+        experiment_dir=str(experiment_dir),
+        train_batch_size=train_batch_size,
+        eval_batch_size=8,
+        eval_steps=100,
+        num_train_epochs=3,
+        max_steps=max_steps,
+        source="alternative",
+        target="diff",
+        encoder_eval_train_max_size=None,
+        learning_rate=learning_rate,
+        post_prune_config=PostPruneConfig(topk=0.001, part="decoder-weight"),
+        use_cache=use_cache,
+        fail_on_non_convergence=True,
+        seed=seed,
+        max_seeds=max_seeds,
+        min_convergent_seeds=min_convergent_seeds,
+        saved_seed_runs="all_convergent",
+        analyze_seed_stability=True,
+        split_resplit_per_seed=True,
+        split_resplit_strategy="balanced_cycle",
+    )
+
+    print("\n=== Sentiment multi-seed training (held-out target rotation) ===")
+    trainer = TextPredictionTrainer(model=model, config=config, args=args)
+    trainer.train()
+
+    report = trainer.get_seed_report() or {}
+    convergent_seeds = report.get("convergent_seeds") or []
+    print("  convergent count:", f"{len(convergent_seeds)} / {report.get('min_convergent_seeds')}")
+    print("  convergent seeds:", convergent_seeds)
+
+    print("\n=== Multi-seed held-out target plot (convergent seeds only) ===")
+    view = trainer.multi_seed(selection="all_convergent", dispersion="std")
+    plot_result = view.plot_encoder_by_target(
+        split="all",
+        max_size=None,
+        output=str(experiment_dir / "split_stability" / "encoder_by_target_convergent_seeds.pdf"),
+        show=True,
+        title=None,
+    )
+    print(f"  {plot_result.get('path') if isinstance(plot_result, dict) else plot_result}")
+    combined_strip_result = view.plot_encoder_by_target(
+        split="all",
+        max_size=None,
+        output=str(experiment_dir / "split_stability" / "encoder_by_target_convergent_seeds_combined_strip.pdf"),
+        show=True,
+        combine_seed_rows=True,
+        point_size=1.2,
+        title=None, #="Held-out target encodings across convergent seeds",
+    )
+    print(f"  combined strip: {combined_strip_result.get('path') if isinstance(combined_strip_result, dict) else combined_strip_result}")
+    errorbar_result = view.plot_encoder_by_target(
+        split="all",
+        max_size=None,
+        output=str(experiment_dir / "split_stability" / "encoder_by_target_convergent_seeds_errorbar.pdf"),
+        show=True,
+        plot_style="errorbar",
+        error_stat="std",
+        show_seed_points=True,
+        title=None, #"Held-out target encodings across convergent seeds",
+    )
+    print(f"  errorbar: {errorbar_result.get('path') if isinstance(errorbar_result, dict) else errorbar_result}")
+    interactive_result = view.plot_encoder_by_target(
+        split="all",
+        max_size=None,
+        output=str(experiment_dir / "split_stability" / "encoder_by_target_convergent_seeds.html"),
+        show=True,
+        interactive=True,
+        height=1200,
+        title=None, #"Held-out target encodings across convergent seeds",
+    )
+    print(f"  interactive: {interactive_result.get('path') if isinstance(interactive_result, dict) else interactive_result}")
+    print(f"  seeds: {view.seed_values()}")
 
     return trainer
 
@@ -394,7 +632,7 @@ if __name__ == "__main__":
             neutral_max_size=1000,
             lexicon_words_per_class=DEFAULT_LEXICON_WORDS_PER_CLASS,
             min_occurrences_per_target=DEFAULT_MIN_OCCURRENCES_PER_TARGET,
-            seed=42,
+            seed=DEFAULT_SEED,
         )
     else:
         print(f"=== Sentiment data: using existing CSVs in {DEFAULT_DATA_DIR} ===")
@@ -403,14 +641,27 @@ if __name__ == "__main__":
         cached = _normalize_training_labels(pd.read_csv(training_path))
         cached.to_csv(training_path, index=False)
 
-    train(
-        training_path=training_path,
-        neutral_path=neutral_path,
-        model=DEFAULT_MODEL,
-        experiment_dir=DEFAULT_EXPERIMENT_DIR,
-        max_steps=150,
-        train_batch_size=8,
-        learning_rate=1e-4,
-        use_cache=False,
-    )
+    if RUN_MODE == "multi_seed_heldout":
+        train_multi_seed_heldout_targets(
+            training_path=training_path,
+            neutral_path=neutral_path,
+            model=DEFAULT_MODEL,
+            experiment_dir=DEFAULT_EXPERIMENT_DIR,
+            max_steps=150,
+            train_batch_size=8,
+            learning_rate=1e-4,
+            seed=DEFAULT_SEED,
+        )
+    else:
+        train(
+            training_path=training_path,
+            neutral_path=neutral_path,
+            model=DEFAULT_MODEL,
+            experiment_dir=DEFAULT_EXPERIMENT_DIR,
+            max_steps=150,
+            train_batch_size=8,
+            learning_rate=1e-4,
+            use_cache=False,
+            seed=DEFAULT_SEED,
+        )
     print("\n=== Done ===")

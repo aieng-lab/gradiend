@@ -17,6 +17,7 @@ from gradiend.trainer.core.pruning import (
     _pre_prune_streaming_topk,
     _resolve_pre_prune_use_streaming,
     _stratified_indices,
+    _streaming_topk_from_accumulators,
 )
 from gradiend.trainer.core.config import (
     alternative_computation_required_keywords,
@@ -132,6 +133,51 @@ class _DictDataset:
 
     def __getitem__(self, idx: int) -> dict:
         return self._items[idx]
+
+
+def test_streaming_radix_topk_matches_torch_topk_across_chunks() -> None:
+    class Selector:
+        def __init__(self, name: str, size: int) -> None:
+            self.name = name
+            self.num_selected = size
+
+    generator = torch.Generator().manual_seed(17)
+    accumulators = {
+        "first": torch.randn(613, generator=generator),
+        "second": torch.randn(997, generator=generator),
+    }
+    selectors = [Selector(name, tensor.numel()) for name, tensor in accumulators.items()]
+    flat_scores = torch.cat(list(accumulators.values())).div(3.0).abs()
+    k = 173
+
+    selected = _streaming_topk_from_accumulators(
+        accumulators,
+        selectors,
+        k=k,
+        count=3,
+        chunk_size=257,
+    )
+    expected = torch.topk(flat_scores, k=k, largest=True, sorted=False).indices
+
+    assert selected.numel() == k
+    assert torch.equal(selected, torch.sort(selected).values)
+    assert set(selected.tolist()) == set(expected.tolist())
+
+
+def test_streaming_radix_topk_resolves_boundary_ties_by_input_order() -> None:
+    class Selector:
+        name = "scores"
+        num_selected = 8
+
+    selected = _streaming_topk_from_accumulators(
+        {"scores": torch.tensor([9.0, 4.0, 4.0, 1.0, 8.0, 4.0, 0.0, 7.0])},
+        [Selector()],
+        k=5,
+        count=1,
+        chunk_size=3,
+    )
+
+    assert selected.tolist() == [0, 1, 2, 4, 7]
 
 
 def _classic_importance_and_keep_idx(

@@ -138,7 +138,7 @@ def test_validate_prediction_objective_matrix(objective, model_kind):
     [
         ("bert", "mlm_mask_token"),
         ("gpt2", "clm_next_token"),
-        ("t5", "seq2seq_decoder"),
+        ("t5", "seq2seq_encoder_mlm"),
     ],
 )
 def test_resolve_prediction_objective_auto(model_kind, expected):

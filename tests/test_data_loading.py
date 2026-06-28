@@ -13,7 +13,7 @@ import pytest
 
 HAS_DATASETS = importlib.util.find_spec("datasets") is not None
 
-from gradiend.data.core.base_loader import resolve_base_data
+from gradiend.data.core.base_loader import normalize_hf_dataset_id, resolve_base_data
 from gradiend.trainer.core.unified_data import (
     load_hf_per_class,
     resolve_dataframe,
@@ -30,8 +30,28 @@ def _mock_hf_dataset(df: pd.DataFrame):
 
 
 @pytest.mark.skipif(not HAS_DATASETS, reason="datasets not installed")
+class TestNormalizeHfDatasetId:
+    def test_tweet_eval_alias(self):
+        assert normalize_hf_dataset_id("tweet_eval") == "cardiffnlp/tweet_eval"
+
+    def test_namespaced_id_unchanged(self):
+        assert normalize_hf_dataset_id("org/dataset") == "org/dataset"
+
+
+@pytest.mark.skipif(not HAS_DATASETS, reason="datasets not installed")
 class TestResolveBaseDataHfMocked:
     """resolve_base_data with str = HuggingFace dataset ID (mocked)."""
+
+    @patch("datasets.load_dataset")
+    def test_legacy_tweet_eval_id_is_normalized(self, mock_load_dataset):
+        mock_load_dataset.return_value = _mock_hf_dataset(
+            pd.DataFrame({"text": ["one"]})
+        )
+        texts = resolve_base_data("tweet_eval", text_column="text", hf_config="sentiment", seed=42)
+        mock_load_dataset.assert_called_once_with(
+            "cardiffnlp/tweet_eval", "sentiment", split="train"
+        )
+        assert texts == ["one"]
 
     @patch("datasets.load_dataset")
     def test_hf_id_returns_text_column_and_shuffles(self, mock_load_dataset):

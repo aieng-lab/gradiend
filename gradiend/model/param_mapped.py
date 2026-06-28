@@ -70,7 +70,9 @@ class _CompiledParamSelector:
                 self.repr = "empty"
                 self.selector = None
         elif self.repr == "indices":
-            self.selector = spec["indices"].detach().to("cpu").long().flatten()
+            self.selector = spec["indices"].detach().to("cpu").flatten()
+            if self.selector.dtype not in (torch.int32, torch.int64):
+                self.selector = self.selector.long()
             self.num_selected = int(self.selector.numel())
             if self.num_selected == 0:
                 self.repr = "empty"
@@ -83,8 +85,17 @@ class _CompiledParamSelector:
             return None
         if self.selector.device == device:
             return self.selector
-        if self._device_selector is None or self._device_selector.device != device:
-            self._device_selector = self.selector.to(device=device, non_blocking=False)
+        target_dtype = torch.long if self.repr == "indices" else self.selector.dtype
+        if (
+            self._device_selector is None
+            or self._device_selector.device != device
+            or self._device_selector.dtype != target_dtype
+        ):
+            self._device_selector = self.selector.to(
+                device=device,
+                dtype=target_dtype,
+                non_blocking=False,
+            )
         return self._device_selector
 
     def select_flat(self, flat: torch.Tensor) -> torch.Tensor:
@@ -96,7 +107,7 @@ class _CompiledParamSelector:
         if self.repr == "mask":
             return flat[selector]
         if self.repr == "indices":
-            return flat[selector.to(dtype=torch.long)]
+            return flat[selector]
         raise ValueError(f"Unknown compiled repr {self.repr!r}")
 
 
@@ -126,12 +137,14 @@ def _make_runtime_spec_from_selected_positions(
     if k == numel:
         return {"shape": shape, "repr": "all"}
     if k == 0:
-        return {"shape": shape, "repr": "indices", "indices": torch.empty(0, dtype=torch.long)}
+        dtype = torch.int32 if _is_int32_safe(numel) else torch.int64
+        return {"shape": shape, "repr": "indices", "indices": torch.empty(0, dtype=dtype)}
     bpi = _bytes_per_index(numel)
     est_indices = k * bpi
     est_mask = numel
     if est_indices < est_mask * margin:
-        return {"shape": shape, "repr": "indices", "indices": sel_positions}
+        dtype = torch.int32 if _is_int32_safe(numel) else torch.int64
+        return {"shape": shape, "repr": "indices", "indices": sel_positions.to(dtype=dtype)}
     mask = torch.zeros(numel, dtype=torch.bool)
     mask[sel_positions] = True
     return {"shape": shape, "repr": "mask", "mask": mask.reshape(shape)}
@@ -788,6 +801,7 @@ class ParamMappedGradiendModel(GradiendModel):
         part: str = "decoder-weight",
         importance: Optional[torch.Tensor] = None,
         keep_idx: Optional[torch.Tensor] = None,
+        keep_idx_sorted_unique: bool = False,
         inplace: bool = False,
         return_mask: bool = False,
     ) -> Union["ParamMappedGradiendModel", Tuple["ParamMappedGradiendModel", torch.Tensor]]:
@@ -843,7 +857,8 @@ class ParamMappedGradiendModel(GradiendModel):
                 raise ValueError("keep_idx must not be empty.")
             if int(keep_idx.min().item()) < 0 or int(keep_idx.max().item()) >= old_input_dim:
                 raise ValueError(f"keep_idx out of bounds for input_dim={old_input_dim}")
-            keep_idx = torch.unique(keep_idx, sorted=True)
+            if not keep_idx_sorted_unique:
+                keep_idx = torch.unique(keep_idx, sorted=True)
         else:
             combined = torch.ones(old_input_dim, dtype=torch.bool)
 
@@ -909,14 +924,25 @@ class ParamMappedGradiendModel(GradiendModel):
             numel = int(torch.tensor(shape).prod().item())
             r = spec["repr"]
 
-            sel_positions = _selected_positions_from_spec(spec)
+            if r == "all":
+                n = numel
+                sel_positions = None
+            else:
+                sel_positions = _selected_positions_from_spec(spec)
+                n = int(sel_positions.numel())
 
-            n = int(sel_positions.numel())
+            # keep_cpu is sorted, so locate each parameter segment with two scalar
+            # searches instead of allocating a keep-sized boolean vector per parameter.
+            lo = int(torch.searchsorted(keep_cpu, offset, right=False).item())
+            hi = int(torch.searchsorted(keep_cpu, offset + n, right=False).item())
+            seg_keep = keep_cpu[lo:hi] - offset
 
-            in_seg = (keep_cpu >= offset) & (keep_cpu < offset + n)
-            seg_keep = keep_cpu[in_seg] - offset
-
-            new_sel = sel_positions[seg_keep] if seg_keep.numel() > 0 else torch.empty(0, dtype=torch.long)
+            if r == "all":
+                new_sel = seg_keep
+            elif seg_keep.numel() > 0:
+                new_sel = sel_positions[seg_keep]
+            else:
+                new_sel = torch.empty(0, dtype=torch.long)
             new_param_map[param_name] = _make_runtime_spec_from_selected_positions(shape, new_sel)
 
             offset += n
@@ -930,7 +956,12 @@ class ParamMappedGradiendModel(GradiendModel):
             # Lazy init: build encoder/decoder at pruned size (no copy, fresh init)
             m._build_encoder_decoder(new_in)
         else:
-            m = m._prune_input_dims(keep_idx, inplace=True, return_index_map=False)
+            m = m._prune_input_dims(
+                keep_idx,
+                inplace=True,
+                return_index_map=False,
+                keep_idx_sorted_unique=keep_idx_sorted_unique,
+            )
 
         m.param_map = new_param_map
         m._param_map_version = getattr(m, "_param_map_version", 0) + 1
@@ -1085,24 +1116,8 @@ class ParamMappedGradiendModel(GradiendModel):
             _save_tensor_dict(os.path.join(save_directory, fn), mask_tensors, prefer_safetensors=prefer_safetensors)
             mapping["masks_file"] = fn
 
-        # Save base-global index map for stable top-k comparisons
-        try:
-            index_map = self._get_base_global_index_map().to("cpu")
-            if index_map.numel() > 0:
-                total_numel = 0
-                for _param_name, spec in self._param_map_items():
-                    shape = tuple(spec["shape"])
-                    total_numel += int(torch.tensor(shape).prod().item())
-                idx_dtype = torch.int32 if _is_int32_safe(total_numel) else torch.int64
-                fn = _tensor_file_name("input_index_map", prefer_safetensors=prefer_safetensors)
-                _save_tensor_dict(
-                    os.path.join(save_directory, fn),
-                    {"base_global_index_map": index_map.to(dtype=idx_dtype)},
-                    prefer_safetensors=prefer_safetensors,
-                )
-                mapping["input_index_map_file"] = fn
-        except Exception as e:
-            logger.warning("Failed to save base-global index map: %s", e)
+        # base_global_index_map is always reconstructible from param_map via
+        # _build_base_global_index_map(); do not persist it (wastes hundreds of MB on unpruned models).
 
         cfg["mapping"] = mapping
 

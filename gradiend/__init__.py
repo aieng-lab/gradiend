@@ -12,7 +12,8 @@ Public API (from gradiend):
       load_training_stats, GradientTrainingDataset, TextGradientTrainingDataset,
       create_model_with_gradiend
     - Comparison: compute_similarity_matrix, compute_cross_encoding_matrix,
-      compute_anchor_aligned_encoding_matrix, compute_gradiend_feature_cross_encoding_matrix
+      compute_anchor_aligned_encoding_matrix, compute_gradiend_feature_cross_encoding_matrix,
+      compute_gradiend_transition_cross_encoding_matrix
     - Logging: setup_logging, get_logger
 
 Sub-packages (use when you need modality-specific or internal APIs):
@@ -33,8 +34,10 @@ For experimental features (analysis, plotting, LaTeX export), install with:
 from importlib.metadata import PackageNotFoundError, version
 
 from gradiend.util.hf_env import configure_hf_download_env
+from gradiend.util.tqdm_utils import patch_sys_stderr_for_tqdm
 
 configure_hf_download_env()
+patch_sys_stderr_for_tqdm()
 
 try:
     __version__ = version("gradiend")
@@ -68,10 +71,12 @@ __all__ = [
     "compute_cross_encoding_matrix",
     "compute_anchor_aligned_encoding_matrix",
     "compute_gradiend_feature_cross_encoding_matrix",
+    "compute_gradiend_transition_cross_encoding_matrix",
     # Training
     "load_training_stats",
     "set_seed",
     "TrainerSuite",
+    "TrainerCollection",
     "PositiveTrainerSuite",
     "SymmetricTrainerSuite",
     "SuitePairDefinition",
@@ -85,12 +90,13 @@ __all__ = [
     "create_model_with_gradiend",
     # Visualization
     "plot_comparison_heatmap",
-    "plot_anchor_aligned_encoding_heatmap",
     "plot_gradiend_feature_cross_encoding_heatmap",
+    "plot_gradiend_transition_cross_encoding_heatmap",
     "plot_cross_encoding_heatmap",
     "plot_similarity_heatmap",
     "plot_topk_overlap_heatmap",
     "plot_topk_overlap_venn",
+    "check_plot_environment",
 ]
 
 _IMPORT_ERROR = None
@@ -121,17 +127,19 @@ try:
         compute_cross_encoding_matrix,
         compute_anchor_aligned_encoding_matrix,
         compute_gradiend_feature_cross_encoding_matrix,
+        compute_gradiend_transition_cross_encoding_matrix,
     )
 
     # Visualization functions
     from gradiend.visualizer import (
-        plot_anchor_aligned_encoding_heatmap,
         plot_gradiend_feature_cross_encoding_heatmap,
+        plot_gradiend_transition_cross_encoding_heatmap,
         plot_comparison_heatmap,
         plot_cross_encoding_heatmap,
         plot_similarity_heatmap,
         plot_topk_overlap_heatmap,
         plot_topk_overlap_venn,
+        check_plot_environment,
     )
 
     # Training
@@ -139,6 +147,7 @@ try:
         load_training_stats,
         set_seed,
         TrainerSuite,
+        TrainerCollection,
         PositiveTrainerSuite,
         SymmetricTrainerSuite,
         SuitePairDefinition,

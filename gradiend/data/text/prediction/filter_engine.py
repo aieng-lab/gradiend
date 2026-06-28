@@ -11,7 +11,7 @@ import re
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Pattern, Tuple, Union
 
-from tqdm import tqdm
+from gradiend.util.tqdm_utils import gradiend_tqdm
 
 from gradiend.data.core.spacy_util import load_spacy_model
 from gradiend.data.text.filter_config import SpacyTagSpec, TextFilterConfig
@@ -262,9 +262,9 @@ def _filter_string_only(
     results: List[MatchResult] = []
     it = sentences if isinstance(sentences, list) else iter(sentences)
     total = len(sentences) if isinstance(sentences, list) else None
-    pbar = tqdm(
+    pbar = gradiend_tqdm(
         it, desc=desc or "Filtering", unit=" sentences",
-        leave=True, total=total, position=0, dynamic_ncols=True,
+        leave=True, total=total, position=0,
         mininterval=2.0,
     )
     try:
@@ -322,9 +322,9 @@ def _filter_with_spacy(
     results: List[MatchResult] = []
     it = sentences if isinstance(sentences, list) else iter(sentences)
     total = len(sentences) if isinstance(sentences, list) else None
-    pbar = tqdm(
+    pbar = gradiend_tqdm(
         it, desc=desc or "Filtering", unit=" sent",
-        leave=True, total=total, position=0, dynamic_ncols=True,
+        leave=True, total=total, position=0,
         mininterval=2.0,
     )
     try:
@@ -558,8 +558,8 @@ def filter_sentences_multi(
     active_signature: Tuple[str, ...] = ()
     active_matcher: Optional[_ActiveTargetMatcher] = None
     it = sentences if isinstance(sentences, list) else iter(sentences)
-    pbar = tqdm(
-        it, desc="Filtering", unit=" sent", leave=True, position=0, dynamic_ncols=True,
+    pbar = gradiend_tqdm(
+        it, desc="Filtering", unit=" sent", leave=True, position=0,
         mininterval=2.0,
     )
     n_processed = 0

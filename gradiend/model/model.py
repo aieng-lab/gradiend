@@ -469,6 +469,7 @@ class GradiendModel(nn.Module):
         *,
         inplace: bool = False,
         return_index_map: bool = False,
+        keep_idx_sorted_unique: bool = False,
     ):
         """
         INTERNAL: physically prune input_dim and output_dim by slicing encoder/decoder weights.
@@ -484,7 +485,9 @@ class GradiendModel(nn.Module):
         if keep_idx.dtype not in (torch.int64, torch.long, torch.int32):
             raise TypeError(f"keep_idx must be integer dtype, got {keep_idx.dtype}")
 
-        keep_idx = torch.unique(keep_idx.detach().to(torch.long), sorted=True)
+        keep_idx = keep_idx.detach().to(torch.long)
+        if not keep_idx_sorted_unique:
+            keep_idx = torch.unique(keep_idx, sorted=True)
 
         m = self if inplace else copy.deepcopy(self)
 

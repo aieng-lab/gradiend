@@ -22,6 +22,24 @@ from gradiend.model.utils import is_decoder_only_model, is_seq2seq_model
 logger = get_logger(__name__)
 
 
+def _safe_exp(x: float) -> float:
+    """``math.exp`` that returns ``inf`` / ``0`` instead of raising on extreme values."""
+    if x > 700.0:
+        return float("inf")
+    if x < -700.0:
+        return 0.0
+    return math.exp(x)
+
+
+def _clm_lms_from_avg_neg_log_likelihood(avg_neg_log_likelihood: float) -> float:
+    """Map mean NLL to LMS; returns 0 when the rewritten model is effectively broken."""
+    if avg_neg_log_likelihood < 0 or not math.isfinite(avg_neg_log_likelihood):
+        return 0.0
+    if avg_neg_log_likelihood > 700.0:
+        return 0.0
+    return 1.0 / (1.0 + avg_neg_log_likelihood)
+
+
 def _calculate_classification_metrics(
     true_labels: List[str],
     predicted_labels: List[str],
@@ -381,11 +399,11 @@ def evaluate_seq2seq_perplexity(
         }
 
     avg_neg_log_likelihood = total_log_likelihood / total_token_count
-    perplexity = math.exp(avg_neg_log_likelihood)
+    perplexity = _safe_exp(avg_neg_log_likelihood)
     logger.debug(f"Evaluated {n} sentences in {time.time() - start:.2f}s")
     logger.debug(f"Perplexity: {perplexity:.2f}")
 
-    lms = 1 / (1 + avg_neg_log_likelihood)
+    lms = _clm_lms_from_avg_neg_log_likelihood(avg_neg_log_likelihood)
     result = {
         "lms": lms,
         "perplexity": perplexity,
@@ -458,12 +476,21 @@ def evaluate_clm_perplexity(
         total_log_likelihood += loss.item()
         total_token_count += non_ignored_tokens
 
+
+    if total_token_count == 0:
+        return {
+            "lms": 0.0,
+            "perplexity": float("inf"),
+            "total_log_likelihood": total_log_likelihood,
+            "total_tokens": 0,
+        }
+
     avg_neg_log_likelihood = total_log_likelihood / total_token_count
-    perplexity = math.exp(avg_neg_log_likelihood)
+    perplexity = _safe_exp(avg_neg_log_likelihood)
     logger.debug(f"Evaluated {n} sentences in {time.time() - start:.2f}s")
     logger.debug(f"Perplexity: {perplexity:.2f}")
 
-    lms = 1 / (1 + avg_neg_log_likelihood)
+    lms = _clm_lms_from_avg_neg_log_likelihood(avg_neg_log_likelihood)
     result = {
         "lms": lms,
         "perplexity": perplexity,

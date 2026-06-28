@@ -10,9 +10,7 @@ import dataclasses
 from typing import Any, List, Optional, Sequence
 
 import torch
-from tqdm import tqdm
-
-from gradiend.util.tqdm_utils import tqdm_kwargs
+from gradiend.util.tqdm_utils import gradiend_tqdm
 from torch.utils.data import DataLoader
 
 from gradiend.util.logging import get_logger
@@ -28,8 +26,8 @@ from gradiend.trainer.core.callbacks import (
 from gradiend.trainer.core.stats import (
     write_training_stats,
     load_training_stats,
-    _best_step_abs_mean_by_type,
     _best_checkpoint_step_is_after_initial,
+    _best_step_min_target_class_abs_mean,
     _best_step_target_class_mean_product,
 )
 
@@ -307,13 +305,11 @@ def train(
             epoch_total = min(len(data), steps_remaining) if steps_remaining > 0 else 0
         else:
             epoch_total = len(data)
-        dataloader_iterator = tqdm(
+        dataloader_iterator = gradiend_tqdm(
             data,
-            **tqdm_kwargs(
-                desc=f"Epoch {epoch + 1}/{training_args.num_train_epochs}",
-                total=epoch_total,
-                leave=True,
-            ),
+            desc=f"Epoch {epoch + 1}/{training_args.num_train_epochs}",
+            total=epoch_total,
+            leave=True,
         )
 
         data_prep_start = time.time()
@@ -566,6 +562,7 @@ def train(
     
     converged = True
     convergent_count = None
+    min_target_class_abs_mean = None
     if threshold is not None and min_convergent_seeds is not None and min_convergent_seeds > 0:
         # Check if this single-seed run converged
         best_step_ok = _best_checkpoint_step_is_after_initial(best_score_checkpoint)
@@ -580,15 +577,17 @@ def train(
             metric_val = best_score_checkpoint.get("correlation")
             if metric_val is None:
                 metric_val = training_stats.get("correlation")
-            abs_training_mean = None
             target_mean_product = _best_step_target_class_mean_product(training_stats, best_score_checkpoint)
             if training_args.convergent_mean_by_class_threshold is not None:
-                best_abs = _best_step_abs_mean_by_type(training_stats, best_score_checkpoint)
-                abs_training_mean = (best_abs or {}).get("training")
+                min_target_class_abs_mean = _best_step_min_target_class_abs_mean(
+                    training_stats, best_score_checkpoint
+                )
             mean_ok = (
                 training_args.convergent_mean_by_class_threshold is None
-                or abs_training_mean is None
-                or (isinstance(abs_training_mean, (int, float)) and abs_training_mean >= training_args.convergent_mean_by_class_threshold)
+                or (
+                    isinstance(min_target_class_abs_mean, (int, float))
+                    and min_target_class_abs_mean >= training_args.convergent_mean_by_class_threshold
+                )
             )
             sign_ok = isinstance(target_mean_product, (int, float)) and target_mean_product < 0
             converged = best_step_ok and metric_val is not None and abs(metric_val) >= threshold and mean_ok and sign_ok
@@ -607,17 +606,17 @@ def train(
                 and metric_val is not None
                 and abs(metric_val) >= threshold
                 and training_args.convergent_mean_by_class_threshold is not None
-                and isinstance(abs_training_mean, (int, float))
-                and abs_training_mean < training_args.convergent_mean_by_class_threshold
+                and isinstance(min_target_class_abs_mean, (int, float))
+                and min_target_class_abs_mean < training_args.convergent_mean_by_class_threshold
             ):
                 logger.warning(
                     "Training completed but model did not converge: "
-                    "%s=%.4f met the threshold %.4f, but abs_mean_by_type['training']=%.4f "
+                    "%s=%.4f met the threshold %.4f, but min |mean| among target classes=%.4f "
                     "was below the required minimum %.4f (required: %s convergent seeds).",
                     convergent_metric,
                     metric_val,
                     threshold,
-                    abs_training_mean,
+                    min_target_class_abs_mean,
                     training_args.convergent_mean_by_class_threshold,
                     min_convergent_seeds,
                 )
@@ -662,6 +661,8 @@ def train(
             "min_convergent_seeds": min_convergent_seeds,
             "convergence_metric": convergent_metric,
             "threshold": threshold,
+            "convergent_mean_by_class_threshold": training_args.convergent_mean_by_class_threshold,
+            "convergent_min_target_class_abs_mean": min_target_class_abs_mean,
         }
 
     if getattr(training_args, "fail_on_non_convergence", False) and int(getattr(training_args, "max_seeds", 1) or 1) <= 1:

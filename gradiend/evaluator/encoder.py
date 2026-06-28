@@ -60,8 +60,14 @@ def _rows_to_encoder_df(rows: List[Dict[str, Any]]) -> pd.DataFrame:
         "input_type": [],
         "feature_class_id": [],
         "eval_group": [],
+        "source_token": [],
         "factual_token": [],
         "alternative_token": [],
+        "text": [],
+        "template": [],
+        "input_text": [],
+        "masked": [],
+        "display_text": [],
         "data_split": [],
         "neutral_variant": [],
     }
@@ -77,12 +83,29 @@ def _rows_to_encoder_df(rows: List[Dict[str, Any]]) -> pd.DataFrame:
         data["input_type"].append(r.get("input_type"))
         data["feature_class_id"].append(r.get("feature_class_id"))
         data["eval_group"].append(r.get("eval_group"))
+        data["source_token"].append(r.get("source_token"))
         data["factual_token"].append(r.get("factual_token"))
         data["alternative_token"].append(r.get("alternative_token"))
+        data["text"].append(r.get("text"))
+        data["template"].append(r.get("template"))
+        data["input_text"].append(r.get("input_text"))
+        data["masked"].append(r.get("masked"))
+        data["display_text"].append(r.get("display_text"))
         data["data_split"].append(r.get("data_split"))
         data["neutral_variant"].append(r.get("neutral_variant"))
     df = pd.DataFrame(data)
-    for col in ("factual_token", "alternative_token", "data_split", "neutral_variant"):
+    for col in (
+        "source_token",
+        "factual_token",
+        "alternative_token",
+        "text",
+        "template",
+        "input_text",
+        "masked",
+        "display_text",
+        "data_split",
+        "neutral_variant",
+    ):
         if df[col].isna().all():
             df = df.drop(columns=[col])
     return df
@@ -138,7 +161,7 @@ class EncoderEvaluator:
             mean_by_class, mean_by_type; optionally neutral_mean_by_type, mean_by_feature_class,
             mean_by_eval_group, eval_group_basis, label_value_to_class_name.
         """
-        use_cache = trainer._default_from_training_args(use_cache, "use_cache", fallback=False)
+        use_cache = trainer._resolve_artifact_use_cache(use_cache, fallback=False)
         skip = {"eval_batch_size", "use_cache", "encoder_df", "return_df", "plot", "plot_kwargs", "model_with_gradiend"}
         create_kwargs = dict(kwargs)
         if split is not None:
@@ -181,7 +204,7 @@ class EncoderEvaluator:
                 logger.warning("Failed to load encoder eval cache %s: %s", path, e)
                 return None
 
-        if use_cache and cache_dirs:
+        if use_cache and encoder_df is None and cache_dirs:
             for cache_dir in cache_dirs:
                 candidate = resolve_encoder_eval_result_path(cache_dir, None, **key_kwargs)
                 if candidate and os.path.isfile(candidate):
@@ -196,12 +219,12 @@ class EncoderEvaluator:
                         logger.info("Loaded cached encoder evaluation from legacy path %s", legacy_path)
                         return raw
 
-        if use_cache and metrics_path and os.path.isfile(metrics_path):
+        if use_cache and encoder_df is None and metrics_path and os.path.isfile(metrics_path):
             raw = _load_metrics(metrics_path)
             if raw is not None:
                 logger.info("Loaded cached encoder evaluation from %s", metrics_path)
                 return raw
-        if use_cache and experiment_dir and str(experiment_dir).strip():
+        if use_cache and encoder_df is None and experiment_dir and str(experiment_dir).strip():
             legacy_path = resolve_encoder_eval_result_path_legacy(experiment_dir, **key_kwargs)
             if legacy_path and legacy_path != metrics_path and os.path.isfile(legacy_path):
                 raw = _load_metrics(legacy_path)

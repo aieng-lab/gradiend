@@ -131,6 +131,7 @@ if __name__ == "__main__":
         model="bert-base-uncased",
         data=training,
         eval_neutral_data=neutral,
+        eval_neutral_additional_excluded_words=NEUTRAL_EXCLUDE,
         max_counterfactuals_per_sentence=2,
         img_format='png',
         args=args,

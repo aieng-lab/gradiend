@@ -8,7 +8,12 @@ import pytest
 
 from gradiend.trainer.core.arguments import TrainingArguments
 from gradiend.trainer.text.prediction.trainer import TextPredictionConfig, TextPredictionTrainer
-from gradiend.visualizer.convergence import plot_training_convergence, _steps_and_values
+from gradiend.visualizer.convergence import (
+    plot_training_convergence,
+    _confidence_interval_series,
+    _range_series,
+    _steps_and_values,
+)
 from gradiend.visualizer.encoder_distributions import plot_encoder_distributions
 
 
@@ -77,6 +82,130 @@ class TestImgFormatVisualizerOutputPath:
         finally:
             plt.close("all")
 
+    def test_plot_training_convergence_class_spread_minmax_draws_fill(self):
+        pytest.importorskip("matplotlib")
+        import matplotlib.pyplot as plt
+
+        training_stats = {
+            "training_stats": {
+                "mean_by_class": {
+                    0: {"1": 0.2, "-1": -0.2},
+                    1: {"1": 0.5, "-1": -0.5},
+                },
+                "min_by_class": {
+                    0: {"1": 0.1, "-1": -0.3},
+                    1: {"1": 0.4, "-1": -0.6},
+                },
+                "max_by_class": {
+                    0: {"1": 0.3, "-1": -0.1},
+                    1: {"1": 0.6, "-1": -0.4},
+                },
+                "scores": {0: 0.5, 1: 0.8},
+            },
+            "best_score_checkpoint": {},
+        }
+        ranges = _range_series(training_stats["training_stats"], "min_by_class", "max_by_class")
+        assert "1" in ranges
+        assert len(ranges["1"]) == 2
+        try:
+            fig, axes = plot_training_convergence(
+                training_stats=training_stats,
+                show=False,
+                return_fig_ax=True,
+                class_spread="minmax",
+                plot_mean_by_feature_class=False,
+            )
+            assert "min-max" in axes[0].get_title()
+            collections = [
+                c for c in axes[0].collections if c.get_label() == "_collection0" or hasattr(c, "get_paths")
+            ]
+            assert len(collections) >= 1
+        finally:
+            plt.close("all")
+
+    def test_plot_training_convergence_class_spread_iqr(self):
+        pytest.importorskip("matplotlib")
+        import matplotlib.pyplot as plt
+
+        training_stats = {
+            "training_stats": {
+                "mean_by_class": {
+                    0: {"1": 0.2, "-1": -0.2},
+                    1: {"1": 0.5, "-1": -0.5},
+                },
+                "q1_by_class": {
+                    0: {"1": 0.15, "-1": -0.25},
+                    1: {"1": 0.45, "-1": -0.55},
+                },
+                "q3_by_class": {
+                    0: {"1": 0.25, "-1": -0.15},
+                    1: {"1": 0.55, "-1": -0.45},
+                },
+                "scores": {0: 0.5, 1: 0.8},
+            },
+            "best_score_checkpoint": {},
+        }
+        try:
+            fig, axes = plot_training_convergence(
+                training_stats=training_stats,
+                show=False,
+                return_fig_ax=True,
+                class_spread="iqr",
+                plot_mean_by_feature_class=False,
+            )
+            assert "IQR" in axes[0].get_title()
+            collections = [
+                c for c in axes[0].collections if c.get_label() == "_collection0" or hasattr(c, "get_paths")
+            ]
+            assert len(collections) >= 1
+        finally:
+            plt.close("all")
+
+    def test_plot_training_convergence_class_spread_ci95(self):
+        pytest.importorskip("matplotlib")
+        import matplotlib.pyplot as plt
+
+        training_stats = {
+            "training_stats": {
+                "mean_by_class": {
+                    0: {"1": 0.2, "-1": -0.2},
+                    1: {"1": 0.5, "-1": -0.5},
+                },
+                "std_by_class": {
+                    0: {"1": 0.1, "-1": 0.1},
+                    1: {"1": 0.2, "-1": 0.2},
+                },
+                "n_by_class": {
+                    0: {"1": 4, "-1": 4},
+                    1: {"1": 4, "-1": 4},
+                },
+                "scores": {0: 0.5, 1: 0.8},
+            },
+            "best_score_checkpoint": {},
+        }
+        ranges = _confidence_interval_series(
+            training_stats["training_stats"],
+            "mean_by_class",
+            "std_by_class",
+            "n_by_class",
+        )
+        assert ranges["1"][0] == pytest.approx((0, 0.102, 0.298))
+        try:
+            fig, axes = plot_training_convergence(
+                training_stats=training_stats,
+                show=False,
+                return_fig_ax=True,
+                class_spread="ci95",
+                plot_mean_by_feature_class=False,
+            )
+            assert "95% CI" in axes[0].get_title()
+            collections = [
+                c for c in axes[0].collections if c.get_label() == "_collection0" or hasattr(c, "get_paths")
+            ]
+            assert len(collections) >= 1
+        finally:
+            plt.close("all")
+
     def test_plot_encoder_distributions_output_path_uses_img_format(self, tmp_path):
         pytest.importorskip("matplotlib")
         trainer = MagicMock()
@@ -128,6 +257,35 @@ class TestImgFormatVisualizerOutputPath:
             assert fig is not None
             ax.set_ylabel("Custom encoded")
             assert ax.get_ylabel() == "Custom encoded"
+        finally:
+            plt.close("all")
+
+    def test_plot_encoder_distributions_title_none_disables_title(self):
+        pytest.importorskip("matplotlib")
+        import matplotlib.pyplot as plt
+
+        trainer = MagicMock()
+        trainer.run_id = "run1"
+        trainer.pair = None
+        trainer.experiment_dir = None
+        trainer.get_model = MagicMock(return_value=None)
+        encoder_df = pd.DataFrame({
+            "encoded": [0.1, -0.2, 0.2, -0.3],
+            "label": [1.0, -1.0, 1.0, -1.0],
+            "source_id": ["1", "2", "1", "2"],
+            "target_id": ["2", "1", "2", "1"],
+            "type": ["training"] * 4,
+        })
+        try:
+            fig, ax = plot_encoder_distributions(
+                trainer=trainer,
+                encoder_df=encoder_df,
+                title=None,
+                show=False,
+                return_fig_ax=True,
+            )
+            assert fig._suptitle is None
+            assert ax.get_title() == ""
         finally:
             plt.close("all")
 
@@ -203,12 +361,14 @@ class TestImgFormatTrainerForwarding:
             with patch("matplotlib.pyplot.show"):
                 trainer.plot_training_convergence(
                     training_stats=training_stats,
+                    class_spread="minmax",
                     output=os.path.join(tmp_path, "conv.pdf"),
                     show=False,
                 )
             mock_plot.assert_called_once()
             call_kwargs = mock_plot.call_args[1]
             assert call_kwargs.get("img_format") == "svg"
+            assert call_kwargs.get("class_spread") == "minmax"
 
 
 class TestConvergencePlotAutoSave:
