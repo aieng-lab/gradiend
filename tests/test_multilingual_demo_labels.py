@@ -41,7 +41,7 @@ def test_build_demo_feature_plot_groups_uses_article_subgroups():
     groups = build_demo_feature_plot_groups(["masc_nom", "fem_nom", "M", "F", "white"])
     assert groups["der"] == ["masc_nom"]
     assert groups["die"] == ["fem_nom"]
-    assert groups["English Gender"] == ["M", "F"]
+    assert groups["Gender"] == ["M", "F"]
     assert groups["Race"] == ["white"]
 
 
@@ -86,8 +86,8 @@ def test_build_demo_feature_plot_groups_follows_domain_order():
     )
     assert list(groups.keys()) == [
         "der",
-        "English Gender",
-        "English Pronouns",
+        "Gender",
+        "Pronouns",
         "Sentiment",
         "Race",
     ]

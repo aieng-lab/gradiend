@@ -32,10 +32,10 @@ ENGLISH_GENDER_FEATURE_PRETTY: Dict[str, str] = {"M": "he", "F": "she"}
 # Rationale: morphology by language → English pronoun family together → lexical sentiment
 # → register → social attributes.
 DEMO_NAMED_DOMAIN_GROUP_ORDER: Tuple[str, ...] = (
-    "English Gender",
-    "English Pronouns",
-    "English Number",
-    "English Person",
+    "Gender",
+    "Pronouns",
+    "Number",
+    "Person",
     "Sentiment",
     "Formality",
     "Race",
@@ -173,12 +173,12 @@ def build_demo_trainer_order_and_groups(
         gender_de_transitions_to_ids[_gender_de_article_group_key(model_id)].append(model_id)
 
     named_groups: Dict[str, List[str]] = {
-        "English Gender": gender_en_ids,
+        "Gender": gender_en_ids,
         "Sentiment": sentiment_ids,
         "Formality": formality_ids,
-        "English Pronouns": pronoun_ids,
-        "English Number": pronoun_number_ids,
-        "English Person": pronoun_person_ids,
+        "Pronouns": pronoun_ids,
+        "Number": pronoun_number_ids,
+        "Person": pronoun_person_ids,
         "Race": race_ids,
         "Religion": religion_ids,
     }
@@ -247,9 +247,9 @@ def build_demo_feature_plot_groups(
     present = {str(fid) for fid in feature_ids}
     pretty_groups: Dict[str, List[str]] = dict(build_german_article_feature_subgroups(feature_ids))
     buckets: Dict[str, List[str]] = {
-        "English Gender": [fid for fid in ("M", "F") if fid in present],
+        "Gender": [fid for fid in ("M", "F") if fid in present],
         "Sentiment": [fid for fid in ("positive", "negative") if fid in present],
-        "English Pronouns": [
+        "Pronouns": [
             fid for fid in ("1SG", "1PL", "2SGPL", "3SG", "3PL") if fid in present
         ],
         "Race": [fid for fid in ("white", "black", "asian") if fid in present],
