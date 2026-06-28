@@ -19,7 +19,12 @@ Standalone plot functions (module-level). Trainer convenience wrappers such as
 - **[`plot_similarity_heatmap`][gradiend.visualizer.heatmaps.similarity.plot_similarity_heatmap]** — Similarity matrix heatmap
 - **[`plot_cross_encoding_heatmap`][gradiend.visualizer.heatmaps.encoding.plot_cross_encoding_heatmap]** — Oriented cross-encoding heatmap
 - **[`plot_gradiend_transition_cross_encoding_heatmap`][gradiend.visualizer.heatmaps.encoding.plot_gradiend_transition_cross_encoding_heatmap]** — GRADIEND × transition heatmap
+- **[`plot_gradiend_feature_cross_encoding_heatmap`][gradiend.visualizer.heatmaps.encoding.plot_gradiend_feature_cross_encoding_heatmap]** — GRADIEND × feature-class heatmap
 - **[`plot_comparison_heatmap`][gradiend.visualizer.heatmaps.base.plot_comparison_heatmap]** — Generic comparison heatmap (e.g. seed comparison)
+
+## Environment
+
+- **[`check_plot_environment`][gradiend.visualizer.plot_style.check_plot_environment]** — Verify matplotlib/seaborn/plotly availability
 
 ## Related
 

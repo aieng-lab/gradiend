@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 import math
 
+from gradiend.util.deprecation import warn_deprecated_annot_fmt
 from gradiend.visualizer.heatmaps.ordering import _reorder_comparison_data
 from gradiend.visualizer.plot_optional import _require_matplotlib, _require_seaborn
 from gradiend.visualizer.plot_style import disable_usetex_for_axis_text
@@ -166,6 +167,7 @@ def plot_comparison_heatmap(
         models: Optional model mapping for non-convergence label lookup.
         highlight_non_convergence: Whether labels mark non-converged runs.
     """
+    warn_deprecated_annot_fmt(fmt=fmt, annot_fmt=annot_fmt, stacklevel=1)
     if not isinstance(comparison_data, dict):
         raise TypeError("comparison_data must be a dict")
     if "matrix" not in comparison_data or "model_ids" not in comparison_data:

@@ -163,7 +163,7 @@ plot_comparison_heatmap(
 |------|---------------|
 | Pairwise top-k overlap | Shared high-importance parameters between seeds |
 | Pairwise decoder cosine | Full decoder-vector agreement |
-| Layer-wise similarity | Mean pairwise cosine per layer (`compute_grouped_similarity_matrices`, `group_by="layer"`) |
+| Layer-wise similarity | Mean pairwise cosine per layer ([`compute_grouped_similarity_matrices`][gradiend.comparison.similarity.compute_grouped_similarity_matrices], `group_by="layer"`) |
 | Component similarity | Embedding / attention / MLP agreement |
 
 ![Top-k overlap across convergent seeds](../img/seed_comparison_topk_overlap.png)

@@ -3,10 +3,10 @@
 Assume you need to train **multiple GRADIEND models** that share the same
 [`TrainingArguments`][gradiend.trainer.core.arguments.TrainingArguments] (and usually the same data). You can:
 
-1. **Use a trainer suite** — `SymmetricTrainerSuite` or `PositiveTrainerSuite` builds
+1. **Use a trainer suite** — [`SymmetricTrainerSuite`][gradiend.trainer.suite.symmetric.SymmetricTrainerSuite] or [`PositiveTrainerSuite`][gradiend.trainer.suite.positive.PositiveTrainerSuite] builds
    one child per pair from shared constructor kwargs and provides suite-level
    evaluation and comparison (similarity heatmaps, cross-encoding, etc.).
-2. **Use a trainer collection** — `TrainerCollection` groups trainers you already
+2. **Use a trainer collection** — [`TrainerCollection`][gradiend.trainer.suite.collection.TrainerCollection] groups trainers you already
    built (or flattens several suites) when children differ in data, args, or how
    they were constructed. Pass trainers directly; ids come from each
    `trainer.run_id`.
@@ -24,11 +24,11 @@ cross-task heatmap).
 
 | Situation | Use |
 |-----------|-----|
-| Same trainer class, shared data/args, pairs from `target_classes` or `pair_definitions` | `SymmetricTrainerSuite` or `PositiveTrainerSuite` |
-| Mix hand-built trainers, or combine several suites / a suite + extra trainers | `TrainerCollection` |
+| Same trainer class, shared data/args, pairs from `target_classes` or `pair_definitions` | [`SymmetricTrainerSuite`][gradiend.trainer.suite.symmetric.SymmetricTrainerSuite] or [`PositiveTrainerSuite`][gradiend.trainer.suite.positive.PositiveTrainerSuite] |
+| Mix hand-built trainers, or combine several suites / a suite + extra trainers | [`TrainerCollection`][gradiend.trainer.suite.collection.TrainerCollection] |
 | One-off single GRADIEND | [`TextPredictionTrainer`][gradiend.trainer.text.prediction.trainer.TextPredictionTrainer] only |
 
-`TrainerCollection` does **not** generate children from pair definitions and does
+[`TrainerCollection`][gradiend.trainer.suite.collection.TrainerCollection] does **not** generate children from pair definitions and does
 **not** provide suite comparison plots ([`plot_similarity_heatmap`][gradiend.visualizer.heatmaps.similarity.plot_similarity_heatmap], etc.). Use it to
 `train()` a fixed set of trainers and to obtain a flat `trainers` dict for
 comparison helpers ([`compute_similarity_matrix`][gradiend.comparison.similarity.compute_similarity_matrix], [`plot_cross_encoding_heatmap`][gradiend.visualizer.heatmaps.encoding.plot_cross_encoding_heatmap], …)
@@ -41,17 +41,17 @@ that take `Dict[str, Trainer]`.
 Each child GRADIEND still trains on two `target_classes`. The suite type only
 matters for **how those pairs are defined**:
 
-- **`SymmetricTrainerSuite`** — neither class is privileged (e.g., genders, races, articles, pronouns)
-- **`PositiveTrainerSuite`** — each contrast has a **positive** and **negative**
+- **[`SymmetricTrainerSuite`][gradiend.trainer.suite.symmetric.SymmetricTrainerSuite]** — neither class is privileged (e.g., genders, races, articles, pronouns)
+- **[`PositiveTrainerSuite`][gradiend.trainer.suite.positive.PositiveTrainerSuite]** — each contrast has a **positive** and **negative**
   pole (e.g., good vs bad, formal vs informal, commutative vs non-commutative).
 
 Quick check: if swapping the two class names would change what the contrast
-*means*, use `PositiveTrainerSuite`. If `A` vs `B` is the same task as `B` vs
-`A`, use `SymmetricTrainerSuite`.
+*means*, use [`PositiveTrainerSuite`][gradiend.trainer.suite.positive.PositiveTrainerSuite]. If `A` vs `B` is the same task as `B` vs
+`A`, use [`SymmetricTrainerSuite`][gradiend.trainer.suite.symmetric.SymmetricTrainerSuite].
 
 ---
 
-## `SymmetricTrainerSuite`
+## [`SymmetricTrainerSuite`][gradiend.trainer.suite.symmetric.SymmetricTrainerSuite]
 
 Use when classes are **peers** — no class is inherently the “positive” side.
 Pass `target_classes`; the suite trains one child GRADIEND per unordered pair.
@@ -125,7 +125,7 @@ Two children: `black__white` and `asian__white` (`black`/`asian` omitted).
 ### Full control with `pair_definitions`
 
 Use `pair_definitions` when you need custom `child_id` or `label` per child (e.g.
-stable run names for a paper). Each child is one `SuitePairDefinition`:
+stable run names for a paper). Each child is one [`SuitePairDefinition`][gradiend.trainer.suite.definitions.SuitePairDefinition]:
 
 | Field | Role |
 |-------|------|
@@ -222,7 +222,7 @@ See [Oriented cross-encoding matrix](cross-encoding-matrix.md).
 
 ---
 
-## `PositiveTrainerSuite` (directed positive vs negative)
+## [`PositiveTrainerSuite`][gradiend.trainer.suite.positive.PositiveTrainerSuite] (directed positive vs negative)
 
 Use this suite when each contrast has a **privileged positive direction**: sentiment (good vs bad),
 property present vs absent, etc.
@@ -268,9 +268,9 @@ suite.plot_cross_encoding_heatmap(
 
 [:material-file-code-outline: `train_sentiment_positive_suite.py`](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/train_sentiment_positive_suite.py)
 
-Default `mode="single"`: one child GRADIEND per `PositiveFeatureDefinition` above.
+Default `mode="single"`: one child GRADIEND per [`PositiveFeatureDefinition`][gradiend.trainer.suite.definitions.PositiveFeatureDefinition] above.
 
-### `PositiveFeatureDefinition`
+### [`PositiveFeatureDefinition`][gradiend.trainer.suite.definitions.PositiveFeatureDefinition]
 
 | Field | Role |
 |-------|------|
@@ -343,7 +343,7 @@ are for `mode="single"`, where each child has distinct word-pair `target_classes
 
 ---
 
-## `TrainerCollection`
+## [`TrainerCollection`][gradiend.trainer.suite.collection.TrainerCollection]
 
 Use when trainers are **already built** or come from **incompatible** suite configs
 (different datasets, [`TrainingArguments`][gradiend.trainer.core.arguments.TrainingArguments], or pair manifests). Each passed trainer must have a
@@ -367,7 +367,7 @@ trainers_by_id = TrainerCollection.merge(
 ### Combining a suite with extra trainers
 
 When one child needs different data or args than the rest of a suite, build a
-`SymmetricTrainerSuite` for the homogeneous part and merge in the outlier:
+[`SymmetricTrainerSuite`][gradiend.trainer.suite.symmetric.SymmetricTrainerSuite] for the homogeneous part and merge in the outlier:
 
 ```python
 full_suite = SymmetricTrainerSuite(
@@ -388,30 +388,30 @@ sentiment = TrainerCollection.merge(
 sentiment.train(use_cache=True)
 ```
 
-### What `TrainerCollection` provides
+### What [`TrainerCollection`][gradiend.trainer.suite.collection.TrainerCollection] provides
 
 | Method / attribute | Purpose |
 |--------------------|---------|
-| `TrainerCollection(*trainers)` | Group trainers keyed by `trainer.run_id` |
-| `TrainerCollection.merge(*parts)` | Combine [`Trainer`][gradiend.trainer.trainer.Trainer], `TrainerSuite`, and/or `TrainerCollection` |
+| [`TrainerCollection(*trainers)`][gradiend.trainer.suite.collection.TrainerCollection] | Group trainers keyed by `trainer.run_id` |
+| `TrainerCollection.merge(*parts)` | Combine [`Trainer`][gradiend.trainer.trainer.Trainer], [`TrainerSuite`][gradiend.trainer.suite.base.TrainerSuite], and/or [`TrainerCollection`][gradiend.trainer.suite.collection.TrainerCollection] |
 | `.trainers` | `Dict[str, Trainer]` for comparison APIs |
 | `.train(use_cache=...)` | Train every child in order |
-| `.items()` / `.get_trainer(id)` | Same iteration pattern as `TrainerSuite` |
+| `.items()` / `.get_trainer(id)` | Same iteration pattern as [`TrainerSuite`][gradiend.trainer.suite.base.TrainerSuite] |
 
-When flattening a `TrainerSuite`, keys are the suite **child ids** from
+When flattening a [`TrainerSuite`][gradiend.trainer.suite.base.TrainerSuite], keys are the suite **child ids** from
 `suite.items()` (equal to `trainer.run_id` when the suite has no parent `run_id`).
 
 **Memory:** `retain_models_in_memory=False` unloads each child after an uncached
-`train()`, same idea as on `TrainerSuite`.
+`train()`, same idea as on [`TrainerSuite`][gradiend.trainer.suite.base.TrainerSuite].
 
 **Not included:** suite-only analytics ([`plot_similarity_heatmap`][gradiend.visualizer.heatmaps.similarity.plot_similarity_heatmap],
 [`plot_cross_encoding_heatmap`][gradiend.visualizer.heatmaps.encoding.plot_cross_encoding_heatmap] on the group, `annotate_data`, shared base-model
-caching across children). For those, keep children inside one `TrainerSuite`, or
+caching across children). For those, keep children inside one [`TrainerSuite`][gradiend.trainer.suite.base.TrainerSuite], or
 call comparison functions on `collection.trainers` yourself.
 
 ---
 
-## What every suite provides (`TrainerSuite` base)
+## What every suite provides ([`TrainerSuite`][gradiend.trainer.suite.base.TrainerSuite] base)
 
 These work on **both** symmetric and positive suites:
 
@@ -457,7 +457,7 @@ suite.plot_similarity_heatmap(
 
 [:material-file-code-outline: `train_multi_seed_stability.py`](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/train_multi_seed_stability.py)
 
-> **TODO:** missing multi-seed *suite* dispersion heatmap ([`plot_similarity_heatmap(dispersion="std")`][gradiend.visualizer.heatmaps.similarity.plot_similarity_heatmap] on a `TrainerSuite`)
+> **TODO:** missing multi-seed *suite* dispersion heatmap ([`plot_similarity_heatmap(dispersion="std")`][gradiend.visualizer.heatmaps.similarity.plot_similarity_heatmap] on a [`TrainerSuite`][gradiend.trainer.suite.base.TrainerSuite])
 
 Heatmap cells can then show mean comparison values with seed spread. Enable only
 after single-seed children converge reliably — see [Multi-seed analysis](multi-seed.md).

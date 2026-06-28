@@ -18,6 +18,7 @@ import os
 from gradiend.trainer.core.protocols import DataProvider
 from gradiend.trainer.core.config import validate_source_target
 from gradiend.trainer.core.unified_schema import UNIFIED_SPLIT
+from gradiend.util.deprecation import resolve_include_other_classes
 from gradiend.util.paths import (
     resolve_custom_prediction_head_dir,
     resolve_output_path,
@@ -498,12 +499,11 @@ class FeatureLearningDefinition(DataProvider, ABC):
                 Whether to precompute/cache gradients before iteration. Defaults
                 to ``TrainingArguments.use_cached_gradients``.
             include_other_classes:
-                Deprecated coarse flag for broadening evaluation beyond the active
-                target pair. Prefer ``use_all_transitions`` for clearer semantics.
+                If True, include all class transitions available in the evaluation
+                split, not only the active target pair (when ``len(all_classes) > 2``).
+                Defaults from ``TrainingArguments.include_other_classes`` when omitted.
             use_all_transitions:
-                If True, include all transitions available in the evaluation data
-                for the chosen split. This is a simple shortcut for broad probe
-                analysis.
+                Deprecated alias for ``include_other_classes``.
             transition_selection:
                 Optional explicit transition specs used only during evaluation.
                 When provided, these specs define which extra transitions are
@@ -525,8 +525,10 @@ class FeatureLearningDefinition(DataProvider, ABC):
         encoder_eval_balance = self._default_from_training_args(
             kwargs.get("encoder_eval_balance"), "encoder_eval_balance", fallback=True
         )
-        include_other_classes = self._default_from_training_args(
-            include_other_classes, "include_other_classes", fallback=False
+        include_other_classes = resolve_include_other_classes(
+            include_other_classes=include_other_classes,
+            use_all_transitions=use_all_transitions,
+            default=self._default_from_training_args(None, "include_other_classes", fallback=False),
         )
         self._eval_group = self._resolve_eval_group(source)
         if encoder_eval_balance:
@@ -547,7 +549,6 @@ class FeatureLearningDefinition(DataProvider, ABC):
             is_decoder_only_model=is_decoder_only_model,
             balance_column=balance_column,
             include_other_classes=include_other_classes,
-            use_all_transitions=use_all_transitions,
             transition_selection=transition_selection,
             **create_kwargs,
         )

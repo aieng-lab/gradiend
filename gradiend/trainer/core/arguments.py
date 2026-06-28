@@ -126,7 +126,7 @@ class TrainingArguments:
     """If True, balance encoder evaluation data per feature_class_id. If False, use natural class distribution."""
 
     include_other_classes: bool = False
-    """If True, encoder evaluation includes all class transitions in the split, not just the target pair. Only applies when all_classes has more than two entries."""
+    """If True, encoder evaluation includes all class transitions in the split, not just the trained target pair. Applies when ``all_classes`` has more than two entries. Affects encoder metrics, encoder plots, and cross-encoding matrices that use ``full_eval=True``. Set on [`TrainingArguments`][gradiend.trainer.core.arguments.TrainingArguments] or pass ``include_other_classes=True`` to ``evaluate_encoder()``."""
 
     seed_selection_eval_max_size: Optional[int] = None
     """Max samples for encoder evaluation when selecting the best seed. None = use encoder_eval_max_size."""

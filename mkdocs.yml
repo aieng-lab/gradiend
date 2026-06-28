@@ -4,7 +4,7 @@
 
 site_name: GRADIEND
 site_description: Gradient-based targeted feature learning within neural networks
-site_url: https://github.com/aieng-lab/gradiend
+site_url: https://aieng-lab.github.io/gradiend/
 
 theme:
   name: material
@@ -110,8 +110,15 @@ nav:
             - PrePruneConfig: api/training/PrePruneConfig.md
             - PostPruneConfig: api/training/PostPruneConfig.md
             - TrainerSuite: api/training/TrainerSuite.md
+            - PositiveTrainerSuite: api/training/PositiveTrainerSuite.md
             - SymmetricTrainerSuite: api/training/SymmetricTrainerSuite.md
+            - TrainerCollection: api/training/TrainerCollection.md
+            - SuitePairDefinition: api/training/SuitePairDefinition.md
+            - PositiveFeatureDefinition: api/training/PositiveFeatureDefinition.md
             - MultiSeedTrainerView: api/training/MultiSeedTrainerView.md
+            - TrainerConfig: api/training/TrainerConfig.md
+            - TransitionSpec: api/training/TransitionSpec.md
+            - set_seed: api/training/set_seed.md
         - Evaluation:
             - Overview: api/evaluation/index.md
             - Evaluator: api/evaluation/Evaluator.md
@@ -129,10 +136,18 @@ nav:
             - plot_similarity_heatmap: api/visualization/plot_similarity_heatmap.md
             - plot_cross_encoding_heatmap: api/visualization/plot_cross_encoding_heatmap.md
             - plot_gradiend_transition_cross_encoding_heatmap: api/visualization/plot_gradiend_transition_cross_encoding_heatmap.md
+            - plot_gradiend_feature_cross_encoding_heatmap: api/visualization/plot_gradiend_feature_cross_encoding_heatmap.md
             - plot_comparison_heatmap: api/visualization/plot_comparison_heatmap.md
+            - check_plot_environment: api/visualization/check_plot_environment.md
         - Comparison:
             - Overview: api/comparison/index.md
             - compute_similarity_matrix: api/comparison/compute_similarity_matrix.md
+            - compute_grouped_similarity_matrices: api/comparison/compute_grouped_similarity_matrices.md
+            - compute_cross_encoding_matrix: api/comparison/compute_cross_encoding_matrix.md
+            - compute_anchor_aligned_encoding_matrix: api/comparison/compute_anchor_aligned_encoding_matrix.md
+            - compute_gradiend_feature_cross_encoding_matrix: api/comparison/compute_gradiend_feature_cross_encoding_matrix.md
+            - compute_gradiend_transition_cross_encoding_matrix: api/comparison/compute_gradiend_transition_cross_encoding_matrix.md
+    - Citation: citation.md
     - FAQ: faq.md
   - Project:
     - Publishing the documentation: publishing-docs.md

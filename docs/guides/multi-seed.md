@@ -97,7 +97,7 @@ copied to `<experiment_dir>/model/` for the default single-seed API.
 | [`trainer.get_model()`][gradiend.trainer.trainer.Trainer.get_model] | Best checkpoint (full base + GRADIEND) | [`ModelWithGradiend`][gradiend.model.model_with_gradiend.ModelWithGradiend] |
 | `view.get_model()` | Every selected seed | `SeedModelGroup` when N > 1 |
 
-[`trainer.multi_seed()`][gradiend.trainer.trainer.Trainer.multi_seed] returns a `MultiSeedTrainerView`. It exposes the same
+[`trainer.multi_seed()`][gradiend.trainer.trainer.Trainer.multi_seed] returns a [`MultiSeedTrainerView`][gradiend.trainer.core.multi_seed.MultiSeedTrainerView]. It exposes the same
 eval/plot method names as [`Trainer`][gradiend.trainer.trainer.Trainer], but runs them per seed and aggregates.
 
 To reuse an existing analysis script, rebind after training:
@@ -250,7 +250,7 @@ summaries, or compare the per-seed distribution files side by side.
 
 ## Trainer suites
 
-If a child trainer uses `analyze_seed_stability=True`, `TrainerSuite.train()` replaces
+If a child trainer uses `analyze_seed_stability=True`, [`TrainerSuite`][gradiend.trainer.suite.base.TrainerSuite].train() replaces
 that child with a multi-seed view automatically. Suite heatmaps then include all
 convergent seeds for that child without extra wiring.
 

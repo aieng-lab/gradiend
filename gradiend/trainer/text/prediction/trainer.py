@@ -47,6 +47,7 @@ from gradiend.trainer.core.unified_data import (
 from gradiend.trainer.text.prediction.model_with_gradiend import TextPredictionModelWithGradiend
 from gradiend.trainer.text.prediction.decoder_only_mlm import load_decoder_mlm_head_meta, train_mlm_head
 from gradiend.util.logging import get_logger
+from gradiend.util.deprecation import resolve_include_other_classes
 from gradiend.model.utils import is_decoder_only_model as is_decoder_only_model_from_obj, is_seq2seq_model
 from gradiend.util import normalize_split_name
 from gradiend.util.encoder_splits import EncoderSplit, encoder_split_cache_key, order_split_names, resolve_encoder_splits
@@ -1833,12 +1834,11 @@ class TextPredictionTrainer(Trainer):
             max_size: Optional per-group cap; defaults to
                 ``TrainingArguments.train_max_size`` when omitted.
             include_other_classes:
-                Deprecated alias for broadening evaluation/training-like data to
-                all available transitions. Prefer ``use_all_transitions``.
+                If True, include all class transitions in the split instead of
+                restricting to the active target pair (when ``len(all_classes) > 2``).
+                Used for encoder evaluation and related plots.
             use_all_transitions:
-                If True, include every transition available in the split instead
-                of restricting to the active target pair. This is primarily
-                useful for encoder analysis.
+                Deprecated alias for ``include_other_classes``.
             transition_selection:
                 Optional explicit transition specs for evaluation-style probing.
                 When provided, these transitions are included in addition to the
@@ -1850,9 +1850,14 @@ class TextPredictionTrainer(Trainer):
             **kwargs: Additional dataset-construction options, including
                 ``is_decoder_only_model``.
         """
+        include_other_classes = resolve_include_other_classes(
+            include_other_classes=include_other_classes,
+            use_all_transitions=use_all_transitions,
+            default=False,
+        )
         tokenizer = getattr(model_or_tokenizer, "tokenizer", model_or_tokenizer)
         self._prediction_objective(tokenizer)
-        requested_all_transitions = bool(use_all_transitions or include_other_classes or transition_selection)
+        requested_all_transitions = bool(include_other_classes or transition_selection)
         self._ensure_data(materialize_all_class_transitions=requested_all_transitions)
         max_size = self._default_from_training_args(max_size, "train_max_size")
         if self.combined_data is None:
@@ -1888,16 +1893,16 @@ class TextPredictionTrainer(Trainer):
         train_transitions = {transition_id(class_pair[0], class_pair[1]), transition_id(class_pair[1], class_pair[0])}
         transition_edges = None
         if transition_selection:
-            if include_other_classes or use_all_transitions:
+            if include_other_classes:
                 logger.warning(
-                    "transition_selection was provided; ignoring include_other_classes/use_all_transitions."
+                    "transition_selection was provided; ignoring include_other_classes."
                 )
             transition_edges = expand_transition_selection(transition_selection)
             selected_transition_ids = {
                 transition_id(src, tgt) for src, tgt in transition_edges
             } | train_transitions
             pair_data = split_data[split_data[UNIFIED_TRANSITION].isin(selected_transition_ids)].copy()
-        elif (use_all_transitions or include_other_classes) and self.all_classes is not None and len(self.all_classes) > 2:
+        elif include_other_classes and self.all_classes is not None and len(self.all_classes) > 2:
             pair_data = split_data.copy()
         else:
             pair_data = split_data[split_data[UNIFIED_TRANSITION].isin(train_transitions)].copy()
@@ -3275,11 +3280,11 @@ class TextPredictionTrainer(Trainer):
             max_size: Maximum number of samples per variant to encode
             use_cache: If True, use cached encoder analysis when available.
             plot: If True, create encoder distribution plot from analyzed data.
-            include_other_classes: Coarse shortcut for including all transitions
-                already present in the selected split. Ignored when
-                ``transition_selection`` is provided.
-            use_all_transitions: If True, include all transitions available in
-                the selected split during encoder analysis.
+            include_other_classes: If True, include all transitions in the split
+                (when ``len(all_classes) > 2``). Defaults from training args when
+                omitted.
+            use_all_transitions:
+                Deprecated alias for ``include_other_classes``.
             transition_selection: Optional explicit transition specs added to
                 the target-pair transitions during encoder analysis. Non-target
                 probe transitions keep label ``0``.
@@ -3299,8 +3304,10 @@ class TextPredictionTrainer(Trainer):
         use_cache = self._resolve_artifact_use_cache(use_cache, fallback=False)
         if max_size is None:
             max_size = self._default_from_training_args(max_size, "encoder_eval_max_size")
-        include_other_classes = self._default_from_training_args(
-            include_other_classes, "include_other_classes", fallback=False
+        include_other_classes = resolve_include_other_classes(
+            include_other_classes=include_other_classes,
+            use_all_transitions=use_all_transitions,
+            default=self._default_from_training_args(None, "include_other_classes", fallback=False),
         )
         if model_with_gradiend is None:
             model_with_gradiend = self.get_model()
@@ -3312,7 +3319,6 @@ class TextPredictionTrainer(Trainer):
             neutral_data_df=neutral_data_df,
             max_size=max_size,
             include_other_classes=include_other_classes,
-            use_all_transitions=use_all_transitions,
             transition_selection=transition_selection,
             text_col=text_col,
             masked_col=masked_col,

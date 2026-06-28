@@ -65,7 +65,7 @@ the alternative gradient and the decoder learns the difference to apply.
 | **encoder_eval_train_max_size** | `None` | Max samples for in-training encoder evaluation. `None` uses `encoder_eval_max_size`. |
 | **encoder_eval_max_size** | `None` | Max samples for encoder evaluation outside training. |
 | **encoder_eval_balance** | `True` | Balance encoder evaluation data per feature class. |
-| **include_other_classes** | `False` | Include non-target class transitions in encoder evaluation when available. |
+| **include_other_classes** | `False` | Include all class transitions in the evaluation split (not only the trained pair) when `len(all_classes) > 2`. Affects encoder evaluation, encoder plots, and cross-encoding with `full_eval=True`. See also [`TransitionSpec`][gradiend.trainer.core.transition_selection.TransitionSpec] for explicit transition lists. |
 | **seed_selection_eval_max_size** | `None` | Max samples for post-hoc seed selection evaluation. `None` uses `encoder_eval_max_size`. |
 | **decoder_eval_max_size_training_like** | `None` | Max samples for decoder training-like evaluation data. |
 | **decoder_eval_max_size_neutral** | `None` | Max samples for decoder neutral evaluation and LMS text. |
@@ -221,3 +221,12 @@ Top-level keys include `convergence_metric`, `threshold`,
 | **supervised_encoder** | `False` | Train only the encoder against labels as a baseline. Cannot be combined with `supervised_decoder`. |
 | **supervised_decoder** | `False` | Train only the decoder against target gradients as a baseline. Cannot be combined with `supervised_encoder`. |
 | **use_cached_gradients** | `False` | Use cached gradients when available. Faster, but can use substantial memory or disk. |
+
+---
+
+## Deprecated arguments (0.2.0)
+
+| Deprecated | Replacement | Notes |
+|------------|-------------|-------|
+| Heatmap **`fmt`** | **`annot_fmt`** | Applies to [`plot_comparison_heatmap`][gradiend.visualizer.heatmaps.base.plot_comparison_heatmap], [`plot_similarity_heatmap`][gradiend.visualizer.heatmaps.similarity.plot_similarity_heatmap], [`plot_topk_overlap_heatmap`][gradiend.visualizer.topk.pairwise_heatmap.plot_topk_overlap_heatmap], and related wrappers. |
+| **`use_all_transitions`** (method kwarg) | **`include_other_classes`** | Same behavior: broaden encoder evaluation to all transitions in the split when `len(all_classes) > 2`. Prefer [`TrainingArguments.include_other_classes`][gradiend.trainer.core.arguments.TrainingArguments] as the default, or pass `include_other_classes=True` to [`evaluate_encoder()`][gradiend.trainer.trainer.Trainer.evaluate_encoder]. For explicit control, use [`transition_selection`][gradiend.trainer.core.transition_selection.TransitionSpec]. |

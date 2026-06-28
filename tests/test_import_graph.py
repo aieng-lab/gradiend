@@ -1,16 +1,12 @@
 """Regression tests for trainer package import order and circular imports."""
 
+import gradiend
 
-def test_gradiend_public_api_imports():
-    from gradiend import (
-        SuitePairDefinition,
-        SymmetricTrainerSuite,
-        TextPredictionTrainer,
-    )
 
-    assert TextPredictionTrainer is not None
-    assert SymmetricTrainerSuite is not None
-    assert SuitePairDefinition is not None
+def test_gradiend_public_api_all_exports_importable():
+    for name in gradiend.__all__:
+        obj = getattr(gradiend, name)
+        assert obj is not None, name
 
 
 def test_suite_imports_before_text_prediction_trainer_is_loaded():

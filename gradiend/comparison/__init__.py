@@ -44,7 +44,6 @@ __all__ = [
     "can_normalize_cross_encoding_by_diagonal",
     "compute_gradiend_feature_cross_encoding_matrix",
     "compute_gradiend_transition_cross_encoding_matrix",
-    "can_normalize_cross_encoding_by_diagonal",
     "normalize_cross_encoding_rows_by_diagonal",
     "pair_by_id_from_trainers",
     "source_by_id_from_trainers",

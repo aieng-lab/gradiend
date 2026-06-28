@@ -38,6 +38,7 @@ from gradiend.util.paths import (
 )
 from gradiend.evaluator.decoder_eval_utils import read_decoder_stats_file
 from gradiend.util.logging import get_logger
+from gradiend.util.deprecation import resolve_include_other_classes
 from gradiend.trainer.core.dataset import PreComputedTrainingDataset
 from gradiend.trainer.core.annotation import TrainerAnnotationMixin
 from gradiend.trainer.core.training import format_non_convergence_error, train as core_train
@@ -2556,14 +2557,12 @@ class Trainer(TrainerAnnotationMixin, FeatureLearningDefinition):
             pre_load_gradients: If True, pre-load cached gradients when available.
                 If None, uses use_cached_gradients from training args (default: False).
             include_other_classes:
-                Coarse evaluation shortcut that includes all transitions already
-                present in the selected split. Prefer ``use_all_transitions`` for
-                new code. Ignored when ``transition_selection`` is provided.
-                If None, uses ``include_other_classes`` from training args (default: False).
+                If True, include all class transitions available in the evaluation
+                split, not only the active target pair (when ``len(all_classes) > 2``).
+                Ignored when ``transition_selection`` is provided. If None, uses
+                ``TrainingArguments.include_other_classes`` (default: False).
             use_all_transitions:
-                If True, include all available transitions in the selected split
-                during encoder evaluation. This is the simplest way to inspect
-                non-target updates alongside the target pair.
+                Deprecated alias for ``include_other_classes``.
             transition_selection:
                 Optional explicit transition specs, e.g.
                 ``[pair("happy", "sad", symmetric=True), identity("calm")]``.
@@ -2623,10 +2622,11 @@ class Trainer(TrainerAnnotationMixin, FeatureLearningDefinition):
                 kwargs["is_decoder_only_model"] = is_decoder_only_model
             if pre_load_gradients is not None:
                 kwargs["pre_load_gradients"] = pre_load_gradients
-            kwargs["include_other_classes"] = self._default_from_training_args(
-                include_other_classes, "include_other_classes", fallback=False
+            kwargs["include_other_classes"] = resolve_include_other_classes(
+                include_other_classes=include_other_classes,
+                use_all_transitions=use_all_transitions,
+                default=self._default_from_training_args(None, "include_other_classes", fallback=False),
             )
-            kwargs["use_all_transitions"] = use_all_transitions
             kwargs["transition_selection"] = transition_selection
             monitor_args = self.training_args or TrainingArguments()
             with RuntimeMonitor.from_training_args(monitor_args, self.experiment_dir) as runtime_monitor:
