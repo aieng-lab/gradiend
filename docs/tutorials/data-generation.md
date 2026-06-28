@@ -1,8 +1,8 @@
 # Tutorial: Data generation
 
 This tutorial is **Part 1** of the detailed workflow. 
-You will create training and neutral data from raw text using `TextPredictionDataCreator`. 
-The output is later fed into `TextPredictionTrainer` in [Tutorial: Training](training.md) (see also [Data handling](../guides/data-handling.md)).
+You will create training and neutral data from raw text using [`TextPredictionDataCreator`][gradiend.data.text.prediction.creator.TextPredictionDataCreator]. 
+The output is later fed into [`TextPredictionTrainer`][gradiend.trainer.text.prediction.trainer.TextPredictionTrainer] in [Tutorial: Training](training.md) (see also [Data handling](../guides/data-handling.md)).
 
 We use **German definite articles** as the running example: their form depends on **gender** and **case** (e.g. masculine nominative, feminine dative). 
 For a study of how language models encode these distinctions (and whether they rely on rules or memorization), see [Understanding or Memorizing? A Case Study of German Definite Articles in Language Models](https://arxiv.org/abs/2601.09313), which uses GRADIEND on this kind of data.
@@ -13,7 +13,7 @@ For a study of how language models encode these distinctions (and whether they r
 
 Suppose we want to extract sentences where the word *der* appears **only** in the role “masculine nominative” (e.g. *der Mann* “the man” in subject position). In many languages, the same **surface form** can correspond to different **grammatical roles**—this is called **syncretism**. In German, *der* can be masculine nominative, but also feminine dative or genitive plural. If we select all sentences containing the string *der*, we mix these roles and our training data no longer represents a single, well-defined feature. So we need to filter by **morphology** (gender, case, number, part-of-speech), not by the raw token alone.
 
-String-based matching (as in [Start here](../start.md) with *he*/*she*/*they*) is enough when the token uniquely identifies the feature. For a full pronoun workflow (data creation from Wikipedia → training 3SG vs 3PL → evaluation), see the [english_pronouns.ipynb](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/english_pronouns.ipynb) notebook. When the token does not uniquely identify the feature (e.g., German articles), we need morphological constraints. This package supports that via **[spaCy](https://spacy.io/)** by providing expected `spacy_tags` (e.g., Case, Gender, POS) to **TextFilterConfig**, in addition to the target string(s) that we already saw in [Start here](../start.md). 
+String-based matching (as in [Start here](../start.md) with *he*/*she*/*they*) is enough when the token uniquely identifies the feature. For a full pronoun workflow (data creation from Wikipedia → training 3SG vs 3PL → evaluation), see the [train_english_pronouns.ipynb](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/train_english_pronouns.ipynb) notebook. When the token does not uniquely identify the feature (e.g., German articles), we need morphological constraints. This package supports that via **[spaCy](https://spacy.io/)** by providing expected `spacy_tags` (e.g., Case, Gender, POS) to **[`TextFilterConfig`][gradiend.data.text.filter_config.TextFilterConfig]**, in addition to the target string(s) that we already saw in [Start here](../start.md). 
 
 !!! tip "Optional dependency: data generation"
     Creating training and neutral data with **spaCy**-based filtering (as in this tutorial) requires the **data** extra. If you did not install it with GRADIEND, install it with:
@@ -45,8 +45,13 @@ TextFilterConfig(
 )
 ```
 
+[:material-file-code-outline: `train_english_pronouns.py`](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/train_english_pronouns.py)
+
 - **targets**: The surface form(s) to match (*der*). These strings are matched with regex on word-level.
 - **spacy_tags**: Morphological constraints from [spaCy](https://spacy.io/usage/linguistic-features) (part-of-speech DET, Case Nom, Gender Masc, Number Sing). Only tokens that satisfy **both** the form and these tags are kept.
+- **min_left_context_words**: Minimum number of words before the target. This is
+  especially important for decoder-only models, where the target is predicted
+  from the left context rather than from a true mask position (at least using [`prediction_objective='clm_next_token'`](../guides/token-prediction-methods.md)).
 
 So we no longer match “any *der*”; we get only *der* in the nominative-masculine singular role.
 
@@ -54,7 +59,7 @@ So we no longer match “any *der*”; we get only *der* in the nominative-mascu
 
 ## Full paradigm: one filter per gender–case cell
 
-German definite singular articles form a **paradigm**: 3 genders × 4 cases = 12 cells (e.g. masc_nom, masc_acc, fem_nom, fem_dat, …). By defining one **TextFilterConfig** per cell, we can generate data for each cell separately. 
+German definite singular articles form a **paradigm**: 3 genders × 4 cases = 12 cells (e.g. masc_nom, masc_acc, fem_nom, fem_dat, …). By defining one **[`TextFilterConfig`][gradiend.data.text.filter_config.TextFilterConfig]** per cell, we can generate data for each cell separately. 
 
 ```python
 feature_targets = [
@@ -79,13 +84,13 @@ feature_targets = [
 
 ## Base Data
 
-The `TextPredictionTrainer` supports a variety of base data inputs:
+The [`TextPredictionTrainer`][gradiend.trainer.text.prediction.trainer.TextPredictionTrainer] supports a variety of base data inputs:
 
-- Python list of strings (e.g., `TextPredictionDataCreator(base_data=["This is a sentence.", "This is another sentence."])`)
-- CSV file path (e.g., `TextPredictionDataCreator(base_data="path/to/texts.csv", text_column="text")`)
-- Hugging Face dataset id (e.g., `TextPredictionDataCreator(base_data="wikipedia", hf_config="20220301.en", text_column="text")`; requires `datasets` library)
+- Python list of strings (e.g., [`TextPredictionDataCreator(base_data=["This is a sentence.", "This is another sentence."])`][gradiend.data.text.prediction.creator.TextPredictionDataCreator])
+- CSV file path (e.g., [`TextPredictionDataCreator(base_data="path/to/texts.csv", text_column="text")`][gradiend.data.text.prediction.creator.TextPredictionDataCreator])
+- Hugging Face dataset id (e.g., [`TextPredictionDataCreator(base_data="wikipedia", hf_config="20220301.en", text_column="text")`][gradiend.data.text.prediction.creator.TextPredictionDataCreator]; requires `datasets` library)
 
-The raw texts might be too long (e.g. full articles) or too short (e.g. tweets), so we can use `TextPreprocessConfig` to split into sentences and set character limits. If you omit `preprocess` (or pass `None`), no preprocessing is applied and texts are used as-is.
+The raw texts might be too long (e.g. full articles) or too short (e.g. tweets), so we can use [`TextPreprocessConfig`][gradiend.data.text.preprocess.TextPreprocessConfig] to split into sentences and set character limits. If you omit `preprocess` (or pass `None`), no preprocessing is applied and texts are used as-is.
 
 ```python
 from gradiend.data import TextPreprocessConfig
@@ -94,7 +99,7 @@ preprocessor = TextPreprocessConfig(split_to_sentences=True, min_chars=50, max_c
 
 ## Generating training data
 
-Combining all the above, we can create a `TextPredictionDataCreator` with the base data, preprocessing config, and the list of filters for each gender–case cell.
+Combining all the above, we can create a [`TextPredictionDataCreator`][gradiend.data.text.prediction.creator.TextPredictionDataCreator] with the base data, preprocessing config, and the list of filters for each gender–case cell.
 
 ```python
 from gradiend.data import TextPredictionDataCreator
@@ -147,7 +152,7 @@ neutral = creator.generate_neutral_data(
 ```
 
 ## Next Step: Training
-Pass `training` and `neutral` to `TextPredictionTrainer` as `data=training` and `eval_neutral_data=neutral`, see [Tutorial: Training](training.md).
+Pass `training` and `neutral` to [`TextPredictionTrainer`][gradiend.trainer.text.prediction.trainer.TextPredictionTrainer] as `data=training` and `eval_neutral_data=neutral`, see [Tutorial: Training](training.md).
 
 ---
 

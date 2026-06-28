@@ -179,6 +179,7 @@ def get_activation(activation: str, encoder=False):
     
     Args:
         activation: Name of the activation_encoder function. Supported values:
+
             - 'relu': ReLU activation_encoder
             - 'leakyrelu': LeakyReLU activation_encoder
             - 'tanh': Tanh activation_encoder
@@ -188,6 +189,7 @@ def get_activation(activation: str, encoder=False):
             - 'sigmoid': Sigmoid activation_encoder
             - 'id': Identity (or LayerNorm for encoder)
             - 'silu': SiLU activation_encoder
+
         encoder: If True and activation_encoder is 'id', returns LayerNorm(1) instead of Identity.
     
     Returns:
@@ -259,8 +261,11 @@ def is_decoder_only_model(model_or_tokenizer):
     Pass either a model or a tokenizer. Prefers tokenizer-style attributes when present.
 
     - **Tokenizer** (has ``mask_token`` or ``mask_token_id``): decoder-only if
+
       ``mask_token`` is None (no [MASK] token), unless the model is encoder-decoder.
+
     - **Model** (no mask_token): decoder-only if the class name does not indicate
+
       MaskedLM/MLM (e.g. GPT-2, LLaMA are decoder-only; BERT with MLM head is not).
 
     Args:
@@ -344,6 +349,7 @@ def resolve_device_config_for_model(
     Determine device configuration from GPU count.
 
     Placement rules:
+
     - **1 GPU**: encoder, decoder, base_model all on cuda:0
     - **2 GPUs**, encoder_decoder_same_device=False: encoder+base on cuda:0, decoder on cuda:1
     - **2 GPUs**, encoder_decoder_same_device=True: encoder+decoder on cuda:0, base on cuda:1

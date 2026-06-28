@@ -14,6 +14,7 @@ class EncoderEvalConfig:
     Configuration for encoder evaluation.
 
     This config supports different evaluation modes:
+
     - neutral_data: Completely neutral data (no feature-related tokens)
     - training_data_neutral_gradients: Training data but with neutral gradients (masking non-feature-related tokens)
     """

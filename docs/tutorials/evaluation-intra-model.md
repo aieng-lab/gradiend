@@ -27,6 +27,9 @@ The trainer runs your evaluation data (and optionally neutral data) through the 
 ```python
 enc_eval = trainer.evaluate_encoder(max_size=100, split='test', return_df=True, plot=True)
 ```
+
+[:material-file-code-outline: `start_workflow.py`](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/start_workflow.py)
+
 Options:
 
 - **max_size**: Maximum number of examples to encode per *input class* (for speed; set to `None` for all). Input classes are defined by feature class ids (i.e., per training transition) and each neutral dataset is a input class. 
@@ -49,24 +52,20 @@ We consider different types of datasets/ gradient as GRADIEND encoder inputs:
 - **neutral_training_masked**: an automated approach to derive a neutral-like dataset for training-like data, by first creating un-masked texts (replace [MASK] by the factual label), and then only use non-feature related target tokens to derive *neutral* gradients (see )
 - **neutral_dataset**: a separate dataset of neutral examples that are not seen during training. Pass this dataset as `eval_neutral_dataset` to the trainer.
 
-
 ### Encoder Distribution Plot
 
 An easy overview of the encoder’s behavior is the **distribution plot**: a violin plot showing how the encoded values distribute for 
 
-*Run encoder evaluation with `plot=True` (or `trainer.plot_encoder_distributions()`) to generate the distribution plot.*
+*Run encoder evaluation with `plot=True` (or [`trainer.plot_encoder_distributions()`][gradiend.trainer.trainer.Trainer.plot_encoder_distributions]) to generate the distribution plot.*
 
 We expect that the target training classes encode to polarly different values  (+-1), while the neutral variants (if present) should cluster around 0.
 To visually highlight the special role of target classes, we mark their violins and legend entries in **bold**.
 
-
-This plot has a lot of options to customize, e.g., to make the class labels human-readable (e.g. `masc_nom` → “masc nominative”) or to group classes into broader categories (e.g. all neutral variants into “neutral”). By default the plot shows only the target (training) transition(s) and neutral data; use `plot_kwargs=dict(target_and_neutral_only=False)` with `evaluate_encoder(plot=True)` to show all transitions. See [Evaluation & visualization](../guides/evaluation-visualization.md#2-encoder-distribution-plot) for full customization options.
-
+This plot has a lot of options to customize, e.g., to make the class labels human-readable (e.g. `masc_nom` → “masc nominative”) or to group classes into broader categories (e.g. all neutral variants into “neutral”). By default the plot shows only the target (training) transition(s) and neutral data; use `plot_kwargs=dict(target_and_neutral_only=False)` with [`evaluate_encoder(plot=True)`][gradiend.trainer.trainer.Trainer.evaluate_encoder] to show all transitions. See [Evaluation & visualization](../guides/evaluation-visualization.md#encoder-distributions) for full customization options.
 
 ### Encoder Metrics 
 
-Another option to interpret the encoder’s behavior is the returned dict of metrics (i.e., quantified properties). The exact keys depend on the options you pass to `evaluate_encoder()`, but here is a general overview of the main keys and their interpretation:
-
+Another option to interpret the encoder’s behavior is the returned dict of metrics (i.e., quantified properties). The exact keys depend on the options you pass to [`evaluate_encoder()`][gradiend.trainer.trainer.Trainer.evaluate_encoder], but here is a general overview of the main keys and their interpretation:
 
 | Key | Type | Interpretation                                                                                                                                                                                                                      |
 |-----|------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
@@ -75,15 +74,14 @@ Another option to interpret the encoder’s behavior is the returned dict of met
 | `all_data` | dict | Metrics over **all** rows. Contains `correlation` (Pearson) and `accuracy` (ternary classification using neg/pos boundaries).                                                                                                       |
 | `training_only` | dict | Same keys as `all_data`, but computed only over **training** rows (excludes type neutral; compared to `target_classes_only` this may include identity transitions if enabled with label 0). Uses ternary classification (-1, 0, 1). |
 | `target_classes_only` | dict | Same keys, but over target class transitions only (excludes type neutral and identity, label 0). Uses **binary** classification (pred ≥ neutral_boundary → 1, else -1).                                                             |
-| `boundaries` | dict | Thresholds used for accuracy computation: `neg_boundary`, `pos_boundary`, `neutral_boundary` (configurable via parameters in `evaluate_encoder()`).                                                                                 |
+| `boundaries` | dict | Thresholds used for accuracy computation: `neg_boundary`, `pos_boundary`, `neutral_boundary` (configurable via parameters in [`evaluate_encoder()`][gradiend.trainer.trainer.Trainer.evaluate_encoder]).                                                                                 |
 | `correlation` | float | Pearson correlation of training_only (typically used as main training score). |
 | `mean_by_class` | dict | Label value (−1, 0, 1) → mean encoded value. Uses **non-neutral-type rows only** (training + identity). For class separation on target/identity transitions. |
 | `mean_by_type` | dict | Type (`training`, `neutral_training_masked`, `neutral_dataset`) → mean encoded value. Covers **all** rows including neutral variants; use for final eval when neutral means matter. |
 | `neutral_mean_by_type` | dict | Subset of `mean_by_type` for neutral variants only (`neutral_training_masked`, `neutral_dataset`). Convenience for comparing encoder behavior on neutral data. |
 | `mean_by_feature_class` | dict | Feature class id (e.g. source_id) → mean encoded value. When present. |
 | `label_value_to_class_name` | dict | Label value → human-readable class name: **0 → "neutral"**; other labels → `source_id` when available (e.g. `1 → "masc_nom"`, `-1 → "fem_nom"`). |
-| `encoder_df` | DataFrame | Included only when `evaluate_encoder(return_df=True)`. Full per-row data (encoded, label, type, source_id, target_id).                                                                                                              |
-
+| `encoder_df` | DataFrame | Included only when [`evaluate_encoder(return_df=True)`][gradiend.trainer.trainer.Trainer.evaluate_encoder]. Full per-row data (encoded, label, type, source_id, target_id).                                                                                                              |
 
 ---
 
@@ -115,6 +113,8 @@ The result is a grid of scores; the “best” configuration is the one that max
 
 **evaluate_decoder()** runs this grid (or loads it from cache when **use_cache=True**). It returns a dict with summary entries at top level (e.g. `dec['3SG']` for strengthen, `dec['3SG_weaken']` for weaken), plus `grid` and optional `plot_paths`/`plot_path`. By default only the **strengthen** direction is computed; pass **increase_target_probabilities=False** to compute only **weaken** (summary keys then use the `_weaken` suffix). Only the dataset–feature-factor combinations required for the chosen direction are evaluated.
 
+**Decoder eval targets** (which tokens to score per class) are inferred from your data when `decoder_eval_targets` is omitted, or set explicitly. When the same token appears in multiple classes with different meanings (e.g. commutative vs non-commutative formulas), use an instance-dependent mapping. See [Decoder eval targets](../guides/decoder-eval-targets.md) for class-based, label-based, and (label, label_class) options and the commutative example.
+
 ---
 
 ### Neutral data for decoder evaluation (LMS)
@@ -126,7 +126,7 @@ Decoder evaluation needs two kinds of data: **training-like** (for probability s
 - **Fallback:** The trainer uses the **training-like data** (test split) as neutral data. Each row's `text` column is built by filling the mask with the **factual token**.
 - **LMS behavior:** Because these texts contain target tokens, the trainer automatically adds all target tokens to `decoder_eval_ignore_tokens`, so they are ignored when computing perplexity. This avoids distorting LMS by feature-related predictions.
 
-For best practice, provide true neutral data (e.g. via `TextPredictionDataCreator.generate_neutral_data()` or a HuggingFace dataset like `aieng-lab/wortschatz-leipzig-de-grammar-neutral`) when available. The fallback is suitable for quick runs or when neutral data is not available.
+For best practice, provide true neutral data (e.g. via [`TextPredictionDataCreator`][gradiend.data.text.prediction.creator.TextPredictionDataCreator].generate_neutral_data() or a HuggingFace dataset like `aieng-lab/wortschatz-leipzig-de-grammar-neutral`) when available. The fallback is suitable for quick runs or when neutral data is not available.
 
 ---
 
@@ -169,4 +169,4 @@ dec_results = trainer.evaluate_decoder()
 - [Tutorial: Evaluation (inter-model)](evaluation-inter-model.md) — Top-k overlap and heatmaps for comparing multiple runs.
 - [Tutorial: Model Rewrite](model-rewrite.md) — Apply decoder-selected rewrites and save changed checkpoints.
 - [Evaluation & visualization](../guides/evaluation-visualization.md) — Plot customization (convergence, encoder, heatmap, Venn).
-- [API reference](../api/index.md) — `Evaluator`, `EncoderEvaluator`, `DecoderEvaluator`.
+- [API reference](../api/index.md) — [`Evaluator`][gradiend.evaluator.evaluator.Evaluator], [`EncoderEvaluator`][gradiend.evaluator.encoder.EncoderEvaluator], [`DecoderEvaluator`][gradiend.evaluator.decoder.DecoderEvaluator].

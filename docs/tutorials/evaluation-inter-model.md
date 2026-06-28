@@ -2,8 +2,10 @@
 
 This tutorial covers **inter-model** evaluation: comparing **multiple** trained runs to see whether they change the same or different parameters. You need several trained models (e.g. different class pairs or seeds, each with its own `run_id` under the same `experiment_dir`). For evaluating a **single** model (encoder/decoder) and then applying rewrites, see [Tutorial: Evaluation (intra-model)](evaluation-intra-model.md) and [Tutorial: Model Rewrite](model-rewrite.md).
 
+For larger comparison workflows, also see [Cross-model comparison](../guides/cross-model-comparison.md) and [Trainer suites](../guides/trainer-suites.md). Suites are especially useful when the same training arguments should be applied to many feature pairs.
+
 !!! tip "Optional dependency: plotting"
-    The Venn diagrams and heatmap in this tutorial require the **plot** extra. If you did not install it with GRADIEND, install it with:
+    The Venn diagrams and heatmap in this tutorial require the recommended plotting dependencies. If you did not install them with GRADIEND, install:
 
     ```bash
     pip install gradiend[plot]
@@ -13,7 +15,7 @@ This tutorial covers **inter-model** evaluation: comparing **multiple** trained 
 
 ## Why compare across runs?
 
-When you train GRADIEND for different feature pairs (e.g. different [Gender-Case transitions](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/gender_de_detailed.py)), a natural question is: *Do these runs modify the same parameters or different ones?* 
+When you train GRADIEND for different feature pairs (e.g. different [Gender-Case transitions](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/train_gender_de_detailed.py)), a natural question is: *Do these runs modify the same parameters or different ones?* 
 
 We measure this by looking at the **top-k** most important parameters (e.g. decoder weights with largest absolute value) in each GRADIEND model and seeing how much they overlap.
 Their overlap can be visualized using two main tools:
@@ -31,22 +33,23 @@ If they overlap little, the learned directions are more distinct. This kind of a
 For each trained GRADIEND model, we can rank parameters (e.g. decoder weights) by **importance** (e.g. absolute weight magnitude) and take the **top-k**. **Top-k overlap** between two models is the overlap of these two sets: e.g. how many of the top-k parameters in run A are also in the top-k of run B. A **heatmap** of pairwise overlaps (across several runs) shows which runs affect similar parameters and which do not.
 
 - **part** selects which parameters to rank: `encoder-weight`, `decoder-weight`, `decoder-bias`, or `decoder-sum`. By default, we use **decoder-weight**.
-- **topk**: Number or fraction of dimensions to take as “top” (e.g. 1000 or 0.01).
-- **value**: Metric for the heatmap cells, e.g. `"intersection_frac"` (fraction of the smaller set that lies in the intersection). See [Evaluation & visualization](../guides/evaluation-visualization.md#4-top-k-overlap-heatmap) for full customization options.
+- **topk**: Number or fraction of dimensions to take as “top” (e.g. 1000 or 0.01 for the top 1% per model).
+- **value**: Metric for the heatmap cells, e.g. `"intersection_frac"` (fraction of the smaller selected set that lies in the intersection). See [Evaluation & visualization](../guides/evaluation-visualization.md#topk-overlap-heatmap) for full customization options.
 
 ---
 
 ## Pre-requisites
 
-To compare across runs, you need to have trained multiple GRADIEND models. For the remaining of the code, we assume you have a list of `Trainer` objects (one per run) that you want to compare. Each trainer should have a unique `run_id` that is used in the plot labels.
+To compare across runs, you need to have trained multiple GRADIEND models. For the remaining of the code, we assume you have a list of [`Trainer`][gradiend.trainer.trainer.Trainer] objects (one per run) that you want to compare. Each trainer should have a unique `run_id` that is used in the plot labels.
 
 > Note that storing a lot of GRADIEND models may become memory-intensive. It is highly recommended to use *pruning* to pre-select important weights and only keep these in memory!
-
 
 ```python
 # e.g. one trainer per class pair
 models = {t.run_id: t.get_model() for t in trainers}
 ```
+
+[:material-file-code-outline: `train_gender_de_detailed.py`](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/train_gender_de_detailed.py)
 
 ## Venn Diagrams
 
@@ -90,6 +93,28 @@ High values (e.g. bright cells) mean the two runs share many of their top-k para
 
 *Run the code above to generate the heatmap; use `output_path="topk_overlap_heatmap.pdf"` (or `.png`) to save.*
 
+<!-- DOC_PLOT: docs/img/topk_overlap_heatmap.png
+Regenerate: gradiend/examples/train_gender_de_detailed.py
+-->
+
+---
+
+## Cross-encoding and suites
+
+Top-k overlap compares **parameters**. **Cross-encoding** compares whether one GRADIEND's
+encoder separates another feature's data — the semantic complement.
+
+```python
+# After training a suite:
+suite.plot_cross_encoding_heatmap(run_evaluation=False, output_path="cross_encoding.png")
+```
+
+For dense anchor-aligned matrices over many pairwise GRADIENDs, see
+[Oriented cross-encoding matrix](../guides/cross-encoding-matrix.md) and
+[Trainer suites](../guides/trainer-suites.md).
+
+Multi-seed comparison heatmaps: [Multi-seed analysis](../guides/multi-seed.md) and
+[train_multi_seed_stability.py](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/train_multi_seed_stability.py).
 
 ---
 
@@ -97,5 +122,7 @@ High values (e.g. bright cells) mean the two runs share many of their top-k para
 
 - [Tutorial: Evaluation (intra-model)](evaluation-intra-model.md) — Encoder/decoder evaluation and decoder config selection.
 - [Tutorial: Model Rewrite](model-rewrite.md) — Apply decoder-selected rewrites and save changed checkpoints.
+- [Cross-model comparison](../guides/cross-model-comparison.md) — Comparison metrics, multi-seed comparison, and interpretation.
+- [Trainer suites](../guides/trainer-suites.md) — Orchestrating many related runs.
 - [Evaluation & visualization](../guides/evaluation-visualization.md) — Heatmap and Venn customization options.
-- [API reference](../api/index.md) — `plot_topk_overlap_heatmap`, `plot_topk_overlap_venn`.
+- [API reference](../api/index.md) — [`plot_topk_overlap_heatmap`][gradiend.visualizer.topk.pairwise_heatmap.plot_topk_overlap_heatmap], [`plot_topk_overlap_venn`][gradiend.visualizer.topk.venn_.plot_topk_overlap_venn].

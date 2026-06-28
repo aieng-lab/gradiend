@@ -5,6 +5,7 @@ Besides plain bool, string modes control extra guards:
 
 - ``"always"``: reuse any saved checkpoint (skip fingerprint matching).
 - ``"only_convergent"``: reuse only when convergence requirements are met and the
+
   checkpoint matches the requested training configuration (pre/post-prune fingerprint).
 
 ``use_cache=True`` reuses when the checkpoint exists and matches the fingerprint

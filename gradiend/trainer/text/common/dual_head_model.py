@@ -33,6 +33,7 @@ def _make_mlm_head_module(lm_model: nn.Module, base_model_prefix: str) -> nn.Mod
     Build a single nn.Module that takes sequence_output [B, L, H] and returns logits [B, L, V].
 
     Handles HuggingFace MLM head layouts:
+
     - BERT/RoBERTa: .cls (BertOnlyMLMHead / RobertaLMHead) with forward(sequence_output).
     - DistilBERT: .vocab_transform, .vocab_layer_norm, .vocab_projector (no single head module).
     """

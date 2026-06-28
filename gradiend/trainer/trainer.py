@@ -119,6 +119,7 @@ class Trainer(TrainerAnnotationMixin, FeatureLearningDefinition):
     **Abstract Methods:**
     
     Subclasses must implement the following abstract methods from `FeatureLearningDefinition`:
+
     - `create_training_data()`: Create training dataset without gradient computation
     - `create_gradient_training_dataset()`: Create training dataset with gradient computation
     - `_get_decoder_eval_dataframe()`: Get DataFrames for decoder evaluation
@@ -251,6 +252,7 @@ class Trainer(TrainerAnnotationMixin, FeatureLearningDefinition):
     **Architecture:**
     
     The Trainer subclasses `FeatureLearningDefinition` and adds:
+
     - Model storage and lazy loading (`get_model()`)
     - Training arguments management (`training_args` property)
     - Lazy Evaluator initialization (`evaluator` property)
@@ -290,6 +292,7 @@ class Trainer(TrainerAnnotationMixin, FeatureLearningDefinition):
         rewrite_base_model(): Rewrite base model(s) using decoder evaluation results, optionally save to disk.
     
     **See Also:**
+
         - `FeatureLearningDefinition`: Abstract base class providing data creation and evaluation protocols
         - `TextPredictionTrainer`: Concrete implementation for text-based models (MLM/CLM)
         - `TrainingArguments`: Configuration for training behavior
@@ -1246,21 +1249,30 @@ class Trainer(TrainerAnnotationMixin, FeatureLearningDefinition):
         Multi-seed behavior (when TrainingArguments.max_seeds > 1):
 
         - Each seed is trained from the same base model (or checkpoint path) but with a different
+
           random seed applied to PyTorch, Python's random, and NumPy.
+
         - For each seed, training statistics are collected (including encoder correlation
+
           and best checkpoints). A training-time score ("training_score") is derived from these.
+
         - Optionally, an additional encoder evaluation on the validation split is run via
+
           evaluate_encoder(split="validation"), capped by seed_selection_eval_max_size (or
           encoder_eval_max_size when unset). Its correlation becomes "eval_correlation".
+
         - The "selection_score" for each seed is:
             * eval_correlation when available,
             * otherwise training_score.
         - A convergence metric (correlation or loss) and threshold are used to count how many
+
           seeds "converged" (see TrainingArguments.convergent_metric and convergent_score_threshold).
 
         After the loop, a seed_report.json is written under <experiment_dir>/seeds containing:
+
         - top-level convergence info (metric, threshold, best seed, etc.)
         - a per-seed breakdown with training_score, eval_correlation, selection_score,
+
           convergence_metric_value, and convergence flags.
         """
         if output_dir is not None and not isinstance(output_dir, str):

@@ -1,12 +1,12 @@
 # Data handling (text prediction)
 
-This guide describes how to provide text data to `TextPredictionTrainer` and which columns your datasets must have. It is specific to text prediction.
+This guide describes how to provide text data to [`TextPredictionTrainer`][gradiend.trainer.text.prediction.trainer.TextPredictionTrainer] and which columns your datasets must have. It is specific to text prediction.
 
 ---
 
 ## Overview: three input paths
 
-`TextPredictionTrainer` accepts data in three main ways:
+[`TextPredictionTrainer`][gradiend.trainer.text.prediction.trainer.TextPredictionTrainer] accepts data in three main ways:
 
 | Path | Use when |
 |------|----------|
@@ -34,6 +34,8 @@ trainer = TextPredictionTrainer(
     hf_splits=["train", "validation", "test"],        # Splits to include; default: all
 )
 ```
+
+[:material-file-code-outline: `train_gender_de.py`](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/train_gender_de.py)
 
 ### Required columns (per subset/config)
 
@@ -86,7 +88,7 @@ Each subset has columns for every class, so factual and alternative tokens are i
 - The column matching the subset holds the factual token; other columns hold alternatives
 
 ```python
-# race_religion example
+# Hugging Face per-class-column dataset example
 trainer = TextPredictionTrainer(
     model="distilbert-base-cased",
     data="aieng-lab/gradiend_race_data",
@@ -95,6 +97,8 @@ trainer = TextPredictionTrainer(
     split_col="split",
 )
 ```
+
+[:material-file-code-outline: `train_multi_seed_stability.py`](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/train_multi_seed_stability.py)
 
 ---
 
@@ -118,6 +122,8 @@ trainer = TextPredictionTrainer(
     split_col="split",
 )
 ```
+
+[:material-file-code-outline: `train_sentiment.py`](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/train_sentiment.py)
 
 ### Required columns (per DataFrame)
 
@@ -143,7 +149,7 @@ Each DataFrame in the dict must have:
 
 ### Configurable column names
 
-Override defaults with `TextPredictionConfig`:
+Override defaults with [`TextPredictionConfig`][gradiend.trainer.text.prediction.trainer.TextPredictionConfig]:
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
@@ -260,6 +266,8 @@ Training uses transitions between **two** classes (e.g. masculine vs feminine). 
 target_classes=["masc_nom", "fem_nom"]   # Pair for training (currently: must have exactly two elements!)
 ```
 
+[:material-file-code-outline: `start_workflow.py`](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/start_workflow.py)
+
 - When `all_classes` (usually determined by data automatically) has exactly two elements, the trainer uses these two classes automatically as `target_classes`.
 - **Merged classes**: Use `class_merge_map` to merge base classes (e.g. `{"singular": ["1SG", "3SG"], "plural": ["1PL", "3PL"]}`); then `target_classes` refers to merged names. With exactly two merged keys, `target_classes` can be omitted.
 
@@ -269,8 +277,8 @@ target_classes=["masc_nom", "fem_nom"]   # Pair for training (currently: must ha
 
 Balancing and caps rely on a feature-class identifier. After conversion, the trainer infers this from the class labels in your data.
 
-- `TrainingArguments.train_max_size`: Caps training samples; applied per feature class when available.
-- `TrainingArguments.encoder_eval_max_size`, `decoder_eval_max_size_training_like`, etc.: Similar per-class caps for evaluation.
+- [`TrainingArguments`][gradiend.trainer.core.arguments.TrainingArguments].train_max_size: Caps training samples; applied per feature class when available.
+- [`TrainingArguments`][gradiend.trainer.core.arguments.TrainingArguments].encoder_eval_max_size, `decoder_eval_max_size_training_like`, etc.: Similar per-class caps for evaluation.
 - When class information is available, the scheduler oversamples smaller classes and `train_max_size` applies per-class downsampling.
 
 ---
@@ -279,13 +287,15 @@ Balancing and caps rely on a feature-class identifier. After conversion, the tra
 
 Datasets should provide `train`, `validation` (or `val`), and `test` splits. The trainer normalizes split names (e.g. `"val"` → `"validation"`). Support for fewer splits may be added later.
 
+For vocabulary-held-out target splits, set `split_col=None` and optionally provide `split_group_key`. See [Data splits](data-splits.md) for when this is  appropriate and how many distinct target words are required.
+
 ---
 
 ---
 
 ## Optional: neutral evaluation data (`eval_neutral_data`)
 
-`TextPredictionTrainer` accepts **optional** neutral data via `eval_neutral_data` (DataFrame, path, or HuggingFace dataset ID). This is used for:
+[`TextPredictionTrainer`][gradiend.trainer.text.prediction.trainer.TextPredictionTrainer] accepts **optional** neutral data via `eval_neutral_data` (DataFrame, path, or HuggingFace dataset ID). This is used for:
 
 - **Encoder evaluation** — a separate `neutral_dataset` variant for encoding gradients from feature-independent text.
 - **Decoder evaluation (LMS)** — text to compute language modeling score (perplexity) without feature-related targets.
@@ -293,7 +303,7 @@ Datasets should provide `train`, `validation` (or `val`), and `test` splits. The
 **When `eval_neutral_data` is omitted or empty:**
 
 - Encoder evaluation still runs (no `neutral_dataset` variant).
-- Decoder evaluation falls back to **training-like data** (test split): each row's `text` is built by filling the mask with the factual token. Target tokens are automatically added to `decoder_eval_ignore_tokens` so they are ignored in LMS. This works for quick runs; for best practice, provide true neutral data when available (e.g. `TextPredictionDataCreator.generate_neutral_data()` or HuggingFace datasets like `aieng-lab/wortschatz-leipzig-de-grammar-neutral`).
+- Decoder evaluation falls back to **training-like data** (test split): each row's `text` is built by filling the mask with the factual token. Target tokens are automatically added to `decoder_eval_ignore_tokens` so they are ignored in LMS. This works for quick runs; for best practice, provide true neutral data when available (e.g. [`TextPredictionDataCreator`][gradiend.data.text.prediction.creator.TextPredictionDataCreator].generate_neutral_data() or HuggingFace datasets like `aieng-lab/wortschatz-leipzig-de-grammar-neutral`).
 
 See [Evaluation (intra-model)](../tutorials/evaluation-intra-model.md#neutral-data-for-decoder-evaluation-lms) for details.
 
@@ -301,4 +311,4 @@ See [Evaluation (intra-model)](../tutorials/evaluation-intra-model.md#neutral-da
 
 ## Generating data from raw text
 
-To **create** training data from base corpora (Wikipedia, CSV, HuggingFace, or lists of strings), use `TextPredictionDataCreator` from `gradiend.data`. See the [Data generation](../tutorials/data-generation.md) tutorial for full usage.
+To **create** training data from base corpora (Wikipedia, CSV, HuggingFace, or lists of strings), use [`TextPredictionDataCreator`][gradiend.data.text.prediction.creator.TextPredictionDataCreator] from `gradiend.data`. See the [Data generation](../tutorials/data-generation.md) tutorial for full usage.

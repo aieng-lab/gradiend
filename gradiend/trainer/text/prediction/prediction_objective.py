@@ -2,6 +2,7 @@
 Prediction objectives for text-prediction GRADIEND.
 
 An objective owns the pair of semantics that must stay aligned:
+
 - the training model/objective used to produce gradients;
 - the scoring model/objective used by decoder probability-shift analysis.
 
@@ -241,6 +242,7 @@ def resolve_prediction_objective(trainer: Any, model_or_tokenizer: Any = None) -
     Resolve the objective while preserving existing behavior.
 
     auto:
+
     - existing decoder MLM-head cache: train through that head, score original CLM;
     - decoder-only without head: current next-token CLM behavior;
     - otherwise: true masked-LM behavior.

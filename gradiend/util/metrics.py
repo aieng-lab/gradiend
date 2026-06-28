@@ -2,8 +2,11 @@
 Lightweight metric helpers used in core training/evaluation paths.
 
 Why this exists:
+
 - We only need a small subset of sklearn metrics (`accuracy_score`,
+
   weighted `precision/recall/f1`) in this project.
+
 - Keeping these tiny implementations local avoids a heavy hard dependency.
 
 If future needs grow beyond these basic metrics (multilabel, sparse targets,

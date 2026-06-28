@@ -39,9 +39,11 @@ trainer = TextPredictionTrainer(
 )
 ```
 
+[:material-file-code-outline: `start_workflow.py`](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/start_workflow.py)
+
 ### Option B: Generate data (e.g. German gender–case, 12 classes)
 
-For the full German definite singular article paradigm there are **12** gender–case cells (3 genders × 4 cases). You define one **TextFilterConfig** per cell and pass them to `TextPredictionDataCreator`. Here we show **five** cells; the rest follow the same pattern (see [Data generation](data-generation.md) for syncretism and the full list).
+For the full German definite singular article paradigm there are **12** gender–case cells (3 genders × 4 cases). You define one **[`TextFilterConfig`][gradiend.data.text.filter_config.TextFilterConfig]** per cell and pass them to [`TextPredictionDataCreator`][gradiend.data.text.prediction.creator.TextPredictionDataCreator]. Here we show **five** cells; the rest follow the same pattern (see [Data generation](data-generation.md) for syncretism and the full list).
 
 ```python
 from gradiend.data import TextFilterConfig, TextPreprocessConfig, TextPredictionDataCreator
@@ -86,13 +88,13 @@ eval_neutral_data = "aieng-lab/wortschatz-leipzig-de-grammar-neutral"  # Option 
 
 # --- Training args and trainer (see Tutorial: Training) ---
 args = TrainingArguments(
-    experiment_dir="runs/gender_de_detailed",
+    experiment_dir="runs/train_gender_de_detailed",
     train_batch_size=8,
     max_steps=500,
     eval_steps=100,
     learning_rate=5e-5,
-    pre_prune_config=PrePruneConfig(n_samples=16, topk=0.01, source="diff"),
-    post_prune_config=PostPruneConfig(topk=0.05, part="decoder-weight"),
+    pre_prune_config=PrePruneConfig(n_samples=16, topk=0.1, source="factual"),
+    post_prune_config=PostPruneConfig(topk=0.01, part="decoder-weight"),
     use_cache=True,
     add_identity_for_other_classes=True,
 )

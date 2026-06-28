@@ -2,7 +2,8 @@
 
 ## Requirements
 
-**Python 3.8 or newer** is required (tested on 3.8–3.11).
+**Python 3.9 or newer** is required. The test suite is regularly exercised on
+current Python 3.10/3.11 environments.
 
 ## Basic installation
 
@@ -10,29 +11,34 @@
 pip install gradiend
 ```
 
-This installs the core package and required dependencies. Sufficient for training with DataFrames or local data.
+This installs the core package and required dependencies. It is enough when you
+train from local files or pandas DataFrames and do not need optional plotting,
+Hugging Face dataset loading, or large-model device mapping.
 
-## Recommended (plots, HuggingFace, tokenizer compatibility, safetensors)
+## Recommended
 
-For a full experience (plots, loading HuggingFace datasets, tokenizer compatibility, safetensors), install:
+For normal research use, install the recommended extras:
 
 ```bash
 pip install gradiend[recommended]
 ```
 
-This adds:
+This adds support for common plotting workflows, Hugging Face datasets,
+safetensors checkpoints, tokenizer backends, and large-model loading with
+`device_map` / `base_model_device_map`.
 
-| Package     | Purpose                                                                 |
-|-------------|-------------------------------------------------------------------------|
-| matplotlib  | Plotting (encoder distributions, convergence plots)                     |
-| seaborn     | Visualizations (encoder scatter, heatmaps)                             |
-| safetensors | Faster, safer model serialization (preferred over `.bin`)              |
-| datasets    | Loading HuggingFace datasets by id                                     |
-| sentencepiece | Tokenizer backend for some Hugging Face models (e.g. many T5/LLaMA variants); not required for all BERT/GPT tokenizers |
+| Package | Purpose |
+|---------|---------|
+| `accelerate` | Hugging Face `device_map` / `base_model_device_map` loading for large models |
+| `matplotlib` | Static plots such as convergence curves, encoder distributions, strip plots, and heatmaps |
+| `seaborn` | Higher-level statistical visualizations |
+| `datasets` | Loading Hugging Face datasets by id |
+| `safetensors` | Preferred model serialization format |
+| `sentencepiece` | Tokenizer backend required by many T5/LLaMA-style tokenizers |
 
 ## Optional: data creation (spaCy)
 
-To **create training data** from raw text with morphological filtering (e.g. German articles by gender/case), install:
+To create training data from raw text with morphological filtering, install:
 
 ```bash
 pip install gradiend[data]
@@ -40,31 +46,51 @@ pip install gradiend[data]
 
 This adds:
 
-| Package  | Purpose                                                                 |
-|----------|-------------------------------------------------------------------------|
-| spacy    | Morphological filtering via `spacy_tags` in `TextFilterConfig` (see [Data generation](tutorials/data-generation.md)) |
-| datasets | Loading HuggingFace datasets as base data for `TextPredictionDataCreator` |
+| Package | Purpose |
+|---------|---------|
+| `spacy` | Morphological filtering via `spacy_tags` in [`TextFilterConfig`][gradiend.data.text.filter_config.TextFilterConfig] |
+| `datasets` | Loading Hugging Face datasets as base data for [`TextPredictionDataCreator`][gradiend.data.text.prediction.creator.TextPredictionDataCreator] |
 
-spaCy also needs a language model, e.g. `de_core_news_sm` for German: `python -m spacy download de_core_news_sm`.
-
-> You can combine extras: `pip install gradiend[recommended,data]` for plots, HF, safetensors, and data creation.
-
-## Optional: interactive encoder scatter (Plotly)
-
-The encoder scatter plot (`trainer.plot_encoder_scatter()`) uses Plotly for interactive hover and zoom. It is **optional** and **not** part of `recommended`. Without Plotly, the function returns `None` and logs a warning.
-
-To enable the interactive scatter (e.g. in Jupyter):
+spaCy also needs a language model. For German filtering, for example:
 
 ```bash
-pip install plotly
+python -m spacy download de_core_news_sm
 ```
+
+You can combine extras:
+
+```bash
+pip install gradiend[recommended,data]
+```
+
+## Interactive encoder scatter (Plotly)
+
+The interactive encoder scatter plot ([`trainer.plot_encoder_scatter()`][gradiend.trainer.trainer.Trainer.plot_encoder_scatter]) uses
+Plotly for hover labels, zooming, and notebook exploration. Plotly is installed
+by `gradiend[recommended]` and `gradiend[plot]`. Without Plotly, the function
+returns `None` and logs a warning.
+
+To enable the interactive scatter in a minimal install:
+
+```bash
+pip install gradiend[plot]
+```
+
+## Choosing extras
+
+| Task | Suggested install |
+|------|-------------------|
+| Run the quick start from local data | `pip install gradiend[recommended]` |
+| Generate text-prediction data from raw corpora | `pip install gradiend[recommended,data]` |
+| Use interactive scatter plots in notebooks | `pip install gradiend[recommended]` |
+| Develop GRADIEND itself | `pip install -e ".[recommended,data,dev]"` |
 
 ## Dev (contributors)
 
 For building docs and running tests:
 
 ```bash
-pip install -e ".[recommended,dev]"
+pip install -e ".[recommended,data,dev]"
 ```
 
 ## From source

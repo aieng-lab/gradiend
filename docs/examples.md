@@ -1,28 +1,53 @@
 # Examples
 
-These examples are intended as inspiration for data handling and workflow variations. They are **not installed with the pip package**; see [gradiend/examples](https://github.com/aieng-lab/gradiend/tree/main/gradiend/examples) on GitHub to download a file or read to get inspired.
+These examples are intended as runnable starting points and inspiration for
+workflow variations. They are **not installed with the pip package**; read or
+download them from [gradiend/examples](https://github.com/aieng-lab/gradiend/tree/main/gradiend/examples).
 
-## Quick start
+Examples in this page are grouped by how a user should approach them. Start with
+the quick examples, then move to heavier workflows only after the basic training,
+evaluation, and plotting loop is clear.
 
-- [start_workflow.py](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/start_workflow.py) — Minimal start-to-end workflow with `TextPredictionDataCreator`. Uses 75+ artificial sentences (3SG/3PL), creates data on the fly, trains, and evaluates. Matches [docs/start.md](start.md).
+## Quick examples
 
-## Training workflows
+- [:material-file-code-outline: `start_workflow.py`](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/start_workflow.py) — [Train your first GRADIEND model](start.md)
+- [:material-file-code-outline: `train_english_pronouns.py`](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/train_english_pronouns.py)
+- [:material-file-code-outline: `train_gender_de.py`](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/train_gender_de.py)
 
-- [gender_de.py](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/gender_de.py) — Gender bias in German (minimal workflow, single pair).
-- [gender_de_detailed.py](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/gender_de_detailed.py) — German gender workflow for various target class combinations with pruning, encoder plots, top-k overlap heatmap, and training convergence.
-- [gender_de_decoder_only.py](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/gender_de_decoder_only.py) — Decoder-only model with optional MLM head (`DecoderModelWithMLMHead`).
-- [gender_en.py](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/gender_en.py) — Gender bias in English with name augmentation and GENTypes-based decoder metrics (BPI, FPI, MPI).
-- [race_religion.py](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/race_religion.py) — Race and religion bias (multi-class, multiple bias types in a loop).
-- [english_pronouns.py](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/english_pronouns.py) — English pronouns (3SG vs 3PL); loads data from `data_creation_pronouns` output. Optional `class_merge_map` for number/person (e.g. singular vs plural). See also the [english_pronouns.ipynb](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/english_pronouns.ipynb) notebook for a step-by-step run (data creation from Wikipedia → training → evaluation).
+## Real-data workflows
+
+- [:material-file-code-outline: `train_sentiment.py`](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/train_sentiment.py)
+- [:material-file-code-outline: `train_race_symmetric_suite.py`](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/train_race_symmetric_suite.py) — [Trainer suites](guides/trainer-suites.md)
+- [:material-file-code-outline: `train_sentiment_positive_suite.py`](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/train_sentiment_positive_suite.py)
+- [:material-file-code-outline: `train_sentiment_positive_suite_all_but_one.py`](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/train_sentiment_positive_suite_all_but_one.py)
+- [:material-file-code-outline: `train_multi_seed_stability.py`](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/train_multi_seed_stability.py) — [Multi-seed](guides/multi-seed.md)
+- [:material-file-code-outline: `train_gender_de_decoder_only.py`](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/train_gender_de_decoder_only.py)
+- [:material-file-code-outline: `train_seq2seq_encoder_mlm.py`](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/train_seq2seq_encoder_mlm.py)
+- [:material-file-code-outline: `train_seq2seq_decoder_sequence.py`](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/train_seq2seq_decoder_sequence.py) (experimental decoder objective)
+
+## Heavier examples
+
+- [:material-file-code-outline: `train_gender_de_detailed.py`](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/train_gender_de_detailed.py)
+- [:material-file-code-outline: `train_gender_de_detailed.ipynb`](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/train_gender_de_detailed.ipynb)
+- [:material-file-code-outline: `train_english_pronouns.ipynb`](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/train_english_pronouns.ipynb)
+
+## Experiments (repo root)
+
+- [:material-file-code-outline: `multilingual_gradiend_demo_small.py`](https://github.com/aieng-lab/gradiend/blob/main/experiments/multilingual_gradiend_demo_small.py) — [Cross-encoding matrix](guides/cross-encoding-matrix.md)
+- [:material-file-code-outline: `multilingual_gradiend_demo.py`](https://github.com/aieng-lab/gradiend/blob/main/experiments/multilingual_gradiend_demo.py)
+
+## Diagnostics and visualization
+
+- [:material-file-code-outline: `plot_visualization_gallery.py`](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/plot_visualization_gallery.py)
+
+For documentation plot regeneration, see [docs/img/README.md](img/README.md) and `<!-- DOC_PLOT: ... -->` comments in the guides.
+
+## Experimental inspiration
+
+- [:material-file-code-outline: `train_text_classification_experimental.py`](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/train_text_classification_experimental.py)
+- [:material-file-code-outline: `train_gender_en.py`](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/train_gender_en.py)
 
 ## Data creation
 
-- [data_creator_demo.py](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/data_creator_demo.py) — Build training and neutral data with `TextPredictionDataCreator` (German articles der/die/das, syncretism handling).
-- [data_creation_pronouns.py](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/data_creation_pronouns.py) — Create English pronoun data (1SG, 1PL, 2, 3SG, 3PL) from Wikipedia via HuggingFace; used by `english_pronouns.py`.
-
-## Notebooks (interactive)
-
-Interactive Jupyter notebooks for step-by-step workflow discovery:
-
-- [gender_de_detailed.ipynb](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/gender_de_detailed.ipynb) — Start with a single gender-case pair, explore each step, then optionally loop over configs and compare with top-k overlap heatmaps.
-- [english_pronouns.ipynb](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/english_pronouns.ipynb) — Data creation from Wikipedia → training 3SG vs 3PL → evaluation, with optional `class_merge_map` for singular vs plural.
+- [:material-file-code-outline: `create_german_article_data.py`](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/create_german_article_data.py)
+- [:material-file-code-outline: `create_english_pronoun_data.py`](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/create_english_pronoun_data.py)

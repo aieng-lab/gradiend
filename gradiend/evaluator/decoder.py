@@ -159,6 +159,7 @@ def derive_default_feature_factor(
     Derive a single default feature factor for decoder eval.
 
     CONTRACT (do not change without explicit design review):
+
     - ``factual`` / ``diff``: ``ff = -feature_class_encoding_direction[class_name]``.
     - ``alternative``: ``ff = +feature_class_encoding_direction[class_name]``.
     - Rewrite orientation is **only** this ``feature_factor`` × decoder(latent); never flip LR.
@@ -353,9 +354,12 @@ def default_extract_candidates(results: Mapping[Any, Mapping[str, Any]]) -> Tupl
     Convert current `results` format to a list of Candidates.
 
     Metrics convention:
+
       - probs -> keys "<class_name>" (counterfactual: P(other) on class dataset, for strengthen)
       - probs_factual -> "<class_name>_factual" (P(class) on class dataset) and
+
         "<class_name>_weaken" (1 - factual, for weaken: maximize = minimize factual)
+
       - any scalar numeric field at top-level of entry (excluding lms/probs/probs_factual) -> metric with same key
     """
     base_lms = float(results["base"]["lms"]["lms"]) if "base" in results else None
@@ -601,11 +605,16 @@ class DecoderEvaluator:
 
         Returns:
             Flat dict with:
+
               - For strengthen (increase_target_probabilities=True): one entry per target class (e.g. dec_result['3SG']).
               - For weaken (increase_target_probabilities=False): one entry per target class with \"_weaken\" suffix
+
                 (e.g. dec_result['3SG_weaken']).
+
               - Each summary entry contains selected metric `value`, `feature_factor`, `learning_rate`, `id`,
+
                 a `strengthen` flag, and LMS fields (`lms`, `base_lms`).
+
               - 'grid': candidate id -> full evaluation results.
               - When plot=True, also 'plot_paths' and 'plot_path'.
         """

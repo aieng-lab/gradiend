@@ -4,8 +4,10 @@ TextClassificationDataCreator: build training and neutral datasets for text clas
 Same interface as TextPredictionDataCreator: generate_training_data and generate_neutral_data.
 
 Implementation notes:
+
 - Uses TextDataCreator for shared caching/output resolution/loading.
 - Uses LabelDataCreator for a generalized training-data generation loop:
+
   _get_data() -> iterable of texts, _label(text) -> row dict or None.
 """
 
@@ -59,9 +61,11 @@ class TextClassificationDataCreator(LabelDataCreator):
         Args:
             base_data: HF dataset id, pandas DataFrame, CSV path, or List[str].
             label_fn: Function mapping each string to:
+
               - a scalar class id/name (int/str), or
               - a dict representing the full row to emit (must include at least 'label' if you want a label), or
               - None to filter out.
+
             text_column: Column name for text (default "text").
             base_max_size: Cap on base data (after shuffle).
             split: HF split (default "train").

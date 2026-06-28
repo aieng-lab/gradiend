@@ -2,6 +2,7 @@
 FeatureLearningDefinition: Base class for GRADIEND feature learning definitions.
 
 A FeatureLearningDefinition defines everything needed to train and evaluate GRADIEND for a specific feature:
+
 - Data creation (via create_training_data)
 - Evaluation (via evaluate_encoder, evaluate_decoder, etc.)
 
@@ -239,6 +240,7 @@ class FeatureLearningDefinition(DataProvider, ABC):
         Map target feature class IDs to string class IDs when possible.
 
         Default behavior:
+
         - If `pair` is available (exactly 2 target classes) and ids are 0/1 (int or float), map to pair[0]/pair[1].
         - Else if target_classes are available and ids are integer indices, map to target_classes[idx].
         - Otherwise return ids unchanged.
@@ -616,6 +618,7 @@ class FeatureLearningDefinition(DataProvider, ABC):
 
         Returns:
             Tuple (training_like_df, neutral_df):
+
             - training_like_df: Data for probability-style scoring.
             - neutral_df: Data for LMS scoring.
         """
@@ -699,6 +702,7 @@ class FeatureLearningDefinition(DataProvider, ABC):
         Analyze encoder by encoding gradients from training data and optional neutral data.
 
         This method processes all variants in a single call:
+
         1. Training data (always processed)
         2. Neutral variant 1 (if decoder_eval_targets configured)
         3. Neutral variant 2 (if neutral_data_df provided)

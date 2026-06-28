@@ -50,3 +50,13 @@ Documentation = "https://your-docs-url/"
 ```
 
 That URL is shown on [PyPI](https://pypi.org/) and by `pip show gradiend`, so users can reach the same documentation (including the API reference) from the released package.
+
+## Source links on code blocks
+
+After a code block that comes from (or is runnable as) an example or experiment file, add one line:
+
+```markdown
+[:material-file-code-outline: `start_workflow.py`](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/start_workflow.py)
+```
+
+Use the repo path under `gradiend/examples/` or `experiments/`. Skip generic API-only snippets with no single source file.

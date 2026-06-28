@@ -5,6 +5,7 @@ Callbacks handle evaluation, checkpointing, normalization, logging,
 early stopping, and optional TensorBoard/Wandb logging.
 
 Provided callbacks:
+
 - EvaluationCallback: periodic evaluation (correlation, mean_by_class).
 - NormalizationCallback: invert encoding when correlation < -0.5 (single latent).
 - CheckpointCallback: save best model and optional periodic checkpoints.
@@ -269,6 +270,7 @@ class CheckpointCallback(TrainingCallback):
     Callback for saving model checkpoints during training.
     
     Behavior:
+
     - Saves the best model based on evaluation correlation (or loss when use_loss_for_best=True)
     - When use_loss_for_best=True (e.g. supervised_decoder), correlation is meaningless; best = lowest loss
     - Saves periodic checkpoints every checkpoint_interval steps (if checkpoints enabled)

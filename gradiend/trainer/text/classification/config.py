@@ -29,23 +29,30 @@ class TextClassificationConfig(TrainerConfig):
     **Supported use cases (auto-detected from which columns exist):**
 
     - **Same text, different labels:** User provides `text` + `label` only.
+
       We set text_alternative = text. If only two classes in data, we set
       label_alternative = the other class; otherwise we sample from other classes.
 
     - **Different text, same label:** User provides `text`, `text_alternative`, `label`.
+
       We set label_alternative = label.
 
     - **Full explicit:** User provides `text`, `text_alternative`, `label`,
+
       `label_alternative` (and optionally `split`). No derivation.
 
     **Column name defaults** (user can override if their DF uses different names):
 
     - text_col: column for factual text (default "text").
     - text_alternative_col: column for alternative text (default "text_alternative").
+
       If missing in DataFrame, we use factual text (same text).
+
     - label_col: column for factual label (default "label").
     - label_alternative_col: column for alternative label (default "label_alternative").
+
       If missing, we derive: binary = other class; multi-class = sample from others.
+
     - split_col: train/validation/test (default "split").
     """
 

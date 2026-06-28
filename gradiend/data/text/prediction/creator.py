@@ -576,6 +576,7 @@ class TextPredictionDataCreator:
         """Generate neutral data by excluding sentences with target tokens.
 
         Excludes sentences containing:
+
         - Any token in (target words + additional_excluded_words), deduplicated
         - Any token matching any spec in excluded_spacy_tags
 

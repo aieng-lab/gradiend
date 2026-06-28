@@ -2,11 +2,13 @@
 TrainerSuite: shared orchestration for many pairwise trainer runs.
 
 The suite mirrors the underlying trainer constructor as closely as possible:
+
 - one trainer class
 - shared constructor args / kwargs
 - one child trainer per unordered pair of target classes
 
 Pairwise studies can differ in their semantics:
+
 - positive pairs (e.g. true vs false property classes)
 - symmetric pairs (e.g. x <-> y variable contrasts)
 

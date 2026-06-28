@@ -159,13 +159,18 @@ class TextPredictionConfig(TrainerConfig):
     transition ∈ {c1→c2, c2→c1} for the configured pair.
 
     Data input:
+
     - data as Dict[str, DataFrame]: per-class format. Key = factual_class; each df has
+
       masked, split, and columns = class names (factual = df[factual_class], alternative = df[alternative_class]).
       If a df has no column for another class (single-token-per-class, e.g. Gender), target
       is inferred as the other class's token for the configured pair.
+
     - data as DataFrame: merged format with label_class_col, label_col, and optionally
+
       target_col, target_class_col. If target columns omitted, pair is required and
       target = other class's token.
+
     - hf_dataset: load from HuggingFace (merged format), then convert to unified.
 
     Attributes:
@@ -305,18 +310,21 @@ class TextPredictionTrainer(Trainer):
     Trainer for text prediction (MLM/CLM) using DataFrames.
 
     Handles MLM/CLM data from pandas DataFrames with support for:
+
     - Per-class datasets (e.g., one DataFrame for "Asian", one for "White")
     - Automatic class pair combination (e.g., Asian<->White)
     - Factual/counterfactual creation
     - Automatic label mapping
 
     Required DataFrame columns (names configurable via TextPredictionConfig):
+
     - masked: Text with mask tokens
     - label: Target token (e.g., "he", "He")
     - label_class: Feature class (e.g., "male", "female", "Asian", "White")
     - split: train/val/test
 
     Optional:
+
     - correlation_mapping: Dict mapping label_class -> correlation value (default: +1/-1 for binary)
     """
 
@@ -405,6 +413,7 @@ class TextPredictionTrainer(Trainer):
         - Ensures keys are strings that correspond to known classes (all_classes/target_classes).
         - Normalizes all tokens to strings and drops Nones.
         - When warn_overlap is True, emits a warning (but does not error) when different
+
           classes share overlapping tokens. Set warn_overlap=False when overlap is expected
           (e.g. decoder_eval_targets="label" where the same label can appear in multiple classes).
         """
@@ -484,8 +493,11 @@ class TextPredictionTrainer(Trainer):
             {class_name: [tokens]} for static class-based evaluation.
 
         Supported config.decoder_eval_targets:
+
           - **None**: Auto-infer from unified data (factual + alternative per class).
+
             If inferred targets overlap across classes, fall back to row-wise and log an info message.
+
           - **"label"**: Row-wise evaluation (P(factual) and P(alternative) per row).
           - **Dict[class_name, List[tokens]]**: Class-based static targets (validated against known classes).
         """
@@ -1153,8 +1165,10 @@ class TextPredictionTrainer(Trainer):
         """Load and normalize data on first use. Idempotent.
 
         Training data can be specified as:
+
         - config.hf_dataset: HuggingFace dataset ID (optional subset/splits).
         - config.data: HuggingFace dataset ID (per-class configs), local path (.csv/.parquet),
+
           per-class dict, or DataFrame in memory. A string is treated as HF id unless it is
           an existing file path.
         """
@@ -1683,6 +1697,7 @@ class TextPredictionTrainer(Trainer):
         Load a HuggingFace dataset and convert it to a pandas DataFrame.
 
         This is a convenience method for loading HF datasets with common patterns:
+
         - Handles multiple subsets (e.g., "white_to_black" and "black_to_white")
         - Adds split column to each split
         - Concatenates all splits into a single DataFrame
@@ -3245,6 +3260,7 @@ class TextPredictionTrainer(Trainer):
         Analyze encoder by encoding gradients from training data and optional neutral data.
 
         This method processes all variants in a single call:
+
         1. Training data (always processed)
         2. Neutral variant 1 (if decoder_eval_targets configured)
         3. Neutral variant 2 (if neutral_data_df provided)

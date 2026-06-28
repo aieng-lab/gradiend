@@ -10,8 +10,8 @@ For running decoder evaluation itself, see [Tutorial: Evaluation (intra-model)](
 
 Before rewriting, you need:
 
-- A trained GRADIEND model (i.e. `trainer.train()` has been run).
-- Either decoder evaluation results from `trainer.evaluate_decoder(...)`, or you will pass manual `feature_factor` and `learning_rate` (see below).
+- A trained GRADIEND model (i.e. [`trainer.train()`][gradiend.trainer.trainer.Trainer.train] has been run).
+- Either decoder evaluation results from [`trainer.evaluate_decoder(...)`][gradiend.trainer.trainer.Trainer.evaluate_decoder], or you will pass manual `feature_factor` and `learning_rate` (see below).
 - A target class id to strengthen or weaken (e.g. `"masc_nom"`).
 
 ---
@@ -20,14 +20,14 @@ Before rewriting, you need:
 
 The rewrite applies an update of the form *base model + learning_rate × decoder(feature_factor)*. The strength and direction of the effect depend on **feature factor** and **learning rate**.
 
-- **Manual parameters:** You can call the model’s `rewrite_base_model(learning_rate=..., feature_factor=...)` (on a `ModelWithGradiend` instance) with any values. This gives full control but the **outcome is ambiguous**—different choices can over-strengthen, under-strengthen, or harm other classes.
-- **Assisted parameter selection (recommended):** Run `trainer.evaluate_decoder(...)` to sweep a grid of `(feature_factor, learning_rate)` and score each candidate (e.g. by target-class probability or combined metric). The trainer then uses the **best** config per class when you call `trainer.rewrite_base_model(decoder_results=..., target_class=...)`. This way, the chosen parameters are driven by your evaluation data and metric.
+- **Manual parameters:** You can call the model’s `rewrite_base_model(learning_rate=..., feature_factor=...)` (on a [`ModelWithGradiend`][gradiend.model.model_with_gradiend.ModelWithGradiend] instance) with any values. This gives full control but the **outcome is ambiguous**—different choices can over-strengthen, under-strengthen, or harm other classes.
+- **Assisted parameter selection (recommended):** Run [`trainer.evaluate_decoder(...)`][gradiend.trainer.trainer.Trainer.evaluate_decoder] to sweep a grid of `(feature_factor, learning_rate)` and score each candidate (e.g. by target-class probability or combined metric). The trainer then uses the **best** config per class when you call [`trainer.rewrite_base_model(decoder_results=..., target_class=...)`][gradiend.trainer.trainer.Trainer.rewrite_base_model]. This way, the chosen parameters are driven by your evaluation data and metric.
 
 Use the trainer’s `rewrite_base_model` with `decoder_results` when you want data-driven parameters; use the model’s `rewrite_base_model` with explicit `learning_rate` and `feature_factor` when you want to experiment manually despite ambiguous outcomes.
 
 ---
 
-## What `trainer.rewrite_base_model(...)` does
+## What [`trainer.rewrite_base_model(...)`][gradiend.trainer.trainer.Trainer.rewrite_base_model] does
 
 When you pass `decoder_results` (and optionally `target_class`), the trainer looks up the best `(learning_rate, feature_factor)` from the decoder evaluation for the chosen class and direction, then applies that update to the base model and returns the rewritten model (e.g. `BertForMaskedLM` or a causal LM).
 
@@ -48,6 +48,8 @@ changed_model = trainer.rewrite_base_model(
     target_class="masc_nom",
 )
 ```
+
+[:material-file-code-outline: `start_workflow.py`](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/start_workflow.py)
 
 You can then use `changed_model` for inference or further evaluation.
 
@@ -141,5 +143,5 @@ trainer.rewrite_base_model(
 
 - [Tutorial: Evaluation (intra-model)](evaluation-intra-model.md) — Encoder and decoder evaluation, including decoder config selection.
 - [Tutorial: Evaluation (inter-model)](evaluation-inter-model.md) — Comparing runs (e.g. top-k overlap, heatmaps).
-- [Core classes and use cases](../guides/core-classes.md) — `ModelWithGradiend` and rewrite APIs.
-- [API reference](../api/index.md) — `TextPredictionTrainer`, `ModelWithGradiend`.
+- [Core classes and use cases](../guides/core-classes.md) — [`ModelWithGradiend`][gradiend.model.model_with_gradiend.ModelWithGradiend] and rewrite APIs.
+- [API reference](../api/index.md) — [`TextPredictionTrainer`][gradiend.trainer.text.prediction.trainer.TextPredictionTrainer], [`ModelWithGradiend`][gradiend.model.model_with_gradiend.ModelWithGradiend].

@@ -2,13 +2,13 @@
 
 ## Which modalities are supported?
 
-Currently **only gradients based on text prediction (MLM/CLM)** are supported. All documentation and examples use `TextPredictionTrainer`. Other modalities may be added in the future.
+Currently **only gradients based on text prediction (MLM/CLM)** are supported. All documentation and examples use [`TextPredictionTrainer`][gradiend.trainer.text.prediction.trainer.TextPredictionTrainer]. Other modalities may be added in the future.
 
 ## My model does not converge (bad correlations). What parameters should I tweak?
 
 You should check the training log and inspect the mean probabilities per label class. 
 
-- **Mean Encoded values of the two target classes are similar and close to +1 or -1**: The encoder is not separating the classes (likely only separates target classes from neutral inputs). Try a smaller *learning rate* and/or different seeds (increase `TrainingArguments.max_seeds`). 
+- **Mean Encoded values of the two target classes are similar and close to +1 or -1**: The encoder is not separating the classes (likely only separates target classes from neutral inputs). Try a smaller *learning rate* and/or different seeds (increase [`TrainingArguments`][gradiend.trainer.core.arguments.TrainingArguments].max_seeds). 
 - **Mean Encoded values of the two target classes are near zero and barely moving during training:** Add more data (increase `train_max_size`), increase training length (`max_steps` or `num_train_epochs`), and/or use a larger *learning rate*.
 - **Mean Encoded values do not change during training even with larger learning rate:** Likely only zero gradients are computed based on the provided data. Probably your mask identifier (default `[MASK]`) is different in your data? Or the mask occurs outside the model's context (too long texts)?
 
@@ -16,12 +16,11 @@ You should check the training log and inspect the mean probabilities per label c
 
 - **Source** — Using `source="alternative"` typically yields simpler conversion than `source='factual'`.
 - **Data balance and size** — Ensure both classes in your pair have enough examples; use `train_max_size` per class if needed. See [Data handling](guides/data-handling.md) for balancing.
-- **Encoder evaluation** — Run `trainer.evaluate_encoder(return_df=True, plot=True)` and check convergence plots for debugging; use `trainer.plot_training_convergence()` to see correlation over steps.
+- **Encoder evaluation** — Run [`trainer.evaluate_encoder(return_df=True, plot=True)`][gradiend.trainer.trainer.Trainer.evaluate_encoder] and check convergence plots for debugging; use [`trainer.plot_training_convergence()`][gradiend.trainer.trainer.Trainer.plot_training_convergence] to see correlation over steps.
 - **Data Quality** — Check the quality of your data and labels (spaCy misclassifies, etc.).
 - **Pruning** — try first to train the full (un-pruned) model to check if pre-pruning may accidently removes actually important weigths that are required for convergence
 
-See [TrainingArguments](api/training/TrainingArguments.md) and the [start here](start.md) / [detailed workflow](tutorials/detailed-workflow.md) tutorials for all training options.
-
+See [`TrainingArguments`][gradiend.trainer.core.arguments.TrainingArguments] and the [start here](start.md) / [detailed workflow](tutorials/detailed-workflow.md) tutorials for all training options.
 
 ## I get a CUDA out of memory error. How can I reduce memory usage?
 
@@ -33,8 +32,7 @@ To reduce memory usage, you can:
 - Reduce the batch size (`train_batch_size`) and/or sequence length of your data.
 - Use mixed precision training (`TrainingArguments.torch_dtype = torch.bfloat16`), which typically reduces memory usage by about half with minimal impact on convergence. Note: this requires a compatible GPU (e.g. NVIDIA Ampere or later for bfloat16).
 - Use multiple GPUs: device placement is automatic based on GPU count. See [Device placement](guides/training-arguments.md#device-placement) in the training arguments guide.
-- Consider fewer base model parameters for GRADIEND training (e.g., only paramerters in the last few layers) by using `TrainingArguments.params`, see [TrainingArguments](guides/training-arguments.md#model-parameters-which-layers-to-use)) for details.
-
+- Consider fewer base model parameters for GRADIEND training (e.g., only paramerters in the last few layers) by using [`TrainingArguments`][gradiend.trainer.core.arguments.TrainingArguments].params, see [TrainingArguments](guides/training-arguments.md#model-parameters-which-layers-to-use)) for details.
 
 ## Is neutral data (`eval_neutral_data`) required?
 
@@ -43,8 +41,7 @@ No. **`eval_neutral_data` is optional.** When omitted:
 - **Encoder evaluation** still runs; it simply has no `neutral_dataset` variant (only training and optionally `neutral_training_masked`).
 - **Decoder evaluation** uses a fallback: training-like data (test split with masks filled by the factual token). Target tokens are automatically ignored in LMS (language modeling score) to avoid distorting perplexity.
 
-For best practice, provide true neutral data (e.g. `TextPredictionDataCreator.generate_neutral_data()` or datasets like `aieng-lab/wortschatz-leipzig-de-grammar-neutral`) when available. See [Data handling](guides/data-handling.md#optional-neutral-evaluation-data-eval_neutral_data) and [Evaluation (intra-model)](tutorials/evaluation-intra-model.md#neutral-data-for-decoder-evaluation-lms).
-
+For best practice, provide true neutral data (e.g. [`TextPredictionDataCreator`][gradiend.data.text.prediction.creator.TextPredictionDataCreator].generate_neutral_data() or datasets like `aieng-lab/wortschatz-leipzig-de-grammar-neutral`) when available. See [Data handling](guides/data-handling.md#optional-neutral-evaluation-data-eval_neutral_data) and [Evaluation (intra-model)](tutorials/evaluation-intra-model.md#neutral-data-for-decoder-evaluation-lms).
 
 ## I have a different issue
 

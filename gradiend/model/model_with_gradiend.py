@@ -2,6 +2,7 @@
 ModelWithGradiend: Abstract base class for combining a base model with a GRADIEND model.
 
 Generic interface across modalities (text, vision, ...). Owns:
+
 - base_model (frozen or trainable; modality-specific)
 - gradiend (encoder/decoder over gradients)
 - interpretation metadata (source/target)
@@ -43,8 +44,10 @@ def effective_rewrite_learning_rate(learning_rate: float, source: str) -> float:
     Learning rate applied in :meth:`ModelWithGradiend.rewrite_base_model`.
 
     CONTRACT (do not change without explicit design review):
+
     - Return the nominal ``learning_rate`` unchanged for every ``source``.
     - Rewrite orientation is **only** controlled by ``feature_factor`` passed to the decoder,
+
       not by negating LR for ``source="alternative"`` or any other source.
     """
     validate_source_target("source", source)
@@ -241,17 +244,21 @@ class ModelWithGradiend(nn.Module, ABC):
     Abstract base class that combines a base model (neural network) with a GRADIEND model.
 
     The GRADIEND model holds encoder/decoder weights. This adapter:
+
     - interprets GRADIEND IO (source/target),
     - defines how gradients are created (create_gradients),
     - provides encode() and rewrite_base_model(),
     - persists adapter-level config next to the GRADIEND checkpoint.
 
     Important refactor invariant:
+
     - self.gradiend.param_map is a dict mapping each base parameter name to a param-spec:
+
         {"shape": tuple[int,...], "repr": "all"|"mask"|"indices", ("mask": BoolTensor), ("indices": LongTensor)}
       Construction-time normalization happens here (adapter), since shapes come from base_model.
 
     Subclasses must implement:
+
     - create_gradients(...)
     - _save_model(...)
     - _load_model(...)
@@ -501,6 +508,7 @@ class ModelWithGradiend(nn.Module, ABC):
 
         Args:
             part: Which component to use for importance aggregation:
+
                 - "encoder-weight": L1 over encoder weight columns
                 - "decoder-weight": L1 over decoder weight rows
                 - "decoder-bias": absolute decoder bias
@@ -652,6 +660,7 @@ class ModelWithGradiend(nn.Module, ABC):
         Create GRADIEND input gradients for a modality-specific example.
 
         Expected to run the base model forward/backward and return either:
+
         - a 1D tensor in GRADIEND input space, or
         - a dict of per-parameter gradient tensors compatible with the GRADIEND param_map.
 
@@ -667,6 +676,7 @@ class ModelWithGradiend(nn.Module, ABC):
         Encode input to latent space.
 
         Supports:
+
         - raw modality input (e.g. str) -> create_gradients -> encode
         - already-created gradient tensor in GRADIEND input space
         """
@@ -699,6 +709,7 @@ class ModelWithGradiend(nn.Module, ABC):
         ``learning_rate`` is never negated by ``source``; see ``effective_rewrite_learning_rate``.
 
         part:
+
         - 'decoder'        : uses decoder(feature_factor)
         - 'decoder-weight' : uses weight vector of decoder
         - 'decoder-bias'   : uses decoder bias vector
@@ -839,9 +850,12 @@ class ModelWithGradiend(nn.Module, ABC):
         is flipped as well:
 
         - **Training normalization** (``NormalizationCallback``): ``update_direction=False``.
+
           Only weights are flipped so correlation becomes positive; semantic class→sign
           metadata in ``feature_class_encoding_direction`` stays fixed. Do **not** set True here.
+
         - **Manual / user-driven correction**: ``update_direction=True`` so metadata stays
+
           consistent with weights.
 
         Decoder rewrite orientation is still set via ``feature_factor`` at eval time, not by
@@ -873,6 +887,7 @@ class ModelWithGradiend(nn.Module, ABC):
         Save base model artifacts + GRADIEND metadata and weights.
 
         Writes:
+
         - gradiend_context.json (source/target and optional feature_class_encoding_direction)
         - subclass hook _save_model(...)
         - gradiend.save_pretrained(...)

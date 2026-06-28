@@ -500,15 +500,18 @@ def plot_training_convergence(
     Plot training convergence: up to three subplots (mean_by_class, mean_by_feature_class, correlation).
 
     Data source: exactly one of trainer, model_path, or training_stats.
+
     - trainer: uses trainer.get_training_stats() (or in-memory stats if available).
     - model_path: uses load_training_stats(model_path).
     - training_stats: dict with keys training_stats, best_score_checkpoint (or raw training_stats dict).
 
     Three plot options, each in its own subplot when enabled:
+
     - plot_mean_by_class: mean encoded value per label over steps.
     - plot_mean_by_feature_class: mean encoded value per feature class over steps.
     - plot_correlation: correlation over steps. Best checkpoint step is marked in each subplot.
     - class_spread: shade encoded value spread per class behind each mean line
+
       (``"minmax"`` = min-max, ``"iqr"`` = Q1-Q3, ``"ci95"`` = 95% confidence interval).
 
     Args:

@@ -437,6 +437,7 @@ def has_saved_model(output_dir: str) -> bool:
     Return True if output_dir contains a complete saved GRADIEND model (skip training when use_cache).
 
     Requires:
+
     - Weights: model.safetensors or pytorch_model.bin
     - config.json with GRADIEND architecture metadata
     """

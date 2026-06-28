@@ -161,8 +161,10 @@ def apply_class_merge_to_merged_df(
     """Map label_class and target_class to merged group IDs; optionally limit base transitions.
 
     - Optionally filter base-class transitions using transition_groups (clusters of raw
+
       class ids). Only rows where BOTH raw classes lie in the same cluster (and differ)
       are kept (e.g. [["1SG","1PL"], ["3SG","3PL"]] keeps 1SG↔1PL and 3SG↔3PL).
+
     - Then map to merged ids via merge_map and drop same-group transitions.
 
     Use before merged_to_unified when data has base class IDs and class_merge_map

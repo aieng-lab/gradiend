@@ -126,6 +126,7 @@ def annotate_text_probability_rows(
     Return per-row target-token and class probabilities for text prediction data.
 
     The resulting DataFrame contains columns:
+
     - ``{prefix}p_target_{safe_token}``
     - ``{prefix}p_class_{class_name}``
     """

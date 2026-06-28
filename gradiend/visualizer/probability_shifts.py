@@ -123,8 +123,10 @@ def plot_probability_shifts(
     Base model (lr=0) is prepended to each line; x-tick at lr=0 is labeled "base".
 
     Subplots:
+
     - LMS: Language Modeling Score (one line)
     - One per dataset: P(class) on that dataset. The metric used to select the learning rate is
+
       highlighted (thicker curve, labeled "selection") and the selected (lr, value) is marked with a star.
 
     Args:

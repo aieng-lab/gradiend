@@ -208,6 +208,7 @@ class Evaluator:
 
         Returns:
             Dict with:
+
             - encoder: Result dict from evaluate_encoder.
             - decoder: Result dict from evaluate_decoder.
         """

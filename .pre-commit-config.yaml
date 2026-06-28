@@ -1,0 +1,12 @@
+# Install: pip install pre-commit && pre-commit install
+# Run all hooks: pre-commit run --all-files
+
+repos:
+  - repo: local
+    hooks:
+      - id: fix-docstring-markdown-lists
+        name: docstring Markdown list spacing
+        entry: python scripts/fix_docstring_markdown_lists.py --check
+        language: system
+        files: ^gradiend/.*\.py$
+        pass_filenames: false

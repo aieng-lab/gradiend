@@ -4,11 +4,13 @@ GRADIEND Training Module
 This module provides classes and utilities for training GRADIEND models.
 
 Main API:
+
     - Trainer: HF-like trainer with model at creation time and lazy Evaluator
     - TrainingArguments: Configuration for training
     - load_training_stats: Load correlation, config, best checkpoint from a saved model dir
 
 Core components:
+
     - train (train_core): Core training loop
     - TextGradientTrainingDataset: Dataset for training
     - create_model_with_gradiend: Factory for model creation

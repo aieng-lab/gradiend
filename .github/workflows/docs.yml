@@ -30,8 +30,14 @@ jobs:
           pip install -e ".[dev]"
           pip install mkdocs mkdocs-material
 
+      - name: Check API autoref links
+        run: python scripts/link_api_symbols.py --check
+
+      - name: Check docstring Markdown list spacing
+        run: python scripts/fix_docstring_markdown_lists.py --check
+
       - name: Build site
-        run: mkdocs build
+        run: python scripts/build_docs.py build
 
       # Requires: repo Settings → Pages → Source = "GitHub Actions" (enable once)
       - uses: actions/configure-pages@v5

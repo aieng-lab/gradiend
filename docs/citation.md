@@ -15,7 +15,6 @@ If you use GRADIEND in your research, please cite the following paper:
 }
 ```
 
-
 - The method: **[GRADIEND: Feature Learning within Neural Networks Exemplified through Biases](https://arxiv.org/abs/2502.01406)**
 ```bibtex
 @misc{drechsel2025gradiend,

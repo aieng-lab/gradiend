@@ -5,18 +5,26 @@ GRADIEND is a method for learning features within neural networks
 by training an encoder-decoder architecture on gradients.
 
 Public API (from gradiend):
+
     - Model: GradiendModel, ParamMappedGradiendModel, ModelWithGradiend
     - Data: TextFilterConfig, TextPredictionDataCreator, DataCreator, TextPreprocessConfig,
+
       SpacyTagSpec, preprocess_texts, resolve_base_data
+
     - Trainer: TextPredictionTrainer, TextPredictionConfig, TrainingArguments,
+
       load_training_stats, GradientTrainingDataset, TextGradientTrainingDataset,
       create_model_with_gradiend
+
     - Comparison: compute_similarity_matrix, compute_cross_encoding_matrix,
+
       compute_anchor_aligned_encoding_matrix, compute_gradiend_feature_cross_encoding_matrix,
       compute_gradiend_transition_cross_encoding_matrix
+
     - Logging: setup_logging, get_logger
 
 Sub-packages (use when you need modality-specific or internal APIs):
+
     - gradiend.trainer: Trainer, PrePruneConfig, PostPruneConfig, callbacks, etc.
     - gradiend.trainer.text: TextModelWithGradiend, TextBatchedDataset, etc.
     - gradiend.evaluator: EncoderEvaluator, DecoderEvaluator, Evaluator

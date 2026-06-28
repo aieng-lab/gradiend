@@ -2,6 +2,7 @@
 German gender/case – detailed workflow using more API features.
 
 Demonstrates:
+
 - Pre-pruning (1% top weights) and post-pruning (5% top weights) via TrainingArguments
 - Encoder plot with renamed class labels (legend_name_mapping)
 - Pairwise top-k overlap heatmap and training convergence (live + static)

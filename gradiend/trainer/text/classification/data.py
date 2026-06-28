@@ -80,6 +80,7 @@ def build_classification_training_df(
     Build unified DataFrame with unified text, task-label, and semantic-class columns.
 
     **Auto-detection:** Only factual text and label are required (config.text_col, config.label_col).
+
     - If text_alternative_col is missing in df → use text_col (same text).
     - If label_alternative_col is missing → derive: binary = other class; multi = sample from others.
 
@@ -178,8 +179,10 @@ def build_classification_head_df_from_pairs(
     label (e.g. case #3: different texts, same label).
 
     Each row yields two (text, label) pairs:
+
     - (text_factual, factual_label)
     - (text_alternative, other_label)  where other_label is the other class in
+
       target_classes (or "not-{factual}" if only one target and we need a second).
 
     Preserves split so the result has train/validation/test for head training and eval.

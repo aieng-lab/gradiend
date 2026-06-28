@@ -8,9 +8,9 @@ This guide explains the most important classes in GRADIEND and when to use them.
 
 The typical GRADIEND workflow involves three main components:
 
-1. **Data creation** → `TextPredictionDataCreator` and `TextFilterConfig`
-2. **Training** → `TextPredictionTrainer` and `TrainingArguments`
-3. **Evaluation** → `Evaluator`, `EncoderEvaluator`, `DecoderEvaluator`
+1. **Data creation** → [`TextPredictionDataCreator`][gradiend.data.text.prediction.creator.TextPredictionDataCreator] and [`TextFilterConfig`][gradiend.data.text.filter_config.TextFilterConfig]
+2. **Training** → [`TextPredictionTrainer`][gradiend.trainer.text.prediction.trainer.TextPredictionTrainer] and [`TrainingArguments`][gradiend.trainer.core.arguments.TrainingArguments]
+3. **Evaluation** → [`Evaluator`][gradiend.evaluator.evaluator.Evaluator], [`EncoderEvaluator`][gradiend.evaluator.encoder.EncoderEvaluator], [`DecoderEvaluator`][gradiend.evaluator.decoder.DecoderEvaluator]
 
 Below, we explain each component and the key classes within them.
 
@@ -18,7 +18,7 @@ Below, we explain each component and the key classes within them.
 
 ## Data creation
 
-### `TextPredictionDataCreator`
+### [`TextPredictionDataCreator`][gradiend.data.text.prediction.creator.TextPredictionDataCreator]
 
 **Purpose:** Build training and neutral datasets from raw text or existing data sources.
 
@@ -46,11 +46,13 @@ training = creator.generate_training_data(max_size_per_class=10)
 neutral = creator.generate_neutral_data(max_size=15)
 ```
 
+[:material-file-code-outline: `start_workflow.py`](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/start_workflow.py)
+
 **See also:** [Data generation tutorial](../tutorials/data-generation.md), [Data handling guide](data-handling.md)
 
 ---
 
-### `TextFilterConfig`
+### [`TextFilterConfig`][gradiend.data.text.filter_config.TextFilterConfig]
 
 **Purpose:** Define a feature class by specifying target tokens and optional linguistic constraints.
 
@@ -85,7 +87,7 @@ config = TextFilterConfig(
 
 ## Training
 
-### `TextPredictionTrainer`
+### [`TextPredictionTrainer`][gradiend.trainer.text.prediction.trainer.TextPredictionTrainer]
 
 **Purpose:** Train a GRADIEND model to learn a feature from gradient differences.
 
@@ -96,10 +98,10 @@ config = TextFilterConfig(
 
 **Key methods:**
 - `train()` — Start training
-- `evaluate_encoder()` — Evaluate encoder correlation and separation
-- `evaluate_decoder()` — Evaluate decoder's ability to modify the base model. By default computes **strengthen** summaries only (keys e.g. `"3SG"`). Use **increase_target_probabilities=False** to compute **weaken** summaries only (keys e.g. `"3SG_weaken"`); only the dataset–feature-factor combinations required for the chosen direction are evaluated.
+- [`evaluate_encoder()`][gradiend.trainer.trainer.Trainer.evaluate_encoder] — Evaluate encoder correlation and separation
+- `evaluate_decoder()` — Evaluate decoder's ability to modify the base model. By default computes **strengthen** summaries only (keys e.g. `"3SG"`). Use **increase_target_probabilities=False** to compute **weaken** summaries only (keys e.g. `"3SG_weaken"`); only the dataset–feature-factor combinations required for the chosen direction are evaluated. Decoder evaluation uses **decoder eval targets** (tokens whose probabilities are tracked per class); see [`TextPredictionConfig`][gradiend.trainer.text.prediction.trainer.TextPredictionConfig].decoder_eval_targets below for configuration and inference rules.
 - `rewrite_base_model()` — Rewrite base model(s) using decoder evaluation results for given **target_class**(s), optionally save to disk. By default **strengthens** the target class; set **increase_target_probabilities=False** to apply weakening config (requires having run **evaluate_decoder(increase_target_probabilities=False)** so that `dec["<class>_weaken"]` exists).
-- `plot_training_convergence()` — Visualize training progress
+- [`plot_training_convergence()`][gradiend.visualizer.convergence.plot_training_convergence] — Visualize training progress
 
 **Example:**
 ```python
@@ -129,7 +131,7 @@ changed_model = trainer.rewrite_base_model(decoder_results=dec_result, target_cl
 
 ---
 
-### `TrainingArguments`
+### [`TrainingArguments`][gradiend.trainer.core.arguments.TrainingArguments]
 
 **Purpose:** Configure training hyperparameters and experiment settings.
 
@@ -165,9 +167,9 @@ args = TrainingArguments(
 
 ---
 
-### `TextPredictionConfig`
+### [`TextPredictionConfig`][gradiend.trainer.text.prediction.trainer.TextPredictionConfig]
 
-**Purpose:** Configure data loading and preprocessing for `TextPredictionTrainer`.
+**Purpose:** Configure data loading and preprocessing for [`TextPredictionTrainer`][gradiend.trainer.text.prediction.trainer.TextPredictionTrainer].
 
 **When to use:**
 - Loading data from HuggingFace datasets
@@ -181,6 +183,8 @@ args = TrainingArguments(
 - `class_merge_map` — Map base classes to merged classes (e.g. `{"singular": ["1SG", "3SG"], "plural": ["1PL", "3PL"]}`); when set, `target_classes` uses merged names; when exactly two keys, `target_classes` can be omitted
 - `masked_col`, `split_col` — Column names
 - `eval_neutral_data` — **Optional.** Neutral evaluation data (DataFrame, path, or HuggingFace dataset ID). Used for encoder (`neutral_dataset` variant) and decoder evaluation (LMS). When omitted, decoder evaluation falls back to training-like data (test split with factual masks filled in); target tokens are then ignored in LMS. See [Evaluation (intra-model)](../tutorials/evaluation-intra-model.md#neutral-data-for-decoder-evaluation-lms).
+- `decoder_eval_targets` — **Optional.** Decoder evaluation targets. **(1) Omitted (None):** GRADIEND infers targets from unified data (factual + alternative tokens per class). If inferred targets **overlap** across classes, evaluation automatically uses **row-wise mode** (P(factual) vs P(alternative) per row) and an info message is logged. **(2) `"label"`:** Row-wise evaluation: for each row, P(dataset class) = P(factual token), P(other class) = P(alternative token). Use this when you want true per-row semantics (e.g. commutative data with shared operators). **(3) Class-based dict** — `{class_name: [token1, ...]}`: static tokens per class; keys must be known classes. See [Decoder eval targets](decoder-eval-targets.md).
+- `decoder_eval_export_row_wise_csv` — **Optional.** If `True` and row-wise decoder eval is used, export per-row scores to `experiment_dir/decoder_row_wise_scores.csv` (columns: masked, factual, alternative, factual_id, alternative_id, dataset_class, other_class, P_factual, P_alternative). Default `False`.
 
 **Example:**
 ```python
@@ -201,7 +205,7 @@ config = TextPredictionConfig(
 
 ## Model classes
 
-### `GradiendModel`
+### [`GradiendModel`][gradiend.model.model.GradiendModel]
 
 **Purpose:** The core encoder-decoder model (weights-only, no base model context).
 
@@ -216,13 +220,13 @@ config = TextPredictionConfig(
 - `save_pretrained()` — Save model weights and config
 - `from_pretrained()` — Load a saved model
 
-**Note:** Most users should use `ModelWithGradiend` or `TextPredictionTrainer` instead, which handle the base model integration.
+**Note:** Most users should use [`ModelWithGradiend`][gradiend.model.model_with_gradiend.ModelWithGradiend] or [`TextPredictionTrainer`][gradiend.trainer.text.prediction.trainer.TextPredictionTrainer] instead, which handle the base model integration.
 
 **See also:** [API reference](../api/index.md)
 
 ---
 
-### `ParamMappedGradiendModel`
+### [`ParamMappedGradiendModel`][gradiend.model.param_mapped.ParamMappedGradiendModel]
 
 **Purpose:** GRADIEND model with parameter mapping for base-model gradients.
 
@@ -231,13 +235,13 @@ config = TextPredictionConfig(
 - Need to map between GRADIEND's parameter space and base model parameters
 - Advanced use cases requiring direct gradient manipulation
 
-**Key difference from `GradiendModel`:** Handles parameter name mapping, enabling gradient I/O as dictionaries.
+**Key difference from [`GradiendModel`][gradiend.model.model.GradiendModel]:** Handles parameter name mapping, enabling gradient I/O as dictionaries.
 
 **See also:** [API reference](../api/index.md)
 
 ---
 
-### `ModelWithGradiend`
+### [`ModelWithGradiend`][gradiend.model.model_with_gradiend.ModelWithGradiend]
 
 **Purpose:** Wrapper combining a base language model with a GRADIEND encoder-decoder.
 
@@ -277,7 +281,7 @@ modified_model = model.rewrite_base_model(
 
 ## Evaluation
 
-### `Evaluator`
+### [`Evaluator`][gradiend.evaluator.evaluator.Evaluator]
 
 **Purpose:** High-level evaluation coordinator bound to a trainer.
 
@@ -287,17 +291,17 @@ modified_model = model.rewrite_base_model(
 - Default evaluation workflow
 
 **Key methods:**
-- `evaluate_encoder()` — Run encoder evaluation (correlation, plots)
+- [`evaluate_encoder()`][gradiend.trainer.trainer.Trainer.evaluate_encoder] — Run encoder evaluation (correlation, plots)
 - `evaluate_decoder()` — Run decoder evaluation (probability shifts)
-- Delegates plotting to `Visualizer` if configured
+- Delegates plotting to [`Visualizer`][gradiend.visualizer.visualizer.Visualizer] if configured
 
-**Note:** `TextPredictionTrainer` already has an `Evaluator` instance, so you typically call `trainer.evaluate_encoder()` directly.
+**Note:** [`TextPredictionTrainer`][gradiend.trainer.text.prediction.trainer.TextPredictionTrainer] already has an [`Evaluator`][gradiend.evaluator.evaluator.Evaluator] instance, so you typically call [`trainer.evaluate_encoder()`][gradiend.trainer.trainer.Trainer.evaluate_encoder] directly.
 
 **See also:** [API reference](../api/index.md), [Evaluation tutorial](../tutorials/evaluation-intra-model.md)
 
 ---
 
-### `EncoderEvaluator`
+### [`EncoderEvaluator`][gradiend.evaluator.encoder.EncoderEvaluator]
 
 **Purpose:** Evaluate how well the encoder separates feature classes.
 
@@ -315,7 +319,7 @@ modified_model = model.rewrite_base_model(
 
 ---
 
-### `DecoderEvaluator`
+### [`DecoderEvaluator`][gradiend.evaluator.decoder.DecoderEvaluator]
 
 **Purpose:** Evaluate how well the decoder can modify the base model.
 
@@ -335,7 +339,7 @@ modified_model = model.rewrite_base_model(
 
 ## Utility classes
 
-### `TextPreprocessConfig`
+### [`TextPreprocessConfig`][gradiend.data.text.preprocess.TextPreprocessConfig]
 
 **Purpose:** Configure text preprocessing for data creation: split into sentences, filter by length or characters.
 
@@ -345,19 +349,19 @@ modified_model = model.rewrite_base_model(
 - Excluding segments containing certain characters (`exclude_chars`) or via a custom filter
 
 **Key attributes:**
-- `split_to_sentences` — If `True`, split on sentences (regex or spaCy). Default `False`.
+- `split_to_sentences` — If `True`/`1`, split on sentences (regex or spaCy). If an integer greater than 1, create non-overlapping sentence windows of that size, e.g. `2` yields sentence pairs. Default `False`.
 - `min_chars` — Drop segments shorter than this. Default `None` (no minimum).
 - `max_chars` — Drop segments longer than this. Default `None` (no maximum).
 - `exclude_chars` — Drop segments containing any of these characters. Default `None`.
 - `custom_filter` — Optional callable `(str) -> bool`; keep only segments where it returns `True`.
 
-**Default:** There is no default instance. In `TextPredictionDataCreator`, `preprocess=None` (default) means no preprocessing: texts are used as-is. Pass a `TextPreprocessConfig` instance when you want sentence splitting or length/char filtering.
+**Default:** There is no default instance. In [`TextPredictionDataCreator`][gradiend.data.text.prediction.creator.TextPredictionDataCreator], `preprocess=None` (default) means no preprocessing: texts are used as-is. Pass a [`TextPreprocessConfig`][gradiend.data.text.preprocess.TextPreprocessConfig] instance when you want sentence splitting or length/char filtering.
 
-**See also:** [Data generation tutorial](../tutorials/data-generation.md), [API: TextPreprocessConfig](../api/data/TextPreprocessConfig.md).
+**See also:** [Data generation tutorial](../tutorials/data-generation.md), [`TextPreprocessConfig`][gradiend.data.text.preprocess.TextPreprocessConfig].
 
 ---
 
-### `PrePruneConfig` / `PostPruneConfig`
+### [`PrePruneConfig`][gradiend.trainer.core.pruning.PrePruneConfig] / [`PostPruneConfig`][gradiend.trainer.core.pruning.PostPruneConfig]
 
 **Purpose:** Configure pruning to reduce model size and focus on important parameters.
 
@@ -381,14 +385,14 @@ modified_model = model.rewrite_base_model(
 
 | Task | Primary class | Secondary classes |
 |------|---------------|-------------------|
-| **Create training data from text** | `TextPredictionDataCreator` | `TextFilterConfig`, `TextPreprocessConfig` |
-| **Load precomputed data** | `TextPredictionTrainer` (via `data` parameter) | `TextPredictionConfig` |
-| **Train a GRADIEND model** | `TextPredictionTrainer` | `TrainingArguments`, `TextPredictionConfig` |
-| **Evaluate encoder** | `TextPredictionTrainer.evaluate_encoder()` | `EncoderEvaluator` |
-| **Evaluate decoder** | `TextPredictionTrainer.evaluate_decoder()` | `DecoderEvaluator` |
-| **Load a trained model** | `ModelWithGradiend.from_pretrained()` | `GradiendModel.from_pretrained()` |
-| **Rewrite a model** | `ModelWithGradiend.rewrite_base_model()` | `TextPredictionTrainer.rewrite_base_model()` |
-| **Configure pruning** | `PrePruneConfig`, `PostPruneConfig` | Used via `TrainingArguments` |
+| **Create training data from text** | [`TextPredictionDataCreator`][gradiend.data.text.prediction.creator.TextPredictionDataCreator] | [`TextFilterConfig`][gradiend.data.text.filter_config.TextFilterConfig], [`TextPreprocessConfig`][gradiend.data.text.preprocess.TextPreprocessConfig] |
+| **Load precomputed data** | [`TextPredictionTrainer`][gradiend.trainer.text.prediction.trainer.TextPredictionTrainer] (via `data` parameter) | [`TextPredictionConfig`][gradiend.trainer.text.prediction.trainer.TextPredictionConfig] |
+| **Train a GRADIEND model** | [`TextPredictionTrainer`][gradiend.trainer.text.prediction.trainer.TextPredictionTrainer] | [`TrainingArguments`][gradiend.trainer.core.arguments.TrainingArguments], [`TextPredictionConfig`][gradiend.trainer.text.prediction.trainer.TextPredictionConfig] |
+| **Evaluate encoder** | [`TextPredictionTrainer`][gradiend.trainer.text.prediction.trainer.TextPredictionTrainer].evaluate_encoder() | [`EncoderEvaluator`][gradiend.evaluator.encoder.EncoderEvaluator] |
+| **Evaluate decoder** | [`TextPredictionTrainer`][gradiend.trainer.text.prediction.trainer.TextPredictionTrainer].evaluate_decoder() | [`DecoderEvaluator`][gradiend.evaluator.decoder.DecoderEvaluator] |
+| **Load a trained model** | [`ModelWithGradiend`][gradiend.model.model_with_gradiend.ModelWithGradiend].from_pretrained() | [`GradiendModel`][gradiend.model.model.GradiendModel].from_pretrained() |
+| **Rewrite a model** | [`ModelWithGradiend`][gradiend.model.model_with_gradiend.ModelWithGradiend].rewrite_base_model() | [`TextPredictionTrainer`][gradiend.trainer.text.prediction.trainer.TextPredictionTrainer].rewrite_base_model() |
+| **Configure pruning** | [`PrePruneConfig`][gradiend.trainer.core.pruning.PrePruneConfig], [`PostPruneConfig`][gradiend.trainer.core.pruning.PostPruneConfig] | Used via [`TrainingArguments`][gradiend.trainer.core.arguments.TrainingArguments] |
 
 ---
 

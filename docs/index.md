@@ -13,14 +13,13 @@ GRADIEND works by:
 
 The method is described in detail in the paper: **[GRADIEND: Feature Learning within Neural Networks Exemplified through Biases](https://arxiv.org/abs/2502.01406)** (ICLR 2026, Drechsel & Herbold, 2025).
 
-> While GRADIEND is methodologically defined to work with any *gradient-learned* and *weight-based* model, this library currently only supports *text prediction* models (specifically `transformers.AutoModelForMaskedLM` and `transformers.AutoModelForCausalLM`).
-> However, the library is designed to be modular and we plan to support more models in the future (e.g., text classification, vision, ...).
+> While GRADIEND is methodologically defined to work with any *gradient-learned* and *weight-based* model, this library currently documents and supports **text prediction** as the primary workflow. Preliminary TextClassification code exists, but it is experimental in this release and not recommended as the starting point for new users.
 
 Example use cases ([gradiend/examples](https://github.com/aieng-lab/gradiend/tree/main/gradiend/examples) on GitHub):
 - **[English pronouns](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/train_english_pronouns.ipynb)** — notebook; [script](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/train_english_pronouns.py)
-- **[English gender](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/train_gender_en.py)**
 - **[German gender–case](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/train_gender_de_detailed.py)**
 - **[Sentiment](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/train_sentiment.py)**
+- **[Multi-seed stability](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/train_multi_seed_stability.py)**
 
 **Links:** [GitHub](https://github.com/aieng-lab/gradiend) · [PyPI](https://pypi.org/project/gradiend/) · [arXiv (main paper)](https://arxiv.org/abs/2502.01406) · [arXiv (German articles)](https://arxiv.org/abs/2601.09313)
 
@@ -57,6 +56,13 @@ When you need to understand a topic or look up options:
 - **[Evaluation & visualization](guides/evaluation-visualization.md)** — Encoder and decoder evaluation, convergence and top-k plots, and how to customize plots.
 - **[Saving & loading](guides/saving-loading.md)** — Where results are stored and how to reload a trained model.
 - **[Training arguments](guides/training-arguments.md)** — Full parameter reference, including multi-seed training and seed report format.
+- **[Token prediction methods](guides/token-prediction-methods.md)** — Differences between masked-token, decoder-only, and seq2seq objectives.
+- **[Data splits](guides/data-splits.md)** — Row-level vs vocabulary-held-out splitting.
+- **[Cross-model comparison](guides/cross-model-comparison.md)** — Compare runs, features, and convergent seeds.
+- **[Oriented cross-encoding matrix](guides/cross-encoding-matrix.md)** — Dense cross-task matrices, pre-anchor vs anchor-aligned plots, multilingual demo outputs.
+- **[Multi-seed analysis](guides/multi-seed.md)** — Evaluate and plot across convergent seed checkpoints.
+- **[Trainer suites](guides/trainer-suites.md)** — Orchestrate many related feature-pair runs (`TrainerSuite`, `TrainerCollection`).
+- **[Decoder evaluation targets](guides/decoder-eval-targets.md)** — Row-wise vs class-based decoder scoring.
 - **[Decoder-only models](guides/decoder-only.md)** — Use causal (decoder-only) LMs with the same API; optional MLM head for better mask gradients.
 
 ---

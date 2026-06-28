@@ -630,18 +630,27 @@ def get_model_metrics(
 		neutral_boundary: Center point for neutral labels (defaults to 0.0).
 
 	Returns:
+
 		- Single path: dict with keys:
 		  - n_samples: total number of rows in the CSV.
 		  - sample_counts: breakdown by "type" and (when available) by feature class.
 		  - all_data: metrics over all rows; contains "correlation" (Pearson) and "accuracy"
+
 		    using ternary classification with neg/pos boundaries.
+
 		  - training_only: metrics over training-like data (excludes type neutral, includes identity transitions
+
 		    with label 0). Uses ternary classification (-1, 0, 1) with neg/pos boundaries.
+
 		  - target_classes_only: metrics over target class transitions only (excludes type neutral and label 0).
+
 		    Uses binary classification (pred ≥ neutral_boundary → 1, else -1).
+
 		  - per-dimension entries: when encodings are multi-dimensional, integer keys
+
 		    0, 1, ... each mapping to a dict with "all_data", "training_only", and
 		    "target_classes_only" metrics.
+
 		- Multiple paths: dict mapping path -> metrics dict (same schema as above).
 	"""
 	csv_path = encoded_values_csv_path

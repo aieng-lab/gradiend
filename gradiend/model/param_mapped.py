@@ -5,6 +5,7 @@ This module defines ParamMappedGradiendModel, which extends GradiendModel with
 param_map metadata, gradient IO helpers, and mapping-aware pruning.
 
 Mapping design:
+
 - The mapping is reconstructible from config alone (no base-model access).
 - Each parameter stores its shape and selection representation.
 - Supported per-parameter representations:
@@ -14,10 +15,12 @@ Mapping design:
   - "mixed": per-parameter choice across the above, stored in one or two mapping files
 
 Storage efficiency:
+
 - For large parameters with tiny selection, indices are far smaller than bool masks.
 - The chosen representation is decided at save time based on estimated size.
 
 File layout (save_pretrained):
+
 - model.safetensors (preferred if safetensors library is installed) or pytorch_model.bin   [weights]
 - config.json                                                  [architecture + mapping + metadata; format_version=0]
 - mapping_indices.safetensors or mapping_indices.pth           [optional]
@@ -156,29 +159,35 @@ class ParamMappedGradiendModel(GradiendModel):
 
     In addition to GradiendModel (only weights), this class stores a mapping from base-model parameters
         to the GRADIEND input space. This enables:
+
         - extracting gradients from a base model into GRADIEND input tensor
         - accepting dict-of-parameter gradients in forward/forward_encoder (same semantics as before)
         - pruning (physically reducing input_dim) while remapping the param map consistently
 
         Param map representation (in-memory):
         `self.param_map` is a dict: param_name -> spec dict with:
+
             - "shape": tuple[int,...]   (required)
             - "repr": "all" | "mask" | "indices"
             - if repr == "mask":    "mask": torch.BoolTensor (shape == param shape)
             - if repr == "indices": "indices": 1D int tensor of flat indices in [0, numel)
 
         Notes:
+
         - repr="all" means full param selected; no mask/indices tensor needed.
         - repr="indices" avoids huge bool masks for very large params with tiny selection.
         - All mapping operations are defined by this spec; order is the insertion order of `self.param_map`.
 
         Saving/loading:
+
         - config.json includes mapping.mode ("all"|"mask"|"indices"|"mixed") and per-param entries with shapes.
         - mapping_masks.* and mapping_indices.* are written only if needed.
         - safetensors is preferred when available; otherwise torch.save/torch.load fallback is used.
 
         Prune:
+
         - prune() selects input dims via mask/threshold/topk and physically slices weights
+
             AND updates the mapping spec accordingly.
     """
 
@@ -301,7 +310,9 @@ class ParamMappedGradiendModel(GradiendModel):
         Build a base-global index map for the current input space.
 
         Returns:
+
             1D tensor of length input_dim. For each local input index, stores the
+
             corresponding base-global index (flattened across base-model parameters
             in param_map insertion order).
         """
@@ -417,6 +428,7 @@ class ParamMappedGradiendModel(GradiendModel):
         Extract gradients from a base model (copies).
 
         Returns either:
+
         - dict[param_name] -> gradient tensor shaped like the parameter, OR
         - a single concatenated 1D tensor in GRADIEND input space
 
@@ -691,6 +703,7 @@ class ParamMappedGradiendModel(GradiendModel):
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor], Dict[str, torch.Tensor], Tuple[Dict[str, torch.Tensor], torch.Tensor]]:
         """
         Forward that accepts:
+
         - tensor: already in GRADIEND input space
         - dict: per-param gradient tensors (full tensors); selection is applied using mapping spec
 
@@ -983,15 +996,18 @@ class ParamMappedGradiendModel(GradiendModel):
         Save weights + config + mapping.
 
         Mapping save strategy:
+
         - Always store shapes in config.
         - Choose per-param representation:
             - "all" if fully selected (k == numel)
             - else choose "indices" vs "mask" by estimated size:
+
                 indices_size ~ k * bytes_per_index(numel)
                 mask_size    ~ numel * 1 byte
           with a small safety margin to avoid flip-flopping.
 
         Output:
+
         - config.json
         - mapping_indices.(safetensors|pth) if any param uses indices
         - mapping_masks.(safetensors|pth)   if any param uses mask

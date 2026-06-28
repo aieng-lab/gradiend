@@ -361,10 +361,12 @@ def load_training_stats(model_path: str) -> Optional[dict]:
 
     Returns:
         Dict with keys:
+
         - training_stats: correlation, scores, mean_by_class, mean_by_feature_class (by step), etc.
         - best_score_checkpoint: correlation, global_step, epoch
         - config: training config used
         - time: timing stats (total, eval, etc.)
+
         Or None if model_path has no training.json.
 
     Example:

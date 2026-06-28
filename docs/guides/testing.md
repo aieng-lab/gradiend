@@ -1,8 +1,5 @@
 # Testing and coverage
 
-
-
-
 ## Unit tests (fast)
 
 Run the test suite in `tests/` (excludes slow and integration tests by default in CI):

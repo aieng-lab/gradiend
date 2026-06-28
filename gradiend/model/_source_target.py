@@ -2,9 +2,13 @@
 
 Training vs decoder evaluation
 ------------------------------
+
 * **Training** uses ``TrainingArguments.source`` for which gradients feed the encoder
+
   (``factual``, ``alternative``, or ``diff``).
+
 * **Decoder rewrite** uses ``model.source`` (persisted in ``gradiend_context.json``) to
+
   pick the default ``feature_factor`` sign per class. ``model.source`` must match
   ``TrainingArguments.source``; see :func:`sync_model_source_target_from_training_args`.
 
@@ -25,6 +29,7 @@ negated by source.
 
 Decoder grid / plots
 --------------------
+
 * Strengthen ``target_class="3SG"`` evaluates only ``ff = derive(3SG)``.
 * Summary and probability-shift plots use that same ``ff`` (not another class's sign).
 

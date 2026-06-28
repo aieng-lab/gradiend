@@ -2,6 +2,7 @@
 GRADIEND core model definitions (weights-only).
 
 This module defines:
+
 - GradiendModel: weights-only GRADIEND encoder/decoder (no base-model context).
 
 For the parameter mapping-aware variant, see gradiend.model.param_mapped.ParamMappedGradiendModel.
@@ -35,12 +36,14 @@ class GradiendModel(nn.Module):
 
     This class holds ONLY the neural components (encoder/decoder) + utilities that depend solely on
     GRADIEND parameters:
+
     - forward / forward_encoder (tensor input space)
     - weight-derived importance scores (encoder/decoder/decoder-bias/decoder-sum)
     - internal prune primitive that physically reduces input_dim (slices weights; no mapping logic)
     - save_pretrained / from_pretrained for weights + architecture + metadata
 
     Saving:
+
     - Weights: model.safetensors if available, else pytorch_model.bin
     - Config: config.json (format_version=0)
     - Run info: training.json (optional; if kwargs contains "training")
@@ -300,6 +303,7 @@ class GradiendModel(nn.Module):
         Importance per GRADIEND input dimension (length = input_dim), on CPU.
         Args:
             part: Which component to use for importance aggregation:
+
                 - "encoder-weight": L1 over encoder weight columns
                 - "decoder-weight": L1 over decoder weight rows
                 - "decoder-bias": absolute decoder bias
@@ -334,6 +338,7 @@ class GradiendModel(nn.Module):
 
         Args:
             part: Which component to use for the update vector:
+
                 - "decoder-weight": decoder weight vector (flattened)
                 - "decoder-bias": decoder bias vector
                 - "decoder-sum": decoder weight vector + bias
@@ -435,6 +440,7 @@ class GradiendModel(nn.Module):
                 Decoded tensor of shape (input_dim,).
             If return_encoded is True:
                 Tuple (decoded, encoded), where:
+
                 - decoded: tensor of shape (input_dim,)
                 - encoded: tensor of shape (latent_dim,)
         """
@@ -637,6 +643,7 @@ class GradiendModel(nn.Module):
         Save weights + config.json (+ optional training.json).
 
         Notes:
+
         - safetensors is used if available unless use_safetensors=False.
         - training info: if kwargs contains "training", it is written to training.json and removed from config metadata.
 

@@ -72,6 +72,7 @@ def preprocess_texts(
     (with optional length/char filtering).
 
     When split_to_sentences is True or an integer:
+
     - If spacy_model is given: use spacy sentencizer.
     - Otherwise: use simple regex split on .!?
     - Integer values greater than 1 yield non-overlapping sentence windows.

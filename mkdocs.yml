@@ -40,6 +40,7 @@ markdown_extensions:
 
 plugins:
   - search
+  - autorefs
   - mkdocstrings:
       handlers:
         python:
@@ -72,12 +73,19 @@ nav:
   - Guides:
     - Core classes and use cases: guides/core-classes.md
     - Data handling: guides/data-handling.md
+    - Data splits: guides/data-splits.md
     - Pruning: guides/pruning-guide.md
     - Evaluation & visualization: guides/evaluation-visualization.md
+    - Cross-model comparison: guides/cross-model-comparison.md
+    - Oriented cross-encoding matrix: guides/cross-encoding-matrix.md
+    - "Oriented cross-encoding: computation": guides/cross-encoding-matrix-computation.md
+    - Multi-seed analysis: guides/multi-seed.md
+    - Trainer suites: guides/trainer-suites.md
     - Saving & loading: guides/saving-loading.md
     - Training arguments: guides/training-arguments.md
+    - Token prediction methods: guides/token-prediction-methods.md
     - Decoder-only models: guides/decoder-only.md
-    - Encoder-decoder models (T5/BART): guides/encoder-decoder.md
+    - Decoder evaluation targets: guides/decoder-eval-targets.md
     - Testing: guides/testing.md
   - Reference:
     - Examples: examples.md
@@ -101,12 +109,30 @@ nav:
             - TextPredictionTrainer: api/training/TextPredictionTrainer.md
             - PrePruneConfig: api/training/PrePruneConfig.md
             - PostPruneConfig: api/training/PostPruneConfig.md
+            - TrainerSuite: api/training/TrainerSuite.md
+            - SymmetricTrainerSuite: api/training/SymmetricTrainerSuite.md
+            - MultiSeedTrainerView: api/training/MultiSeedTrainerView.md
         - Evaluation:
             - Overview: api/evaluation/index.md
             - Evaluator: api/evaluation/Evaluator.md
             - EncoderEvaluator: api/evaluation/EncoderEvaluator.md
             - DecoderEvaluator: api/evaluation/DecoderEvaluator.md
             - Visualizer: api/evaluation/Visualizer.md
+        - Visualization:
+            - Overview: api/visualization/index.md
+            - plot_training_convergence: api/visualization/plot_training_convergence.md
+            - plot_encoder_distributions: api/visualization/plot_encoder_distributions.md
+            - plot_encoder_scatter: api/visualization/plot_encoder_scatter.md
+            - plot_encoder_by_target: api/visualization/plot_encoder_by_target.md
+            - plot_topk_overlap_heatmap: api/visualization/plot_topk_overlap_heatmap.md
+            - plot_topk_overlap_venn: api/visualization/plot_topk_overlap_venn.md
+            - plot_similarity_heatmap: api/visualization/plot_similarity_heatmap.md
+            - plot_cross_encoding_heatmap: api/visualization/plot_cross_encoding_heatmap.md
+            - plot_gradiend_transition_cross_encoding_heatmap: api/visualization/plot_gradiend_transition_cross_encoding_heatmap.md
+            - plot_comparison_heatmap: api/visualization/plot_comparison_heatmap.md
+        - Comparison:
+            - Overview: api/comparison/index.md
+            - compute_similarity_matrix: api/comparison/compute_similarity_matrix.md
     - FAQ: faq.md
   - Project:
     - Publishing the documentation: publishing-docs.md

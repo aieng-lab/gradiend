@@ -9,6 +9,18 @@ on:
     branches: [main, master]
 
 jobs:
+  docstring-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Check docstring Markdown list spacing
+        run: python scripts/fix_docstring_markdown_lists.py --check
+
   test:
     runs-on: ubuntu-latest
     strategy:
