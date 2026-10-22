@@ -3,13 +3,16 @@ Smoke tests: run configured gradiend.examples so they complete without verificat
 
 These tests execute the example scripts as they are (no result checks) to ensure
 the example workflows do not break. They use the examples' own iteration counts
-for quick demonstration; the test bench verified runs use more iterations.
+for quick demonstration; the test bench verified runs use more iterations. The
+examples that build the English pronoun data do so from a small corpus
+(PRONOUN_DATA_EXAMPLES), as the full Wikipedia source takes longer than the timeout.
 
 To avoid cache reuse across runs (e.g. same Docker, multiple test-bench runs),
 runs/examples/ is removed before each example run, so use_cache=True still
 exercises the full pipeline. Real user runs under runs/ (outside examples/) are not touched.
 """
 
+import json
 import os
 import shutil
 import subprocess
@@ -47,11 +50,48 @@ EXAMPLE_MODULES = [
     #"gradiend.examples.train_gender_de_detailed", # we exclude detailed run as it takes very long (many features)
 ]
 
+# Examples that build the English pronoun data (directly, or through ensure_english_pronoun_data). From the real
+# source (50,000 Wikipedia articles, spaCy over every segment) that takes longer than the timeout, so the smoke test
+# builds the data from a small corpus instead: the same code path (Hugging Face loading, spaCy filtering, splits)
+# on less text. The settings are the module constants of create_english_pronoun_data.
+PRONOUN_DATA_EXAMPLES = frozenset({
+    "gradiend.examples.create_english_pronoun_data",
+    "gradiend.examples.train_english_pronouns",
+    "gradiend.examples.train_seq2seq_encoder_mlm",
+})
+SMALL_PRONOUN_DATA = {
+    "WIKIPEDIA_DATASET": "cornell-movie-review-data/rotten_tomatoes",  # 8.5k short reviews, many pronouns
+    "WIKIPEDIA_HF_CONFIG": None,
+    "WIKIPEDIA_BASE_MAX_SIZE": 8000,
+    "MAX_SIZE_PER_CLASS": 200,
+    "NEUTRAL_MAX_SIZE": 200,
+}
+_SMALL_PRONOUN_DATA_RUNNER = """
+import json, runpy, sys
+import gradiend.examples.create_english_pronoun_data as pronoun_data
+for name, value in json.loads(sys.argv[2]).items():
+    if not hasattr(pronoun_data, name):
+        raise AttributeError(f"create_english_pronoun_data has no setting {name!r}")
+    setattr(pronoun_data, name, value)
+module = sys.argv[1]
+if module == pronoun_data.__name__:
+    pronoun_data.main()
+else:
+    runpy.run_module(module, run_name="__main__", alter_sys=True)
+"""
+
+
+def _example_command(module_name: str) -> list:
+    """Command that runs an example's __main__ (as python -m module, on small pronoun data where it needs any)."""
+    if module_name in PRONOUN_DATA_EXAMPLES:
+        return [sys.executable, "-c", _SMALL_PRONOUN_DATA_RUNNER, module_name, json.dumps(SMALL_PRONOUN_DATA)]
+    return [sys.executable, "-m", module_name]
+
 
 def _run_example_module(module_name: str, timeout: int = 2000) -> subprocess.CompletedProcess:
     """Run an example module's __main__ (as python -m module)."""
     return subprocess.run(
-        [sys.executable, "-m", module_name],
+        _example_command(module_name),
         cwd=str(PROJECT_ROOT),
         capture_output=True,
         text=True,
