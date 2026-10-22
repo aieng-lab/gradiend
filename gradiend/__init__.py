@@ -51,7 +51,7 @@ patch_sys_stderr_for_tqdm()
 try:
     __version__ = version("gradiend")
 except PackageNotFoundError:
-    __version__ = "0.2.1"  # editable install before package is installed
+    __version__ = "0.2.2"  # editable install before package is installed
 
 __all__ = [
     # Core model
@@ -60,6 +60,7 @@ __all__ = [
     "ModelWithGradiend",
     # Data (high-level)
     "TextFilterConfig",
+    "PairedTextFilterConfig",
     "TextPredictionDataCreator",
     "DataCreator",
     "TextPreprocessConfig",
@@ -72,6 +73,7 @@ __all__ = [
     "TrainerConfig",
     "PrePruneConfig",
     "PostPruneConfig",
+    "LRSearchConfig",
     # Logging
     "setup_logging",
     "get_logger",
@@ -122,6 +124,7 @@ _LAZY_IMPORTS = {
     "ModelWithGradiend": ("gradiend.model", "ModelWithGradiend"),
     # High-level data API
     "TextFilterConfig": ("gradiend.data", "TextFilterConfig"),
+    "PairedTextFilterConfig": ("gradiend.data", "PairedTextFilterConfig"),
     "TextPredictionDataCreator": ("gradiend.data", "TextPredictionDataCreator"),
     "DataCreator": ("gradiend.data", "DataCreator"),
     "TextPreprocessConfig": ("gradiend.data", "TextPreprocessConfig"),
@@ -187,6 +190,7 @@ _LAZY_IMPORTS = {
     "TextGradientTrainingDataset": ("gradiend.trainer", "TextGradientTrainingDataset"),
     "create_model_with_gradiend": ("gradiend.trainer", "create_model_with_gradiend"),
     "PrePruneConfig": ("gradiend.trainer", "PrePruneConfig"),
+    "LRSearchConfig": ("gradiend.trainer", "LRSearchConfig"),
     "PostPruneConfig": ("gradiend.trainer", "PostPruneConfig"),
 }
 

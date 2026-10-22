@@ -117,6 +117,14 @@ Across seeds, it runs [`evaluate_encoder(split="val")`][gradiend.trainer.trainer
 
 See the [Training arguments guide](../guides/training-arguments.md#seed-report-format) for the seed report format.
 
+### Choosing the learning rate
+
+Not sure which `learning_rate` to use? Set `learning_rate="tune"`: `train()` tries a few learning rates with short runs and trains with a good one, see [Automatic learning-rate search](../guides/learning-rate-search.md).
+
+### Stopping training from a callback
+
+A callback passed to `trainer.train(callbacks=[...])` can end training after any step by setting `control["should_stop"] = True` in its `on_step_end`.
+
 ---
 
 ## Using the trainer

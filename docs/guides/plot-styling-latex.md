@@ -82,7 +82,7 @@ Axis text that is not intentional math is rendered with `usetex=False` per label
 
 **Deprecation**
 
-[`configure_matplotlib_style()`][gradiend.visualizer.plot_style.configure_matplotlib_style] remains as a thin alias but emits `DeprecationWarning`; prefer `configure_plot_style()`.
+`configure_matplotlib_style()` remains as a thin alias but emits `DeprecationWarning`; prefer `configure_plot_style()`.
 
 ## Related
 

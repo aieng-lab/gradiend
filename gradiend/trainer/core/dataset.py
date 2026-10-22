@@ -181,6 +181,18 @@ class GradientTrainingDataset:
         return nullcontext()
 
     def __getitem__(self, index: int) -> dict:
+        # Bounds-check like any indexable dataset: an out-of-range index otherwise
+        # resolves to an empty slice (``range(index*bs, min((index+1)*bs, N))`` is
+        # empty), _merge_batch returns ``{}``, and the caller only discovers it far
+        # downstream as a cryptic ``template=None`` / ``KeyError: 'factual'``. Raise
+        # IndexError here so a caller that iterates past ``len(self)`` fails clearly.
+        length = len(self)
+        if index < 0:
+            index += length
+        if not (0 <= index < length):
+            raise IndexError(
+                f"{type(self).__name__} index {index} out of range for length {length}"
+            )
         timing_enabled = self.timing_steps > 0 and (index == 0 or (index + 1) % self.timing_steps == 0)
         if timing_enabled:
             self._sync_cuda_for_timing()

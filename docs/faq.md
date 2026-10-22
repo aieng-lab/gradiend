@@ -10,10 +10,11 @@ You should check the training log and inspect the mean probabilities per label c
 
 - **Mean Encoded values of the two target classes are similar and close to +1 or -1**: The encoder is not separating the classes (likely only separates target classes from neutral inputs). Try a smaller *learning rate* and/or different seeds (increase [`TrainingArguments`][gradiend.trainer.core.arguments.TrainingArguments].max_seeds). 
 - **Mean Encoded values of the two target classes are near zero and barely moving during training:** Add more data (increase `train_max_size`), increase training length (`max_steps` or `num_train_epochs`), and/or use a larger *learning rate*.
-- **Mean Encoded values do not change during training even with larger learning rate:** Likely only zero gradients are computed based on the provided data. Probably your mask identifier (default `[MASK]`) is different in your data? Or the mask occurs outside the model's context (too long texts)?
+- **Mean Encoded values do not change during training even with larger learning rate:** Likely only zero gradients are computed based on the provided data. Probably your mask identifier (default `[MASK]`) is different in your data (see `mask_placeholder`)? Or the mask occurs outside the model's context (too long texts)?
 
 **More general hints:**
 
+- **Learning rate** — Try the [automatic learning-rate search](guides/learning-rate-search.md).
 - **Source** — Using `source="alternative"` typically yields simpler conversion than `source='factual'`.
 - **Data balance and size** — Ensure both classes in your pair have enough examples; use `train_max_size` per class if needed. See [Data handling](guides/data-handling.md) for balancing.
 - **Encoder evaluation** — Run [`trainer.evaluate_encoder(return_df=True, plot=True)`][gradiend.trainer.trainer.Trainer.evaluate_encoder] and check convergence plots for debugging; use [`trainer.plot_training_convergence()`][gradiend.trainer.trainer.Trainer.plot_training_convergence] to see correlation over steps.

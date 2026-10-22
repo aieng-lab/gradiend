@@ -40,5 +40,6 @@ Plot regeneration instructions also appear as HTML comments (`<!-- DOC_PLOT: ...
 | `cross_encoding_example_race_gender_preanchor_asian_asian_highlight.png` | [cross-encoding-matrix.md](../guides/cross-encoding-matrix.md) | Same |
 | `cross_encoding_example_race_gender_oriented_asian_asian_highlight.png` | [cross-encoding-matrix.md](../guides/cross-encoding-matrix.md) | Same |
 | `cross_encoding_example_race_gender_oriented_white_asian_highlight.png` | [cross-encoding-matrix.md](../guides/cross-encoding-matrix.md) | Same |
+| `lr_search_example.png` | [learning-rate-search.md](../guides/learning-rate-search.md) | `python scripts/plot_lr_search_example.py docs/img/lr_search_example.png` (simulated training response) |
 
 After adding or updating these files, commit them so deployed docs show the plots.

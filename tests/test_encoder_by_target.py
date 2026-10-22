@@ -38,6 +38,87 @@ def test_build_encoder_target_plot_frame_orders_targets_within_class():
     assert len(plot_df) == 6
 
 
+def test_build_encoder_target_plot_frame_merges_casing_by_default():
+    encoder_df = pd.DataFrame(
+        {
+            "encoded": [0.9, 0.8, -0.9, -0.7],
+            "source_id": ["positive", "positive", "negative", "negative"],
+            "factual_token": ["Good", "good", "Bad", "bad"],
+            "type": ["training"] * 4,
+            "data_split": ["train", "train", "test", "test"],
+        }
+    )
+    plot_df, target_order, _, target_to_class, _ = build_encoder_target_plot_frame(encoder_df, class_order=["positive", "negative"])
+    assert target_order == ["good", "bad"]
+    assert target_to_class == {"good": "positive", "bad": "negative"}
+    assert plot_df.groupby("target_token").size().to_dict() == {"good": 2, "bad": 2}
+
+    _, separate, _, _, _ = build_encoder_target_plot_frame(
+        encoder_df, class_order=["positive", "negative"], ignore_case=False
+    )
+    assert separate == ["Good", "good", "Bad", "bad"]
+
+
+def test_build_encoder_target_plot_frame_keeps_the_most_frequent_spelling():
+    encoder_df = pd.DataFrame(
+        {
+            "encoded": [0.9] * 5,
+            "source_id": ["positive"] * 5,
+            "factual_token": ["I", "I", "i", "he", "He"],
+            "type": ["training"] * 5,
+            "data_split": ["train"] * 5,
+        }
+    )
+    _, target_order, _, _, _ = build_encoder_target_plot_frame(encoder_df, class_order=["positive"])
+    assert target_order == ["he", "I"]  # sorted case-insensitively
+
+
+def test_interactive_by_target_hover_shows_masked_text_and_tokens():
+    pytest.importorskip("plotly")
+    encoder_df = pd.DataFrame(
+        {
+            "encoded": [0.9, -0.8],
+            "source_id": ["BE", "AE"],
+            "source_token": ["centre", "center"],
+            "factual_token": ["center", "centre"],
+            "alternative_token": ["centre", "center"],
+            "text": ["We met at the center today.", "We met at the centre today."],
+            "template": ["We met at the [MASK] today.", "We met at the [MASK] today."],
+            "type": ["training"] * 2,
+            "data_split": ["train", "test"],
+        }
+    )
+    fig = plot_encoder_by_target(encoder_df=encoder_df, interactive=True, show=False)
+    template = fig.data[0].hovertemplate
+    assert "Masked text" in template and "Alternative token" in template and "Encoder input token" in template
+    assert "Factual token" in template
+    assert any("[MASK]" in str(row[0]) for trace in fig.data for row in trace.customdata)
+    assert not any("center today" in str(row[0]) for trace in fig.data for row in trace.customdata)
+
+
+def test_interactive_seed_grid_hover_shows_masked_text_and_tokens():
+    pytest.importorskip("plotly")
+    encoder_df = pd.DataFrame(
+        {
+            "seed": [0, 0, 1, 1],
+            "encoded": [0.9, -0.8, 0.85, -0.75],
+            "source_id": ["BE", "AE", "BE", "AE"],
+            "source_token": ["centre", "center", "centre", "center"],
+            "factual_token": ["center", "centre", "center", "centre"],
+            "alternative_token": ["centre", "center", "centre", "center"],
+            "text": ["We met at the center today."] * 4,
+            "template": ["We met at the [MASK] today."] * 4,
+            "type": ["training"] * 4,
+            "data_split": ["train", "validation", "test", "train"],
+            "input_type": ["alternative"] * 4,
+        }
+    )
+    fig = plot_encoder_by_target_seed_grid(encoder_df=encoder_df, interactive=True, show=False)
+    template = fig.data[0].hovertemplate
+    assert "Masked text" in template and "Alternative token" in template and "Encoder input token" in template
+    assert all("[MASK]" in str(row[1]) for trace in fig.data for row in trace.customdata)
+
+
 def test_plot_encoder_by_target_seed_grid_writes_shared_axis_plot(tmp_path):
     encoder_df = pd.DataFrame(
         {

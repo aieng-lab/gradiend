@@ -39,6 +39,17 @@ def test_skips_lists_inside_fenced_code_block():
     assert fix_docstring_content_lines(lines) == lines
 
 
+def test_paragraph_after_fenced_block_is_untouched():
+    lines = [
+        "    Example:\n",
+        "    ```python\n",
+        "    - 1,\n",
+        "    ```\n",
+        "    Next paragraph.\n",
+    ]
+    assert fix_docstring_content_lines(lines) == lines
+
+
 def test_fix_file_text_updates_class_docstring():
     source = '''class Model:
     """

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
 
@@ -46,6 +46,9 @@ def resplit_unified_dataframe(
 ) -> pd.DataFrame:
     """Assign vocabulary-held-out splits to a unified prediction DataFrame.
 
+    If every alternative is an explicit 1:1 counterpart (paired targets), the rows are split by pair across all
+    classes, so both counterparts share a split, and the alternatives are kept as they are.
+
     Args:
         df: Unified DataFrame to resplit. The input is not modified.
         group_col: Column whose canonical values define held-out vocabulary
@@ -77,6 +80,86 @@ def resplit_unified_dataframe(
     """
     if group_col not in df.columns:
         raise ValueError(f"resplit group column {group_col!r} not in DataFrame")
+    common = dict(
+        group_col=group_col, train_ratio=train_ratio, val_ratio=val_ratio, test_ratio=test_ratio, seed=seed,
+        group_key=group_key, per_feature_class=per_feature_class, feature_class_col=feature_class_col,
+        split_col=split_col, align_alternatives_with_split_vocab=align_alternatives_with_split_vocab,
+        balanced_cycle_index=balanced_cycle_index, balanced_cycle_length=balanced_cycle_length,
+    )
+    pair_group = _explicit_pair_groups(df, group_key, feature_class_col)
+    if not pair_group.notna().all():
+        return _resplit_by_vocabulary(df, **common)
+    return split_dataframe_by_group_key(
+        df.assign(_pair_group=pair_group), "_pair_group", train_ratio, val_ratio, test_ratio, seed,
+        split_col=split_col, group_key=group_key, balanced_cycle_index=balanced_cycle_index,
+        balanced_cycle_length=balanced_cycle_length,
+    ).drop(columns="_pair_group")
+
+
+def _explicit_pair_groups(df: pd.DataFrame, group_key: SplitGroupKey, feature_class_col: str) -> pd.Series:
+    """Group id per row whose alternative is an explicit 1:1 counterpart, ``None`` for all other rows.
+
+    A row is an explicit pair if its factual word always has this one alternative within the alternative class, no
+    other word has it, and the alternative has no other alternative back. Sampled alternatives do not satisfy this.
+    The id joins all words of a pair (for three or more classes too), so counterparts share a split. The caller
+    treats the data as paired only if every row is.
+    """
+    needed = {feature_class_col, UNIFIED_ALTERNATIVE_CLASS, UNIFIED_FACTUAL, UNIFIED_ALTERNATIVE}
+    if df.empty or not needed.issubset(df.columns):
+        return pd.Series(None, index=df.index, dtype=object)
+    rows = list(zip(
+        df[feature_class_col].astype(str),
+        df[UNIFIED_FACTUAL].astype(str).map(lambda v: apply_split_group_key(v, group_key)),
+        df[UNIFIED_ALTERNATIVE_CLASS].astype(str),
+        df[UNIFIED_ALTERNATIVE].astype(str).map(lambda v: apply_split_group_key(v, group_key)),
+    ))
+    alternatives: Dict[Tuple[str, str, str], set] = {}
+    sources: Dict[Tuple[str, str, str], set] = {}
+    for cls, word, alt_cls, alt in rows:
+        alternatives.setdefault((cls, word, alt_cls), set()).add(alt)
+        sources.setdefault((cls, alt_cls, alt), set()).add(word)
+
+    def is_pair(cls: str, word: str, alt_cls: str, alt: str) -> bool:
+        back = alternatives.get((alt_cls, alt, cls))
+        one_to_one = alternatives[(cls, word, alt_cls)] == {alt} and sources[(cls, alt_cls, alt)] == {word}
+        return one_to_one and (back is None or back == {word})
+
+    parent: Dict[Tuple[str, str], Tuple[str, str]] = {}
+
+    def find(node: Tuple[str, str]) -> Tuple[str, str]:
+        parent.setdefault(node, node)
+        while parent[node] != node:
+            parent[node] = parent[parent[node]]
+            node = parent[node]
+        return node
+
+    flags = [is_pair(*row) for row in rows]
+    for (cls, word, alt_cls, alt), flag in zip(rows, flags):
+        if flag:
+            parent[find((cls, word))] = find((alt_cls, alt))
+    return pd.Series(
+        ["|".join(find((cls, word))) if flag else None for (cls, word, _, _), flag in zip(rows, flags)],
+        index=df.index, dtype=object,
+    )
+
+
+def _resplit_by_vocabulary(
+    df: pd.DataFrame,
+    *,
+    group_col: str,
+    train_ratio: float,
+    val_ratio: float,
+    test_ratio: float,
+    seed: int,
+    group_key: SplitGroupKey,
+    per_feature_class: bool,
+    feature_class_col: str,
+    split_col: str,
+    align_alternatives_with_split_vocab: bool,
+    balanced_cycle_index: Optional[int],
+    balanced_cycle_length: Optional[int],
+) -> pd.DataFrame:
+    """Vocabulary-held-out split by ``group_col``, with optionally aligned alternatives."""
     if per_feature_class:
         if feature_class_col not in df.columns:
             raise ValueError(f"feature class column {feature_class_col!r} not in DataFrame")

@@ -7,6 +7,7 @@ Experimental data creators live in their own subpackages.
 
 from gradiend.data.core import DataCreator, resolve_base_data
 from gradiend.data.text import (
+    PairedTextFilterConfig,
     SpacyTagSpec,
     TextFilterConfig,
     TextPreprocessConfig,
@@ -15,6 +16,7 @@ from gradiend.data.text import (
 from gradiend.data.text.prediction import TextPredictionDataCreator
 
 __all__ = [
+    "PairedTextFilterConfig",
     "SpacyTagSpec",
     "TextFilterConfig",
     "TextPreprocessConfig",

@@ -3,6 +3,7 @@ Prediction datasets: TextBatchedDataset, TextTrainingDataset, create_masked_pair
 """
 
 import random
+import re
 from typing import Any, List, Optional, Tuple
 
 import pandas as pd
@@ -25,6 +26,98 @@ from gradiend.trainer.core.unified_schema import (
 )
 from gradiend.util import normalize_split_name
 from gradiend.util.logging import suppress_tokenizer_length_warning
+from gradiend.util.positions import (
+    assert_labels_on_real_tokens,
+    first_real_token_positions,
+    last_real_token_positions,
+)
+
+# Dataset-level cloze placeholder (matches TextFilterConfig.mask). Independent of
+# tokenizer.mask_token, which is an MLM model special and may be absent (e.g. GPT-2).
+DEFAULT_DATASET_MASK_PLACEHOLDER = "[MASK]"
+
+
+def missing_mask_placeholder_message(template: str, mask_placeholder: str) -> str:
+    """Explain a template/placeholder mismatch (common when data uses ``[PRONOUN]``)."""
+    text = str(template)
+    preview = text if len(text) <= 120 else f"{text[:117]}..."
+    return (
+        f"Masked template does not contain mask_placeholder={mask_placeholder!r}. "
+        f"Got template={preview!r}. "
+        f"Set TextPredictionConfig.mask_placeholder (or TrainingArguments.mask_placeholder) "
+        f"to match the prediction slot in your data (e.g. '[PRONOUN]')."
+    )
+
+
+def require_mask_placeholder(template: str, mask_placeholder: str, *, mask_token: Optional[str] = None) -> str:
+    """Return ``template`` or raise if ``mask_placeholder`` is missing.
+
+    A template that already carries the tokenizer's own ``mask_token`` is accepted as well: it
+    needs no substitution before tokenization.
+    """
+    text = str(template)
+    placeholder = str(mask_placeholder)
+    if placeholder not in text and not (mask_token and str(mask_token) in text):
+        raise ValueError(missing_mask_placeholder_message(text, placeholder))
+    return text
+
+
+def validate_masked_templates_in_dataframe(
+    data: pd.DataFrame,
+    mask_placeholder: str,
+    *,
+    masked_col: str = UNIFIED_MASKED,
+    mask_token: Optional[str] = None,
+) -> None:
+    """Fail fast when masked templates omit the configured prediction slot."""
+    if masked_col not in data.columns or len(data) == 0:
+        return
+    masked = data[masked_col].astype(str)
+    placeholder = str(mask_placeholder)
+    missing = ~masked.str.contains(re.escape(placeholder), regex=True)
+    if mask_token:
+        missing &= ~masked.str.contains(re.escape(str(mask_token)), regex=True)
+    if not bool(missing.any()):
+        return
+    first_bad = masked[missing].iloc[0]
+    raise ValueError(missing_mask_placeholder_message(first_bad, placeholder))
+
+
+def resolve_mask_placeholder(
+    *,
+    config: Any = None,
+    training_args: Any = None,
+    default: str = DEFAULT_DATASET_MASK_PLACEHOLDER,
+) -> str:
+    """Resolve the dataset prediction-slot marker from config and/or training args.
+
+    ``TextPredictionConfig.mask_placeholder`` is the data-schema field. A non-default
+    value on either side is accepted; conflicting non-default values raise.
+    """
+    default = str(default) if default else DEFAULT_DATASET_MASK_PLACEHOLDER
+
+    def _as_placeholder(value: Any) -> Optional[str]:
+        if not isinstance(value, str):
+            return None
+        text = value.strip()
+        return text or None
+
+    config_ph = _as_placeholder(getattr(config, "mask_placeholder", None)) if config is not None else None
+    args_ph = (
+        _as_placeholder(getattr(training_args, "mask_placeholder", None))
+        if training_args is not None
+        else None
+    )
+    config_ph = config_ph or default
+    args_ph = args_ph or default
+    if config_ph != default and args_ph != default and config_ph != args_ph:
+        raise ValueError(
+            f"Conflicting mask_placeholder: TextPredictionConfig has {config_ph!r} "
+            f"but TrainingArguments has {args_ph!r}."
+        )
+    if config_ph != default:
+        return config_ph
+    return args_ph
 
 
 def _ids_for_text(tokenizer: Any, text: str) -> List[int]:
@@ -72,20 +165,25 @@ def create_masked_pair_from_text(
     excluded_tokens: Optional[List[str]] = None,
     mask_token: Optional[str] = None,
     min_prefix_tokens: int = 5,
+    mask_placeholder: str = DEFAULT_DATASET_MASK_PLACEHOLDER,
 ) -> Optional[Tuple[str, str]]:
     """Create a single (masked_text, target_token) pair from raw text.
 
     For MLM models: masks one random non-special token. For decoder-only models:
-    uses prefix up to a random position, inserts [MASK], and uses the next token
+    uses prefix up to a random position, inserts the placeholder, and uses the next token
     as target.
 
     Args:
         text: Raw input text to create a masked example from.
         tokenizer: Tokenizer for encoding and decoding.
-        is_decoder_only_model: If True, uses prefix+[MASK] mode; else uses MLM mask mode.
+        is_decoder_only_model: If True, uses prefix+placeholder mode; else uses MLM mask mode.
         excluded_tokens: Tokens to avoid masking (e.g., target class tokens).
-        mask_token: Mask token string for MLM (e.g., "[MASK]").
+        mask_token: The tokenizer's MLM special, used only to decide whether the in-place masking
+            branch applies. It is NOT written into the template -- see ``mask_placeholder``.
         min_prefix_tokens: Minimum prefix length for decoder-only mode.
+        mask_placeholder: Dataset-schema placeholder written into the returned template. Masked
+            templates carry the schema placeholder at every stage; substituting
+            ``tokenizer.mask_token`` is a tokenization-stage concern applied later.
 
     Returns:
         Tuple of (masked_text, target_token), or None if no valid pair could be created.
@@ -107,7 +205,7 @@ def create_masked_pair_from_text(
             return None
         mask_idx = random.choice(valid_indices)
         target_token = tokens[mask_idx]
-        tokens[mask_idx] = mask_token
+        tokens[mask_idx] = str(mask_placeholder)
         masked_text = tokenizer.convert_tokens_to_string(tokens)
         return (masked_text, target_token)
     if len(tokens) < 2:
@@ -127,7 +225,9 @@ def create_masked_pair_from_text(
     true_next_token = tokens[split_at]
     prefix_str = tokenizer.convert_tokens_to_string(prefix_tokens)
     next_str = tokenizer.convert_tokens_to_string([true_next_token])
-    masked_text = prefix_str + (" [MASK]" if next_str and (next_str[0] in " \t" or next_str[0] == "\u2581") else "[MASK]")
+    placeholder = str(mask_placeholder)
+    leading_space = bool(next_str) and (next_str[0] in " \t" or next_str[0] == "\u2581")
+    masked_text = prefix_str + ((" " + placeholder) if leading_space else placeholder)
     return (masked_text, true_next_token)
 
 
@@ -179,6 +279,7 @@ class TextBatchedDataset(TextBatchedDatasetBase):
         )
         self.mask_token = getattr(tokenizer, "mask_token", None)
         self.mask_token_id = getattr(tokenizer, "mask_token_id", None)
+        self.mask_placeholder = DEFAULT_DATASET_MASK_PLACEHOLDER
 
     def _create_item(self, text: str, target: str):
         """Create a single training item: input_ids, attention_mask, labels.
@@ -191,6 +292,7 @@ class TextBatchedDataset(TextBatchedDatasetBase):
         """
         is_decoder_only_model = getattr(self, "is_decoder_only_model", False)
         prediction_objective = getattr(self, "prediction_objective", None)
+        mask_placeholder = getattr(self, "mask_placeholder", DEFAULT_DATASET_MASK_PLACEHOLDER)
         if prediction_objective == "clm_mlm_head":
             target_labels = getattr(self, "mlm_head_target_labels", None)
             if not target_labels:
@@ -200,9 +302,11 @@ class TextBatchedDataset(TextBatchedDatasetBase):
                 )
             if not self.mask_token:
                 raise ValueError("clm_mlm_head requires tokenizer.mask_token.")
-            if "[MASK]" not in text:
-                raise ValueError("clm_mlm_head training requires a [MASK] placeholder in the input text.")
-            expanded_text = text.replace("[MASK]", self.mask_token, 1)
+            if mask_placeholder not in text:
+                raise ValueError(
+                    f"clm_mlm_head training requires a {mask_placeholder!r} placeholder in the input text."
+                )
+            expanded_text = text.replace(mask_placeholder, self.mask_token, 1)
             with suppress_tokenizer_length_warning():
                 encoded = self.tokenizer(
                     expanded_text,
@@ -227,10 +331,10 @@ class TextBatchedDataset(TextBatchedDatasetBase):
                 "labels": labels,
             }
         if prediction_objective == "clm_sequence_cloze":
-            if "[MASK]" not in text:
-                raise ValueError("clm_sequence_cloze training requires a [MASK] placeholder.")
-            prefix, rhs = text.split("[MASK]", 1)
-            expanded_text = text.replace("[MASK]", str(target), 1)
+            if mask_placeholder not in text:
+                raise ValueError(f"clm_sequence_cloze training requires a {mask_placeholder!r} placeholder.")
+            prefix, rhs = text.split(mask_placeholder, 1)
+            expanded_text = text.replace(mask_placeholder, str(target), 1)
             with suppress_tokenizer_length_warning():
                 encoded = self.tokenizer(expanded_text, return_tensors="pt", add_special_tokens=True, truncation=True, max_length=self.max_length, padding="max_length")
             input_ids = encoded["input_ids"]
@@ -246,7 +350,10 @@ class TextBatchedDataset(TextBatchedDatasetBase):
                 end = min(valid_len, prefix_len + candidate_len + int(rhs_window))
             start = min(prefix_len, valid_len)
             if start < end:
-                labels[:, start:end] = input_ids[:, start:end]
+                # Real tokens begin after the pad block under LEFT padding.
+                offset = int(first_real_token_positions(attention_mask[:1])[0])
+                labels[:, offset + start:offset + end] = input_ids[:, offset + start:offset + end]
+            assert_labels_on_real_tokens(labels, attention_mask, where="clm_sequence_cloze item")
             return {"input_ids": input_ids.squeeze(0), "attention_mask": attention_mask.squeeze(0), "labels": labels.squeeze(0)}
         is_seq2seq_model = getattr(self, "is_seq2seq_model", False)
         if is_seq2seq_model:
@@ -256,6 +363,7 @@ class TextBatchedDataset(TextBatchedDatasetBase):
                 label=str(target),
                 tokenizer=self.tokenizer,
                 base_model=getattr(self, "base_model", None),
+                mask_placeholder=mask_placeholder,
             )
             if prediction_objective == SEQ2SEQ_ENCODER_MLM:
                 item = create_seq2seq_mlm_item(**common)
@@ -267,13 +375,23 @@ class TextBatchedDataset(TextBatchedDatasetBase):
             else:
                 item = create_seq2seq_decoder_item(**common)
             return {k: v.squeeze(0) for k, v in item.items()}
+        if (
+            not is_decoder_only_model
+            and self.mask_token
+            and self.mask_token not in text
+            and mask_placeholder in text
+        ):
+            text = text.replace(mask_placeholder, self.mask_token)
         if not is_decoder_only_model and self.mask_token and self.mask_token not in text:
-            raise ValueError("Input text must contain at least one [MASK] token placeholder.")
+            raise ValueError(
+                f"Input text must contain at least one {mask_placeholder!r} / {self.mask_token!r} "
+                "placeholder."
+            )
         mask_count = 0 if is_decoder_only_model else (text.count(self.mask_token) if self.mask_token else 0)
         target_tokens = self.tokenizer(target, add_special_tokens=False)["input_ids"]
         num_target_tokens = len(target_tokens)
         if is_decoder_only_model:
-            expanded_text = text.split("[MASK]")[0] if "[MASK]" in text else text
+            expanded_text = text.split(mask_placeholder)[0] if mask_placeholder in text else text
         else:
             expanded_text = text.replace(self.mask_token, " ".join([self.mask_token] * num_target_tokens), 1) if mask_count == 1 and self.mask_token else text
         with suppress_tokenizer_length_warning():
@@ -287,9 +405,20 @@ class TextBatchedDataset(TextBatchedDatasetBase):
                 target_idx = self.tokenizer.vocab[target]
             else:
                 target_idx = self.tokenizer(target, add_special_tokens=False)["input_ids"][0]
+            last_positions = last_real_token_positions(attention_mask, allow_empty=True)
             for i, last_idx in enumerate(last_idxs):
-                if last_idx < input_ids.size(1):
-                    labels[i, last_idx - 1] = target_idx
+                if last_idx == 0:
+                    # No context token at all: the target is the first word of the text and the tokenizer
+                    # adds no BOS, so the row is entirely padding. Nothing precedes the target, hence no
+                    # sentence-dependent signal; the row is kept as it always was (label on the last position).
+                    labels[i, -1] = target_idx
+                elif last_idx < input_ids.size(1):
+                    # Last REAL token. ``last_idx - 1`` is only that under right padding; with left padding
+                    # (Gemma, ...) it points into the pad block, which made every sentence's gradient identical.
+                    labels[i, last_positions[i]] = target_idx
+            assert_labels_on_real_tokens(
+                labels, attention_mask, where="decoder-only training item", allow_empty_rows=True
+            )
         else:
             mask_token_id = self.tokenizer.convert_tokens_to_ids(self.mask_token)
             mask_positions = (input_ids == mask_token_id).nonzero(as_tuple=False)
@@ -321,6 +450,7 @@ class TextTrainingDataset(TextBatchedDataset):
         prediction_objective: Optional[str] = None,
         rhs_window: int = -1,
         mlm_head_target_labels: Optional[List[str]] = None,
+        mask_placeholder: str = DEFAULT_DATASET_MASK_PLACEHOLDER,
     ):
         """Initialize the training dataset.
 
@@ -338,6 +468,7 @@ class TextTrainingDataset(TextBatchedDataset):
             prediction_objective: Optional prediction objective override, such as
                 cloze-sequence or seq2seq objectives.
             rhs_window: Right-context token window for sequence-cloze objectives.
+            mask_placeholder: Dataset-level prediction placeholder in masked templates.
         """
         super().__init__(
             data=data,
@@ -355,6 +486,13 @@ class TextTrainingDataset(TextBatchedDataset):
         self.prediction_objective = prediction_objective
         self.mlm_head_target_labels = list(mlm_head_target_labels) if mlm_head_target_labels else None
         self.rhs_window = rhs_window
+        self.mask_placeholder = str(mask_placeholder)
+        validate_masked_templates_in_dataframe(
+            self.data,
+            self.mask_placeholder,
+            masked_col=UNIFIED_MASKED,
+            mask_token=self.mask_token,
+        )
         if is_decoder_only_model and getattr(self.tokenizer, "pad_token", None) is None:
             eos_token = getattr(self.tokenizer, "eos_token", None)
             if eos_token is not None:
@@ -367,7 +505,8 @@ class TextTrainingDataset(TextBatchedDataset):
             idx: Row or batch index resolved by the parent batched dataset.
         """
         entry = super().__getitem__(idx)
-        template = entry[UNIFIED_MASKED]
+        mask_placeholder = self.mask_placeholder
+        template = require_mask_placeholder(entry[UNIFIED_MASKED], mask_placeholder, mask_token=self.mask_token)
         if self.prediction_objective == "clm_sequence_cloze":
             input_text = template
         elif self.prediction_objective == SEQ2SEQ_DECODER_SEQUENCE_CLOZE:
@@ -376,14 +515,18 @@ class TextTrainingDataset(TextBatchedDataset):
             if self.prediction_objective == "clm_mlm_head":
                 input_text = template
             else:
-                input_text = template.split("[MASK]")[0] if "[MASK]" in template else template
+                input_text = template.split(mask_placeholder)[0] if mask_placeholder in template else template
         elif self.is_seq2seq_model:
-            input_text = mask_placeholder_for_tokenizer(template, self.tokenizer)
+            input_text = mask_placeholder_for_tokenizer(
+                template,
+                self.tokenizer,
+                mask_placeholder=mask_placeholder,
+            )
         elif self.mask_token:
-            input_text = template.replace("[MASK]", self.mask_token)
+            input_text = template.replace(mask_placeholder, self.mask_token)
         else:
             input_text = template
-        text = template.replace("[MASK]", entry[UNIFIED_FACTUAL])
+        text = template.replace(mask_placeholder, entry[UNIFIED_FACTUAL])
         label = entry[self.target_key]
         try:
             import numpy as _np

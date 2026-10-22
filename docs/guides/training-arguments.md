@@ -46,7 +46,8 @@ the alternative gradient and the decoder learns the difference to apply.
 | **precompute_gradient_buffer_size** | `1` | Number of already-computed gradient rows kept in the async queue. |
 | **gradient_timing_steps** | `0` | If `> 0`, log gradient-row timing every N rows. |
 | **train_max_size** | `None` | Cap training samples per feature class. `None` uses all data. |
-| **learning_rate** | `1e-5` | Peak learning rate. |
+| **learning_rate** | `1e-5` | Peak learning rate. `"tune"` searches it first, see [Learning-rate search](learning-rate-search.md). |
+| **lr_search_config** | `None` | Options of that search ([`LRSearchConfig`][gradiend.trainer.core.lr_search.LRSearchConfig]). |
 | **num_train_epochs** | `3` | Number of epochs. Ignored when `max_steps > 0`. |
 | **max_steps** | `-1` | Total training steps when `> 0`; overrides `num_train_epochs`. |
 | **weight_decay** | `1e-2` | Weight decay for the optimizer. |
@@ -124,6 +125,7 @@ Device placement is automatic when these fields are omitted:
 | Argument | Default | Description |
 |----------|---------|-------------|
 | **prediction_objective** | `"auto"` | Token prediction objective for text-gradient training and decoder probability scoring. See [Token prediction methods](token-prediction-methods.md). |
+| **mask_placeholder** | `"[MASK]"` | Marker of the prediction slot in your masked data, if it is not `[MASK]` (e.g. `"[PRONOUN]"`). Independent of the tokenizer's mask token. |
 | **decoder_mlm_head_epochs** | `5` | Epochs for auxiliary decoder MLM-head training when `prediction_objective="clm_mlm_head"`. |
 | **decoder_mlm_head_batch_size** | `4` | Batch size for auxiliary decoder MLM-head training. |
 | **decoder_mlm_head_lr** | `1e-4` | Learning rate for auxiliary decoder MLM-head training. |

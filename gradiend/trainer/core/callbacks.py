@@ -22,6 +22,36 @@ from gradiend.util.logging import get_logger
 logger = get_logger(__name__)
 
 
+def _is_unrecoverable_eval_error(exc: BaseException) -> bool:
+    """Whether an evaluation error means the run can no longer produce results.
+
+    A metric failing on a degenerate batch is worth logging and skipping. Running
+    out of device memory is not: allocation failures leave the process unable to
+    evaluate anything afterwards, so continuing yields a training run that
+    reports success while selecting no checkpoint at all.
+
+    Matched by type where the running torch exposes one, with a message fallback
+    because the exception type has moved between torch versions
+    (``torch.cuda.OutOfMemoryError`` / ``torch.OutOfMemoryError``).
+    """
+    import torch
+
+    oom_types = tuple(
+        t
+        for t in (
+            getattr(getattr(torch, "cuda", None), "OutOfMemoryError", None),
+            getattr(torch, "OutOfMemoryError", None),
+        )
+        if isinstance(t, type)
+    )
+    if oom_types and isinstance(exc, oom_types):
+        return True
+    if isinstance(exc, MemoryError):
+        return True
+    text = str(exc).lower()
+    return "out of memory" in text or "cuda error" in text
+
+
 class TrainingCallback(ABC):
     """
     Base class for training callbacks (HF Trainer–style lifecycle).
@@ -145,6 +175,17 @@ class EvaluationCallback(TrainingCallback):
                     logger.warning(f'Evaluation at step {step} returned no results')
                     return None
             except Exception as e:
+                if _is_unrecoverable_eval_error(e):
+                    # Resource exhaustion leaves the process degraded: every
+                    # later step evaluates nothing, no checkpoint is ever
+                    # selected, and the run still exits 0 -- so the job reports
+                    # COMPLETED having trained nothing. Fail loudly instead.
+                    logger.error(
+                        f"Unrecoverable error during evaluation at step {step}; "
+                        f"aborting rather than continuing with no evaluation: {e}",
+                        exc_info=True,
+                    )
+                    raise
                 logger.error(f"Error during evaluation at step {step}: {e}", exc_info=True)
                 return None
             finally:

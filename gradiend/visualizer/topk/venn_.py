@@ -10,6 +10,7 @@ matplotlib is also optional; if missing, plotting raises ImportError with instal
 from typing import Dict, List, Optional, Tuple, Union
 
 from gradiend.visualizer.plot_optional import _require_matplotlib
+from gradiend.visualizer.topk.naming import as_named_models
 from gradiend.visualizer.labels import format_model_labels_with_convergence
 
 
@@ -107,20 +108,22 @@ def _topk_weights_for_venn_set(
     seed_group_policy: str = "primary",
 ) -> List[int]:
     """Resolve one top-k set for a Venn circle, including multi-seed groups."""
+    from gradiend.comparison.common import topk_base_indices
+
     seed_group_policy = str(seed_group_policy or "primary").lower()
     if seed_group_policy not in {"primary", "union", "intersection"}:
         raise ValueError("seed_group_policy must be one of 'primary', 'union', or 'intersection'")
 
     seed_models = _seed_models_for_venn(model)
     if seed_models is None:
-        return list(model.get_topk_weights(part=part, topk=topk))
+        return topk_base_indices(model, part, topk)
     if not seed_models:
         raise ValueError("Seed model group for Venn plot must contain at least one model")
 
     if seed_group_policy == "primary":
-        return list(seed_models[0].get_topk_weights(part=part, topk=topk))
+        return topk_base_indices(seed_models[0], part, topk)
 
-    seed_sets = [set(seed_model.get_topk_weights(part=part, topk=topk)) for seed_model in seed_models]
+    seed_sets = [set(topk_base_indices(seed_model, part, topk)) for seed_model in seed_models]
     if seed_group_policy == "union":
         return sorted(set.union(*seed_sets)) if seed_sets else []
     return sorted(set.intersection(*seed_sets)) if seed_sets else []
@@ -354,7 +357,8 @@ def plot_topk_overlap_venn(
     package for 4–6 models. Missing packages raise ImportError with install instructions.
 
     Args:
-        models: Mapping from display label (or model id) to ModelWithGradiend instance.
+        models: Mapping from display label (or model id) to ModelWithGradiend instance, or a list of
+            models that are labelled after their checkpoint folders (see ``as_named_models``).
         topk: Number of top weights to consider per model (base-model weight indices).
         part: ``'encoder-weight'`` or ``'decoder-weight'``.
         output_path: Optional path to save the figure.
@@ -375,6 +379,7 @@ def plot_topk_overlap_venn(
         Dict with keys: ``per_model`` (model_id -> list of weight indices), ``intersection``,
         ``union``, ``topk``, ``part``.
     """
+    models = as_named_models(models)
     if not models:
         return {"per_model": {}, "intersection": [], "union": [], "topk": topk, "part": part}
     if not isinstance(models, dict):

@@ -462,17 +462,22 @@ def evaluate_clm_perplexity(
             )
             labels[mask_ignore] = -100
 
+        # Causal LM: the logits at position t predict token t+1.
+        target_labels = labels[:, 1:].clone()
+        # A target whose predicting position is padding (left padding) has no real context.
+        target_labels[attention_mask[:, :-1] == 0] = -100
+
         with torch.no_grad():
             outputs = model(input_ids=input_ids, attention_mask=attention_mask)
-            logits = outputs.logits
+            logits = outputs.logits[:, :-1, :]
             loss = F.cross_entropy(
-                logits.view(-1, logits.size(-1)),
-                labels.view(-1),
+                logits.reshape(-1, logits.size(-1)),
+                target_labels.reshape(-1),
                 reduction="sum",
                 ignore_index=-100,
             )
 
-        non_ignored_tokens = (labels != -100).sum().item()
+        non_ignored_tokens = (target_labels != -100).sum().item()
         total_log_likelihood += loss.item()
         total_token_count += non_ignored_tokens
 

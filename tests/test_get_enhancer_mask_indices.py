@@ -19,9 +19,11 @@ def test_get_enhancer_mask_uses_base_global_indices_in_local_sized_mask() -> Non
     This does NOT affect top-k overlap heatmaps (they intersect base-global sets directly).
     It can break mask_and_encode(..., topk=...).
     """
+    # CPU on purpose: an out-of-range index raises IndexError on the CPU, but on CUDA it triggers an
+    # asynchronous device-side assert that poisons the whole process (every later GPU test then fails).
     gradiend = ParamMappedGradiendModel(input_dim=4, latent_dim=1, param_map={
         "w": {"shape": (2, 2), "repr": "all"},
-    }, lazy_init=False)
+    }, lazy_init=False, device=torch.device("cpu"))
 
     class _Stub(ModelWithGradiend):
         @classmethod

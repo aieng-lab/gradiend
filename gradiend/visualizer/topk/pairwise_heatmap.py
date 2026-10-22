@@ -6,6 +6,7 @@ from typing import Dict, Union, List, Optional, Tuple
 
 from gradiend.visualizer.heatmaps import plot_similarity_heatmap
 from gradiend.visualizer.heatmaps.similarity import _extract_best_correlation_for_models
+from gradiend.visualizer.topk.naming import as_named_models
 
 
 def plot_topk_overlap_heatmap(
@@ -60,7 +61,8 @@ def plot_topk_overlap_heatmap(
     Plot pairwise top-k overlap between GRADIEND models.
 
     Args:
-        models: Mapping of display/model ids to GRADIEND models.
+        models: Mapping of display/model ids to GRADIEND models, or a list of models that are
+            labelled after their checkpoint folders (see ``as_named_models``).
         topk: Number or fraction of top weights to compare.
         part: Model part used to select weights.
         value: Overlap value to display.
@@ -104,6 +106,7 @@ def plot_topk_overlap_heatmap(
         seed_pairing_mode: ``"all_pairs"`` or positionally aligned ``"matched"``.
         converged_by_id: Optional explicit convergence status by stable model id.
     """
+    models = as_named_models(models)
     return plot_similarity_heatmap(
         models,
         measure="topk_overlap",
@@ -196,7 +199,8 @@ def plot_topk_overlap_heatmap_with_correlation(
     """Plot pairwise top-k overlap with best-correlation side annotations.
 
     Args:
-        models: Mapping of display/model ids to GRADIEND models.
+        models: Mapping of display/model ids to GRADIEND models, or a list of models that are
+            labelled after their checkpoint folders (see ``as_named_models``).
         topk: Number or fraction of top weights to compare.
         part: Model part used to select weights.
         value: Overlap value to display.
@@ -232,6 +236,7 @@ def plot_topk_overlap_heatmap_with_correlation(
         column_label_mapping: Optional mapping for column display labels.
         highlight_non_convergence: Whether labels mark non-converged runs.
     """
+    models = as_named_models(models)
     row_metric = _extract_best_correlation_for_models(models)
     return plot_topk_overlap_heatmap(
         models,

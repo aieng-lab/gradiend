@@ -14,6 +14,7 @@ from gradiend.comparison.cross_encoding import (
     build_cross_task_encoder_summary,
     compute_gradiend_feature_cross_encoding_matrix,
     compute_gradiend_transition_cross_encoding_matrix,
+    load_saved_cross_encoding_inputs,
 )
 from gradiend.comparison.encoder_aggregation import aggregate_encoder_dataframes
 from gradiend.comparison.trainer_pair_encoding import (
@@ -46,6 +47,7 @@ __all__ = [
     "build_cross_task_encoder_summary",
     "compute_gradiend_feature_cross_encoding_matrix",
     "compute_gradiend_transition_cross_encoding_matrix",
+    "load_saved_cross_encoding_inputs",
     "normalize_cross_encoding_rows_by_diagonal",
     "pair_by_id_from_trainers",
     "source_by_id_from_trainers",

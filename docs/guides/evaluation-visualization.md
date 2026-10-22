@@ -336,11 +336,12 @@ view.plot_encoder_by_target(split="test")
 | `hue_col` | `"data_split"` | Color by split — use for holdout verification |
 | `plot_style` | `"strip"` | `strip`, `box`, or `violin` |
 | `interactive` | `False` | Plotly strip with hover (Jupyter-friendly) |
+| `ignore_case` | `True` | Targets that differ only in casing (`Bad` / `bad`) are one target, shown in the most frequent spelling |
 
 ### Use cases
 
 - **Vocabulary holdout:** test targets should appear only in the test hue — see [Data splits](data-splits.md).
-- **Outliers:** set `interactive=True` and hover for masked context.
+- **Outliers:** set `interactive=True` and hover for the masked sentence and the factual, alternative and encoder input token (the plotted token is the encoder input, the alternative by default).
 - **Publication:** `plot_style="box"`, set `output`, `legend_loc`.
 
 <!-- DOC_PLOT: docs/img/data_splits_encoder_by_target_test.png

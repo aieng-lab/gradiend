@@ -6,8 +6,9 @@ Not prediction-specific; used by text filtering in general.
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Sequence, Union
 
 # Type alias for spacy morph/tag constraints (e.g. {"pos": "DET", "Case": "Nom"})
 SpacyTagSpec = Dict[str, str]
@@ -116,3 +117,72 @@ class TextFilterConfig:
             else:
                 raise TypeError(f"target must be str or TextFilterConfig; got {type(t)}")
         return out
+
+
+class PairedTextFilterConfig:
+    """Group of 1:1 counterpart targets with one class per tuple position (e.g. British/American spelling).
+
+    Use it in ``TextPredictionDataCreator.feature_targets`` instead of one :class:`TextFilterConfig` per class.
+    Every pair lists one word per class; the creator adds the counterpart of each matched word as an extra
+    column, so every training row carries its explicit alternative.
+
+    ``pairs`` is a list of tuples together with ``ids`` (one class id per tuple position), or a dict
+    ``{class_id: [words]}`` of aligned lists (``ids`` then comes from the keys). Several groups with the same
+    ``ids`` extend the same classes, e.g. one group per part of speech. A sentence with several different words
+    of the same class is skipped, because a row has only one counterpart.
+
+    Args:
+        pairs: List of tuples (one word per class) or dict of aligned word lists.
+        ids: Class ids for the tuple positions; omit for dict ``pairs``.
+        **filter_options: Passed to :class:`TextFilterConfig` for every class (``spacy_tags``, ``use_lemma``,
+            ``mask``, ``weight``, ``min_left_context_words``).
+
+    Example:
+        ``PairedTextFilterConfig(pairs=[("colour", "color"), ("centre", "center")], ids=("BE", "AE"),
+        spacy_tags={"pos": "NOUN"})``
+    """
+
+    def __init__(
+        self,
+        pairs: Union[Sequence[Sequence[str]], Dict[str, Sequence[str]]],
+        ids: Optional[Sequence[str]] = None,
+        **filter_options: Any,
+    ) -> None:
+        if isinstance(pairs, dict):
+            if ids is not None:
+                raise ValueError("PairedTextFilterConfig: ids come from the keys of a dict pairs; do not pass both")
+            ids = tuple(pairs)
+            lengths = {cid: len(words) for cid, words in pairs.items()}
+            if len(set(lengths.values())) > 1:
+                raise ValueError(f"PairedTextFilterConfig: aligned lists must have the same length, got {lengths}")
+            pairs = list(zip(*pairs.values()))
+        elif ids is None:
+            raise ValueError("PairedTextFilterConfig: pass ids (one class id per tuple position) or a dict pairs")
+        ids = tuple(ids)
+        pairs = [tuple(pair) for pair in pairs]
+        if len(ids) < 2 or len(set(ids)) != len(ids) or not all(isinstance(cid, str) and cid for cid in ids):
+            raise ValueError(f"PairedTextFilterConfig: ids must be two or more distinct non-empty strings, got {ids!r}")
+        if not pairs:
+            raise ValueError("PairedTextFilterConfig.pairs must be non-empty")
+        for pair in pairs:
+            if len(pair) != len(ids) or not all(isinstance(word, str) and word.strip() for word in pair):
+                raise ValueError(f"PairedTextFilterConfig: each pair needs one non-empty string per id {ids!r}, got {pair!r}")
+            if len({word.lower() for word in pair}) != len(pair):
+                raise ValueError(f"PairedTextFilterConfig: pair {pair!r} contains the same word twice")
+        reserved = {"target", "targets", "id"} & set(filter_options)
+        if reserved:
+            raise TypeError(f"PairedTextFilterConfig: {sorted(reserved)} are defined by pairs and ids")
+        self.ids = ids
+        self.pairs = list(dict.fromkeys(pairs))
+        self.filter_options = filter_options
+        self.to_configs()  # fail early on invalid filter options
+
+    def to_configs(self) -> List[TextFilterConfig]:
+        """Return one ordinary :class:`TextFilterConfig` per class id."""
+        return [
+            TextFilterConfig(targets=[pair[i] for pair in self.pairs], id=cid, **copy.deepcopy(self.filter_options))
+            for i, cid in enumerate(self.ids)
+        ]
+
+    def __repr__(self) -> str:
+        return f"PairedTextFilterConfig(pairs={self.pairs!r}, ids={self.ids!r}, **{self.filter_options!r})"

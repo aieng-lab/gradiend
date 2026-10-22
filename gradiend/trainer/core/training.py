@@ -447,6 +447,11 @@ def train(
                     eval_result = out
                     step_kwargs['eval_result'] = eval_result
             time_stats['eval'] += time.time() - step_start
+            if control.get("should_stop"):
+                # A callback (e.g. an LR-probe stop rule) decided the run is settled; the epoch-end
+                # hooks below still run, so the final checkpoint and training.json are written.
+                logger.info("Training stopped early by a callback at step %d.", global_step)
+                break
             if max_iter is not None and global_step >= max_iter:
                 break
             

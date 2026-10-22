@@ -49,6 +49,7 @@ def _make_tiny_mwg(source: str) -> _TinyMWG:
         input_dim=4,
         latent_dim=1,
         param_map={"weight": {"shape": (2, 2), "repr": "all"}},
+        device=torch.device("cpu"),  # the tiny base model lives on the CPU
     )
     with torch.no_grad():
         gradiend.decoder[0].linear.weight.fill_(1.0)

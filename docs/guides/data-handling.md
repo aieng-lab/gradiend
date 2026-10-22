@@ -43,7 +43,7 @@ Each config/subset of the dataset must have:
 
 | Column | Required | Description |
 |--------|----------|-------------|
-| `masked` | ✅ | Sentence with `[MASK]` at the target position. |
+| `masked` | ✅ | Sentence with `[MASK]` at the target position (another marker: set `mask_placeholder`). |
 | `split` | ✅ | Dataset split: `train`, `validation` (or `val`), `test`. |
 | Factual token | ✅ | One column holding the token that fills the mask for this class. See below. |
 

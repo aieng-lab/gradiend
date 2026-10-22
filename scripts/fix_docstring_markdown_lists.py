@@ -71,7 +71,8 @@ def fix_docstring_content_lines(content_lines: list[str]) -> list[str]:
     for line in content_lines:
         stripped = line.lstrip()
 
-        if stripped.startswith("```"):
+        is_fence_line = stripped.startswith("```")
+        if is_fence_line:
             in_fence = not in_fence
 
         if not in_fence and _is_list_start(stripped):
@@ -88,7 +89,7 @@ def fix_docstring_content_lines(content_lines: list[str]) -> list[str]:
 
         out.append(line)
 
-        if not in_fence and stripped and not _is_list_start(stripped):
+        if not in_fence and not is_fence_line and stripped and not _is_list_start(stripped):
             prev_idx = _last_nonblank_index(out[:-1])
             if prev_idx is not None and _is_list_start(out[prev_idx].lstrip()):
                 if not _has_blank_since(out[:-1], prev_idx):

@@ -330,6 +330,8 @@ def resolve_plot_title_with_convergence(
     if title is True:
         base = getattr(trainer, "run_id", None) if trainer is not None else None
         base = base or default
+        if base is None:  # no run id and no default: no title (not the text "None")
+            return False
     else:
         base = str(title)
     if not highlight_non_convergence:

@@ -302,6 +302,16 @@ class SelectionPolicy(Protocol):
         ...
 
 
+def _id_feature_factor(cid: CandidateId) -> float:
+    """Feature factor of a grid candidate id: ``(ff, lr)`` tuple or ``{"feature_factor": ..., ...}`` dict."""
+    return cid["feature_factor"] if isinstance(cid, dict) else cid[0]
+
+
+def _id_learning_rate(cid: CandidateId) -> float:
+    """Learning rate of a grid candidate id: ``(ff, lr)`` tuple or ``{"learning_rate": ..., ...}`` dict."""
+    return cid["learning_rate"] if isinstance(cid, dict) else cid[1]
+
+
 @dataclass(frozen=True)
 class LMSThresholdPolicy:
     """
@@ -312,7 +322,7 @@ class LMSThresholdPolicy:
       (keeps your previous behavior, but expressed as a policy).
     """
     ratio: float = 0.99
-    lr_from_id: Callable[[CandidateId], float] = lambda cid: cid[1]
+    lr_from_id: Callable[[CandidateId], float] = _id_learning_rate
     require_base_lms: bool = True
 
     def select(self, metric: str, candidates: Sequence[Candidate], ctx: BaseContext) -> Optional[Candidate]:
@@ -407,8 +417,8 @@ def compute_metric_summaries(
     *,
     selector: SelectionPolicy,
     extractor: Callable[[Mapping[Any, Mapping[str, Any]]], Tuple[List[Candidate], BaseContext]] = default_extract_candidates,
-    feature_factor_from_id: Callable[[CandidateId], float] = lambda cid: cid[0],
-    lr_from_id: Callable[[CandidateId], float] = lambda cid: cid[1],
+    feature_factor_from_id: Callable[[CandidateId], float] = _id_feature_factor,
+    lr_from_id: Callable[[CandidateId], float] = _id_learning_rate,
     empty_default_id: str = "base",
     class_to_ff: Optional[Mapping[str, float]] = None,
 ) -> Dict[str, Dict[str, Any]]:
@@ -533,6 +543,79 @@ def compute_metric_summaries(
 # ============================
 
 
+def _decoder_results_support_metrics(
+    results: Mapping[Any, Mapping[str, Any]],
+    metrics: Sequence[str],
+    *,
+    extractor: Callable[[Mapping[Any, Mapping[str, Any]]], Tuple[List[Candidate], BaseContext]] = default_extract_candidates,
+) -> Tuple[bool, List[str]]:
+    """Whether cached decoder-grid rows expose every metric needed for summarization."""
+    if not metrics:
+        return True, []
+    try:
+        candidates, _ = extractor(results)
+    except Exception:
+        return False, list(metrics)
+    available: set = set()
+    for candidate in candidates:
+        available.update(candidate.metrics.keys())
+    missing = [m for m in metrics if m not in available]
+    return (not missing), missing
+
+
+def _decoder_cache_selection_context(
+    *,
+    prob_on_other_class: bool,
+    increase_target_probabilities: bool,
+    metrics_for_summary: Sequence[str],
+    classes_to_eval: Sequence[str],
+) -> Dict[str, Any]:
+    """Fingerprint of what the cached grid was summarized for (invalidates the cache when it changes)."""
+    return {
+        "prob_on_other_class": bool(prob_on_other_class),
+        "increase_target_probabilities": bool(increase_target_probabilities),
+        "metrics_for_summary": sorted(str(m) for m in metrics_for_summary),
+        "classes_to_eval": sorted(str(c) for c in classes_to_eval),
+    }
+
+
+def _decoder_cache_selection_matches(payload: Mapping[str, Any], expected: Mapping[str, Any]) -> bool:
+    """Whether a cache's recorded selection context equals ``expected``.
+
+    Caches written before the context was recorded carry none and are still accepted; the
+    required-metrics check (:func:`_decoder_results_support_metrics`) covers those.
+    """
+    cached = payload.get("selection_context")
+    if not isinstance(cached, dict):
+        return True
+    return all(cached.get(key) == value for key, value in expected.items())
+
+
+def _decoder_cache_payload(
+    *,
+    part: str,
+    split_cache_key: str,
+    max_size_training_like: Any,
+    max_size_neutral: Any,
+    feature_factors: Sequence[float],
+    lrs: Sequence[float],
+    results: Any,
+    selection_context: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {
+        "part": part,
+        "split": split_cache_key,
+        "max_size_training_like": max_size_training_like,
+        "max_size_neutral": max_size_neutral,
+        "feature_factors": list(feature_factors),
+        "lrs": list(lrs),
+        "results": results,
+    }
+    if selection_context is not None:
+        payload["selection_context"] = dict(selection_context)
+    return payload
+
+
 class DecoderEvaluator:
     """
     Decoder evaluation: grid search over (feature_factor, lr), cache, and compute best selection summary.
@@ -622,17 +705,11 @@ class DecoderEvaluator:
         Returns:
             Flat dict with:
 
-              - For strengthen (increase_target_probabilities=True): one entry per target class (e.g. dec_result['3SG']).
-              - For weaken (increase_target_probabilities=False): one entry per target class with \"_weaken\" suffix
-
-                (e.g. dec_result['3SG_weaken']).
-
-              - Each summary entry contains selected metric `value`, `feature_factor`, `learning_rate`, `id`,
-
-                a `strengthen` flag, and LMS fields (`lms`, `base_lms`).
-
-              - 'grid': candidate id -> full evaluation results.
-              - When plot=True, also 'plot_paths' and 'plot_path'.
+            - For strengthen (increase_target_probabilities=True): one entry per target class (e.g. dec_result['3SG']).
+            - For weaken (increase_target_probabilities=False): one entry per target class with a \"_weaken\" suffix (e.g. dec_result['3SG_weaken']).
+            - Each summary entry contains selected metric `value`, `feature_factor`, `learning_rate`, `id`, a `strengthen` flag, and LMS fields (`lms`, `base_lms`).
+            - 'grid': candidate id -> full evaluation results.
+            - When plot=True, also 'plot_paths' and 'plot_path'.
         """
         logger.info(f"Starting decoder evaluation with part={part}")
         use_cache = trainer._resolve_artifact_use_cache(use_cache, fallback=False)
@@ -709,6 +786,13 @@ class DecoderEvaluator:
             else:
                 # Weaken only: keys "3SG_weaken", "3PL_weaken"
                 metrics_for_summary = [f"{c}_weaken" for c in classes_to_eval]
+
+        selection_context = _decoder_cache_selection_context(
+            prob_on_other_class=prob_on_other_class,
+            increase_target_probabilities=increase_target_probabilities,
+            metrics_for_summary=metrics_for_summary,
+            classes_to_eval=classes_to_eval,
+        )
 
         # Per-class strengthen ff (see gradiend.model._source_target module docstring).
         class_to_ff: Optional[Dict[str, float]] = None
@@ -792,8 +876,22 @@ class DecoderEvaluator:
                     and cached_max_size_training_like == max_size_training_like
                     and cached_max_size_neutral == max_size_neutral
                 )
+                if cache_matches and not _decoder_cache_selection_matches(payload, selection_context):
+                    logger.info("Decoder cache selection context mismatch at %s; recomputing.", cache_file)
+                    cache_matches = False
                 if cache_matches:
                     relevant_results = convert_results_to_dict(payload.get("results", []))
+                    if len(relevant_results) >= expected_results:
+                        metrics_ok, missing_metrics = _decoder_results_support_metrics(
+                            relevant_results, metrics_for_summary, extractor=summary_extractor
+                        )
+                        if not metrics_ok:
+                            logger.info(
+                                "Decoder cache at %s lacks required metrics %s; recomputing.",
+                                cache_file,
+                                missing_metrics,
+                            )
+                            relevant_results = {}
                     if len(relevant_results) >= expected_results:
                         logger.info("Using cached decoder grid from %s", cache_file)
                         summary = self.compute_metric_summaries(
@@ -849,15 +947,16 @@ class DecoderEvaluator:
                             )
                         if cache_file:
                             try:
-                                payload_update = {
-                                    "part": part,
-                                    "split": split_cache_key,
-                                    "max_size_training_like": max_size_training_like,
-                                    "max_size_neutral": max_size_neutral,
-                                    "feature_factors": list(feature_factors),
-                                    "lrs": list(lrs),
-                                    "results": convert_results_to_list(relevant_results),
-                                }
+                                payload_update = _decoder_cache_payload(
+                                    part=part,
+                                    split_cache_key=split_cache_key,
+                                    max_size_training_like=max_size_training_like,
+                                    max_size_neutral=max_size_neutral,
+                                    feature_factors=feature_factors,
+                                    lrs=lrs,
+                                    results=convert_results_to_list(relevant_results),
+                                    selection_context=selection_context,
+                                )
                                 with open(cache_file, "w") as f:
                                     json.dump(payload_update, f, indent=2)
                             except Exception as e:
@@ -1037,15 +1136,16 @@ class DecoderEvaluator:
             )
             if cache_file:
                 try:
-                    payload = {
-                        "part": part,
-                        "split": split_cache_key,
-                        "max_size_training_like": max_size_training_like,
-                        "max_size_neutral": max_size_neutral,
-                        "feature_factors": list(feature_factors),
-                        "lrs": list(lrs),
-                        "results": convert_results_to_list(relevant_results),
-                    }
+                    payload = _decoder_cache_payload(
+                        part=part,
+                        split_cache_key=split_cache_key,
+                        max_size_training_like=max_size_training_like,
+                        max_size_neutral=max_size_neutral,
+                        feature_factors=feature_factors,
+                        lrs=lrs,
+                        results=convert_results_to_list(relevant_results),
+                        selection_context=selection_context,
+                    )
                     with open(cache_file, "w") as f:
                         json.dump(payload, f, indent=2)
                 except Exception as e:
@@ -1069,15 +1169,16 @@ class DecoderEvaluator:
 
         if cache_file and not plot:
             try:
-                payload = {
-                    "part": part,
-                    "split": split_cache_key,
-                    "max_size_training_like": max_size_training_like,
-                    "max_size_neutral": max_size_neutral,
-                    "feature_factors": list(feature_factors),
-                    "lrs": list(lrs),
-                    "results": convert_results_to_list(relevant_results),
-                }
+                payload = _decoder_cache_payload(
+                    part=part,
+                    split_cache_key=split_cache_key,
+                    max_size_training_like=max_size_training_like,
+                    max_size_neutral=max_size_neutral,
+                    feature_factors=feature_factors,
+                    lrs=lrs,
+                    results=convert_results_to_list(relevant_results),
+                    selection_context=selection_context,
+                )
                 with open(cache_file, "w") as f:
                     json.dump(payload, f, indent=2)
             except Exception as e:
@@ -1098,8 +1199,8 @@ class DecoderEvaluator:
             metrics: Optional[Sequence[str]] = None,
             extractor: Callable[
                 [Mapping[Any, Mapping[str, Any]]], Tuple[List[Candidate], BaseContext]] = default_extract_candidates,
-            feature_factor_from_id: Callable[[CandidateId], float] = lambda cid: cid[0],
-            lr_from_id: Callable[[CandidateId], float] = lambda cid: cid[1],
+            feature_factor_from_id: Callable[[CandidateId], float] = _id_feature_factor,
+            lr_from_id: Callable[[CandidateId], float] = _id_learning_rate,
             empty_default_id: str = "base",
             class_to_ff: Optional[Mapping[str, float]] = None,
     ) -> Dict[str, Dict[str, Any]]:

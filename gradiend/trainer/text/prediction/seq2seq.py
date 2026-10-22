@@ -10,14 +10,20 @@ import torch.nn.functional as F
 from gradiend.trainer.text.prediction.objective_hints import format_seq2seq_objective_hint
 
 
-def mask_placeholder_for_tokenizer(masked_text: str, tokenizer: Any) -> str:
-    """Replace ``[MASK]`` with the tokenizer's mask token or a T5-style sentinel."""
-    if "[MASK]" not in masked_text:
+def mask_placeholder_for_tokenizer(
+    masked_text: str,
+    tokenizer: Any,
+    *,
+    mask_placeholder: str = "[MASK]",
+) -> str:
+    """Replace the dataset placeholder with the tokenizer mask token or a T5-style sentinel."""
+    mask_placeholder = str(mask_placeholder)
+    if mask_placeholder not in masked_text:
         return masked_text
     mask_token = getattr(tokenizer, "mask_token", None)
     if mask_token:
-        return masked_text.replace("[MASK]", mask_token)
-    return masked_text.replace("[MASK]", "<extra_id_0>")
+        return masked_text.replace(mask_placeholder, mask_token)
+    return masked_text.replace(mask_placeholder, "<extra_id_0>")
 
 
 def tokenize_prediction_label(tokenizer: Any, label: str) -> list[int]:
@@ -46,19 +52,30 @@ def seq2seq_mask_token_ids(tokenizer: Any, count: int) -> list[int]:
     return [int(tokenizer.convert_tokens_to_ids(f"<extra_id_{i}>")) for i in range(count)]
 
 
-def expand_mask_placeholders_in_text(masked_text: str, tokenizer: Any, num_tokens: int) -> str:
+def expand_mask_placeholders_in_text(
+    masked_text: str,
+    tokenizer: Any,
+    num_tokens: int,
+    *,
+    mask_placeholder: str = "[MASK]",
+) -> str:
     """Expand one mask placeholder into ``num_tokens`` mask/sentinel slots (BERT-style)."""
+    mask_placeholder = str(mask_placeholder)
     if num_tokens <= 1:
-        return mask_placeholder_for_tokenizer(masked_text, tokenizer)
+        return mask_placeholder_for_tokenizer(
+            masked_text,
+            tokenizer,
+            mask_placeholder=mask_placeholder,
+        )
     mask_token = getattr(tokenizer, "mask_token", None)
     if mask_token and mask_token in masked_text:
         return masked_text.replace(mask_token, " ".join([mask_token] * num_tokens), 1)
-    if "[MASK]" in masked_text:
+    if mask_placeholder in masked_text:
         if mask_token:
             replacement = " ".join([mask_token] * num_tokens)
         else:
             replacement = " ".join(f"<extra_id_{i}>" for i in range(num_tokens))
-        return masked_text.replace("[MASK]", replacement, 1)
+        return masked_text.replace(mask_placeholder, replacement, 1)
     if "<extra_id_0>" in masked_text:
         replacement = " ".join(f"<extra_id_{i}>" for i in range(num_tokens))
         return masked_text.replace("<extra_id_0>", replacement, 1)
@@ -242,13 +259,19 @@ def create_seq2seq_mlm_item(
     *,
     base_model: Optional[Any] = None,
     device: Optional[torch.device] = None,
+    mask_placeholder: str = "[MASK]",
 ) -> Dict[str, torch.Tensor]:
     """Build encoder inputs with BERT-style labels at the mask/sentinel position(s)."""
     max_len = _effective_max_length(tokenizer, base_model)
     target_tokens = tokenize_prediction_label(tokenizer, label)
     if not target_tokens:
         raise ValueError(f"Could not tokenize prediction label={label!r}")
-    encoder_text = expand_mask_placeholders_in_text(masked_text, tokenizer, len(target_tokens))
+    encoder_text = expand_mask_placeholders_in_text(
+        masked_text,
+        tokenizer,
+        len(target_tokens),
+        mask_placeholder=mask_placeholder,
+    )
     enc = tokenizer(
         encoder_text,
         return_tensors="pt",
@@ -290,6 +313,7 @@ def create_seq2seq_decoder_sequence_item(
     device: Optional[torch.device] = None,
     rhs_window: int = -1,
     include_span_sentinels: bool = True,
+    mask_placeholder: str = "[MASK]",
 ) -> Dict[str, torch.Tensor]:
     """
     Build encoder-decoder inputs for multi-token continuation training.
@@ -299,9 +323,12 @@ def create_seq2seq_decoder_sequence_item(
     T5-style sentinel tokenizers, sequence cloze uses the natural span-corruption
     target ``<extra_id_0> continuation <extra_id_1>``.
     """
-    if "[MASK]" not in masked_text:
-        raise ValueError("seq2seq_decoder_sequence_cloze requires a [MASK] placeholder in the template.")
-    prefix, rhs = masked_text.split("[MASK]", 1)
+    mask_placeholder = str(mask_placeholder)
+    if mask_placeholder not in masked_text:
+        raise ValueError(
+            f"seq2seq_decoder_sequence_cloze requires a {mask_placeholder!r} placeholder in the template."
+        )
+    prefix, rhs = masked_text.split(mask_placeholder, 1)
     rhs = _limit_rhs_by_tokens(tokenizer, rhs, rhs_window)
     continuation_ids = _continuation_ids_from_prefix(tokenizer, prefix, str(label))
     if not continuation_ids:
@@ -310,7 +337,11 @@ def create_seq2seq_decoder_sequence_item(
         raise ValueError(f"Could not tokenize continuation label={label!r}")
 
     max_len = _effective_max_length(tokenizer, base_model)
-    encoder_text = mask_placeholder_for_tokenizer(f"{prefix}[MASK]{rhs}", tokenizer)
+    encoder_text = mask_placeholder_for_tokenizer(
+        f"{prefix}{mask_placeholder}{rhs}",
+        tokenizer,
+        mask_placeholder=mask_placeholder,
+    )
     enc = tokenizer(
         encoder_text,
         return_tensors="pt",
@@ -338,9 +369,10 @@ def create_seq2seq_decoder_item(
     *,
     base_model: Optional[Any] = None,
     device: Optional[torch.device] = None,
+    mask_placeholder: str = "[MASK]",
 ) -> Dict[str, torch.Tensor]:
     """Build encoder inputs + single-token decoder labels for full seq2seq training."""
-    if "[MASK]" in masked_text:
+    if mask_placeholder in masked_text:
         item = create_seq2seq_decoder_sequence_item(
             masked_text,
             label,
@@ -349,6 +381,7 @@ def create_seq2seq_decoder_item(
             device=device,
             rhs_window=0,
             include_span_sentinels=False,
+            mask_placeholder=mask_placeholder,
         )
         if item["labels"].shape[-1] != 1:
             raise ValueError(
@@ -359,7 +392,11 @@ def create_seq2seq_decoder_item(
         return item
 
     max_len = _effective_max_length(tokenizer, base_model)
-    encoder_text = mask_placeholder_for_tokenizer(masked_text, tokenizer)
+    encoder_text = mask_placeholder_for_tokenizer(
+        masked_text,
+        tokenizer,
+        mask_placeholder=mask_placeholder,
+    )
     enc = tokenizer(
         encoder_text,
         return_tensors="pt",
@@ -391,6 +428,7 @@ def score_seq2seq_continuation_logprob(
     *,
     rhs: str = "",
     include_span_sentinels: bool = True,
+    mask_placeholder: str = "[MASK]",
 ) -> float:
     """
     Sum log-probs of a teacher-forced seq2seq decoder target.
@@ -405,7 +443,11 @@ def score_seq2seq_continuation_logprob(
     if not continuation_ids:
         return float("-inf")
 
-    encoder_text = mask_placeholder_for_tokenizer(f"{prefix}[MASK]{rhs}", tokenizer)
+    encoder_text = mask_placeholder_for_tokenizer(
+        f"{prefix}{mask_placeholder}{rhs}",
+        tokenizer,
+        mask_placeholder=mask_placeholder,
+    )
     enc = tokenizer(encoder_text, return_tensors="pt", max_length=512, truncation=True)
     enc = {k: v.to(device) for k, v in enc.items()}
 

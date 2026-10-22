@@ -11,6 +11,24 @@ import pandas as pd
 GroupingSpec = Union[str, Dict[str, str], Callable[[str], str], None]
 
 
+def topk_base_indices(model: object, part: str, topk: Union[int, float]) -> List[int]:
+    """Top-k indices in the base-parameter space, so differently pruned models are comparable.
+
+    ``ModelWithGradiend.get_topk_weights`` returns them already. A bare ``ParamMappedGradiendModel`` returns
+    indices of its own pruned input space, which are mapped to the base space here.
+    """
+    from gradiend.model import ParamMappedGradiendModel
+
+    if isinstance(model, ParamMappedGradiendModel):
+        local = model.get_topk_weights(part=part, topk=topk)
+        if not local:
+            return []
+        import torch
+
+        return model._get_base_global_index_map()[torch.as_tensor(local, dtype=torch.long)].tolist()
+    return list(model.get_topk_weights(part=part, topk=topk))
+
+
 def _validate_models(models: Dict[str, object]) -> None:
     if not isinstance(models, dict):
         raise TypeError("models must be a dict mapping labels to models")

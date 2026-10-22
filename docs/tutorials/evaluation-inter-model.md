@@ -51,6 +51,16 @@ models = {t.run_id: t.get_model() for t in trainers}
 
 [:material-file-code-outline: `train_gender_de_detailed.py`](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/train_gender_de_detailed.py)
 
+## One call for any number of runs
+
+[`plot_topk_overlap`][gradiend.visualizer.topk.plot_topk_overlap] draws a Venn diagram for 2-6 models and a heatmap for more. Pass a dict `{label: model}` or simply a list of models (labelled after their checkpoint folders):
+
+```python
+from gradiend.visualizer.topk import plot_topk_overlap
+
+plot_topk_overlap([t.get_model() for t in trainers], topk=1000)
+```
+
 ## Venn Diagrams
 
 For 2-6 runs, you can use Venn diagrams to visualize the top-k overlap. The advantage over heatmaps is that Venn diagrams show the size of each set and the intersection counts for all subsets (e.g. how many parameters are in the top-k of run A and B but not run C or D). 

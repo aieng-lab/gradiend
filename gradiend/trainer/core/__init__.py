@@ -12,6 +12,8 @@ from .callbacks import (
     get_default_callbacks,
 )
 from .transition_selection import TransitionSpec, pair, identity, expand_transition_selection
+from .lr_search import LRSearch, LRSearchConfig, LRSearchResult, NoConvergentLearningRate, RunState, tune_learning_rate
+from .signal_checks import SignalDiversityCallback, SignalNotDiverseError, assert_signal_diverse
 
 __all__ = [
     'train',
@@ -25,4 +27,13 @@ __all__ = [
     'pair',
     'identity',
     'expand_transition_selection',
+    'LRSearch',
+    'LRSearchConfig',
+    'LRSearchResult',
+    'NoConvergentLearningRate',
+    'RunState',
+    'tune_learning_rate',
+    'assert_signal_diverse',
+    'SignalDiversityCallback',
+    'SignalNotDiverseError',
 ]

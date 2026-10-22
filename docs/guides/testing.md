@@ -14,7 +14,7 @@ python -m pytest tests/ -v --tb=long
 pytest test_bench/examples/ -v -s
 ```
 
-These tests are marked `slow` and `integration`; they run each example as a subprocess and assert exit code 0. On failure, full logs are written to `test_bench/results/last_failure_<module>.log`. See [test_bench/README.md](../../test_bench/README.md) for smoke-only options (e.g. `-m integration`) and details.
+These tests are marked `slow` and `integration`; they run each example as a subprocess and assert exit code 0. On failure, full logs are written to `test_bench/results/last_failure_<module>.log`. See [test_bench/README.md](https://github.com/aieng-lab/gradiend/blob/main/test_bench/README.md) for smoke-only options (e.g. `-m integration`) and details.
 
 For an offline GPU job, first prepare every dataset, model, spaCy package, and
 the complete raw Wikipedia dataset snapshot using the same shared cache as the job:

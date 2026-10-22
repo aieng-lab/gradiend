@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import glob
 import json
 import os
 import math
@@ -36,10 +37,10 @@ from gradiend.comparison.seed_policy import (
     comparison_seed_metadata,
     unwrap_trainer,
 )
-from gradiend.model.utils import is_seq2seq_model
+from gradiend.model.utils import is_decoder_only_model as _is_decoder_only, is_seq2seq_model
 from gradiend.trainer.core.cache_policy import coerce_artifact_use_cache
 from gradiend.trainer.core.unified_schema import normalize_transition_id, transition_id
-from gradiend.trainer.text.prediction.dataset import TextTrainingDataset
+from gradiend.trainer.text.prediction.dataset import TextTrainingDataset, resolve_mask_placeholder
 from gradiend.util.encoding_rows import encode_dataset_to_rows
 from gradiend.util.logging import get_logger
 from gradiend.util.paths import invalidate_encoder_metrics_cache, resolve_encoder_analysis_path
@@ -370,7 +371,7 @@ def _gradient_dataset_for_unified_df(
     else:
         objective_name = "mlm"
     is_seq2seq = is_seq2seq_model(tokenizer)
-    is_decoder_only_model = False if is_seq2seq else tokenizer.mask_token_id is None
+    is_decoder_only_model = False if is_seq2seq else _is_decoder_only(tokenizer)
     if objective_name == "clm_sequence_cloze":
         is_decoder_only_model = True
     elif objective_name == "seq2seq_decoder_sequence_cloze":
@@ -386,6 +387,10 @@ def _gradient_dataset_for_unified_df(
         seed=42,
         prediction_objective=objective_name,
         rhs_window=getattr(getattr(trainer, "_training_args", None), "decoder_sequence_cloze_rhs_window", -1),
+        mask_placeholder=resolve_mask_placeholder(
+            config=getattr(trainer, "config", None),
+            training_args=getattr(trainer, "_training_args", None),
+        ),
     )
     return trainer.create_gradient_training_dataset(text_ds, model)
 
@@ -981,6 +986,58 @@ def build_cross_task_encoder_summary(
         if root_dir and expected_transitions:
             write_cross_task_transition_order(root_dir, sorted(expected_transitions))
     return summary
+
+
+def load_saved_cross_encoding_inputs(
+    root: str,
+    run_ids: Optional[Sequence[str]] = None,
+    *,
+    split: str = "test",
+) -> Tuple[Dict[str, Tuple[str, str]], Dict[str, str], Dict[str, Any]]:
+    """Read the inputs of the oriented cross-encoding matrix from saved run folders.
+
+    Needs neither trainers nor data: every run folder ``<root>/<run_id>/`` holds the saved model
+    (``model/``) and its cached cross-task encoder evaluation (``encoded_values_*_split_<split>.csv``),
+    as written by ``plot_cross_encoding_heatmap`` and published with the multilingual GRADIEND models.
+
+    Args:
+        root: Folder with one subfolder per run.
+        run_ids: Runs to load. By default every subfolder with a saved model.
+        split: Split of the cached evaluation (``"test"``).
+
+    Returns:
+        ``(pair_by_id, source_by_id, encoder_summary)``, the arguments of
+        ``compute_anchor_aligned_encoding_matrix``.
+
+    Raises:
+        FileNotFoundError: If a run has no saved model or no cached evaluation.
+        ValueError: If a run does not encode exactly two classes or has several cached evaluations.
+    """
+    from gradiend.model.utils import read_gradiend_context
+    from gradiend.util.paths import has_saved_model
+
+    root = os.fspath(root)
+    if run_ids is None:
+        run_ids = sorted(
+            name for name in os.listdir(root) if has_saved_model(os.path.join(root, name, "model"))
+        )
+    pair_by_id: Dict[str, Tuple[str, str]] = {}
+    source_by_id: Dict[str, str] = {}
+    encoder_summary: Dict[str, Any] = {}
+    for run_id in run_ids:
+        run_dir = os.path.join(root, run_id)
+        source, _, direction = read_gradiend_context(os.path.join(run_dir, "model"))
+        if not direction or len(direction) != 2:
+            raise ValueError(f"Run {run_id!r} must encode exactly two classes, got {direction!r}")
+        caches = sorted(glob.glob(os.path.join(run_dir, f"encoded_values*_split_{split}.csv")))
+        if not caches:
+            raise FileNotFoundError(f"Run {run_id!r} has no cached encoder evaluation for split {split!r} in {run_dir}")
+        if len(caches) > 1:
+            raise ValueError(f"Run {run_id!r} has several cached encoder evaluations for split {split!r}: {caches}")
+        pair_by_id[run_id] = tuple(direction)
+        source_by_id[run_id] = source
+        encoder_summary[run_id] = {"encoder_df": pd.read_csv(caches[0])}
+    return pair_by_id, source_by_id, encoder_summary
 
 
 def _transition_ids_from_eval_rows(eval_rows: pd.DataFrame) -> set[str]:

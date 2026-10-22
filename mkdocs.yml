@@ -93,6 +93,7 @@ nav:
     - Trainer suites: guides/trainer-suites.md
     - Saving & loading: guides/saving-loading.md
     - Training arguments: guides/training-arguments.md
+    - Learning-rate search: guides/learning-rate-search.md
     - Token prediction methods: guides/token-prediction-methods.md
     - Decoder-only models: guides/decoder-only.md
     - Decoder evaluation targets: guides/decoder-eval-targets.md
@@ -109,6 +110,7 @@ nav:
         - Data:
             - Overview: api/data/index.md
             - TextFilterConfig: api/data/TextFilterConfig.md
+            - PairedTextFilterConfig: api/data/PairedTextFilterConfig.md
             - TextPredictionDataCreator: api/data/TextPredictionDataCreator.md
             - TextPreprocessConfig: api/data/TextPreprocessConfig.md
         - Training:
@@ -129,6 +131,7 @@ nav:
             - TrainerConfig: api/training/TrainerConfig.md
             - TransitionSpec: api/training/TransitionSpec.md
             - set_seed: api/training/set_seed.md
+            - Learning-rate search: api/training/lr_search.md
         - Evaluation:
             - Overview: api/evaluation/index.md
             - Evaluator: api/evaluation/Evaluator.md
@@ -141,6 +144,7 @@ nav:
             - plot_encoder_distributions: api/visualization/plot_encoder_distributions.md
             - plot_encoder_scatter: api/visualization/plot_encoder_scatter.md
             - plot_encoder_by_target: api/visualization/plot_encoder_by_target.md
+            - plot_topk_overlap: api/visualization/plot_topk_overlap.md
             - plot_topk_overlap_heatmap: api/visualization/plot_topk_overlap_heatmap.md
             - plot_topk_overlap_venn: api/visualization/plot_topk_overlap_venn.md
             - plot_similarity_heatmap: api/visualization/plot_similarity_heatmap.md
@@ -155,7 +159,10 @@ nav:
             - compute_similarity_matrix: api/comparison/compute_similarity_matrix.md
             - compute_grouped_similarity_matrices: api/comparison/compute_grouped_similarity_matrices.md
             - compute_trainer_pair_encoding_matrix: api/comparison/compute_trainer_pair_encoding_matrix.md
+            - build_cross_task_encoder_summary: api/comparison/build_cross_task_encoder_summary.md
             - compute_anchor_aligned_encoding_matrix: api/comparison/compute_anchor_aligned_encoding_matrix.md
+            - aggregate_anchor_aligned_encoding_rows: api/comparison/aggregate_anchor_aligned_encoding_rows.md
+            - load_saved_cross_encoding_inputs: api/comparison/load_saved_cross_encoding_inputs.md
             - compute_gradiend_feature_cross_encoding_matrix: api/comparison/compute_gradiend_feature_cross_encoding_matrix.md
             - compute_gradiend_transition_cross_encoding_matrix: api/comparison/compute_gradiend_transition_cross_encoding_matrix.md
     - Citation: citation.md

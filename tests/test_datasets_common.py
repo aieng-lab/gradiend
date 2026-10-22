@@ -38,6 +38,7 @@ class TestGradientTrainingDataset:
         gradient_creator = MagicMock(return_value=torch.randn(100))
         
         dataset = GradientTrainingDataset(
+            device=torch.device("cpu"),
             training_data=training_data,
             gradient_creator=gradient_creator,
             source="factual",
@@ -48,8 +49,17 @@ class TestGradientTrainingDataset:
         assert dataset.gradient_creator == gradient_creator
         assert dataset.source == "factual"
         assert dataset.target == "diff"
-        assert dataset.device.type == "cpu"  # Defaults to CPU if CUDA not available
+        assert dataset.device.type == "cpu"  # the explicit device passed above
     
+    def test_dataset_default_device_follows_cuda_availability(self):
+        """Without an explicit device the dataset uses CUDA when available, else the CPU."""
+        training_data = MockTrainingData([{"factual": torch.randn(10), "alternative": torch.randn(10)}])
+        dataset = GradientTrainingDataset(
+            training_data=training_data,
+            gradient_creator=MagicMock(return_value=torch.randn(100)),
+        )
+        assert dataset.device.type == ("cuda" if torch.cuda.is_available() else "cpu")
+
     def test_dataset_length(self):
         """Test that dataset length is correct."""
         training_data = MockTrainingData([
@@ -60,6 +70,7 @@ class TestGradientTrainingDataset:
         gradient_creator = MagicMock(return_value=torch.randn(100))
         
         dataset = GradientTrainingDataset(
+            device=torch.device("cpu"),
             training_data=training_data,
             gradient_creator=gradient_creator
         )
@@ -77,6 +88,7 @@ class TestGradientTrainingDataset:
         gradient_creator = MagicMock(return_value=torch.randn(100))
         
         dataset = GradientTrainingDataset(
+            device=torch.device("cpu"),
             training_data=training_data,
             gradient_creator=gradient_creator
         )
@@ -99,6 +111,7 @@ class TestGradientTrainingDataset:
         ])
         
         dataset = GradientTrainingDataset(
+            device=torch.device("cpu"),
             training_data=training_data,
             gradient_creator=gradient_creator,
             source="factual",
@@ -124,6 +137,7 @@ class TestGradientTrainingDataset:
         ])
         
         dataset = GradientTrainingDataset(
+            device=torch.device("cpu"),
             training_data=training_data,
             gradient_creator=gradient_creator,
             source="alternative",
@@ -154,6 +168,7 @@ class TestGradientTrainingDataset:
         ])
 
         dataset = GradientTrainingDataset(
+            device=torch.device("cpu"),
             training_data=training_data,
             gradient_creator=gradient_creator,
             source="alternative",
@@ -178,6 +193,7 @@ class TestGradientTrainingDataset:
         training_data = MockTrainingData(items, batch_size=3)
 
         dataset = GradientTrainingDataset(
+            device=torch.device("cpu"),
             training_data=training_data,
             gradient_creator=lambda inputs: torch.randn(100),
             source="alternative",
@@ -198,6 +214,7 @@ class TestGradientTrainingDataset:
         ])
 
         dataset = GradientTrainingDataset(
+            device=torch.device("cpu"),
             training_data=training_data,
             gradient_creator=lambda inputs: torch.randn(100),
             source="alternative",
@@ -224,6 +241,7 @@ class TestGradientTrainingDataset:
         ])
         
         dataset = GradientTrainingDataset(
+            device=torch.device("cpu"),
             training_data=training_data,
             gradient_creator=gradient_creator,
             source="factual",
@@ -252,6 +270,7 @@ class TestGradientTrainingDataset:
                 return torch.randn(100)
         
         dataset = GradientTrainingDataset(
+            device=torch.device("cpu"),
             training_data=training_data,
             gradient_creator=gradient_creator,
             source="factual",
@@ -283,6 +302,7 @@ class TestGradientTrainingDataset:
             return 0
         
         dataset = GradientTrainingDataset(
+            device=torch.device("cpu"),
             training_data=training_data,
             gradient_creator=gradient_creator,
             source="factual",
@@ -317,6 +337,7 @@ class TestGradientTrainingDataset:
         ])
         
         dataset = GradientTrainingDataset(
+            device=torch.device("cpu"),
             training_data=training_data,
             gradient_creator=gradient_creator,
             source="factual",
@@ -353,6 +374,7 @@ class TestGradientTrainingDataset:
         # Should raise ValueError when cache_dir is set but cache_key_fields is not
         with pytest.raises(ValueError, match="cache_key_fields"):
             GradientTrainingDataset(
+                device=torch.device("cpu"),
                 training_data=training_data,
                 gradient_creator=gradient_creator,
                 cache_dir=cache_dir,
@@ -373,6 +395,7 @@ class TestGradientTrainingDataset:
         gradient_creator = MagicMock(return_value=torch.randn(100))
         
         dataset = GradientTrainingDataset(
+            device=torch.device("cpu"),
             training_data=training_data,
             gradient_creator=gradient_creator,
             cache_dir=cache_dir,
@@ -397,6 +420,7 @@ class TestGradientTrainingDataset:
         gradient_creator = MagicMock(return_value=torch.randn(100))
         
         dataset = GradientTrainingDataset(
+            device=torch.device("cpu"),
             training_data=training_data,
             gradient_creator=gradient_creator,
             return_metadata=True
@@ -420,6 +444,7 @@ class TestGradientTrainingDataset:
         gradient_creator = MagicMock(return_value=torch.randn(100))
         
         dataset = GradientTrainingDataset(
+            device=torch.device("cpu"),
             training_data=training_data,
             gradient_creator=gradient_creator,
             return_metadata=False
@@ -440,6 +465,7 @@ class TestGradientTrainingDataset:
         ])
         
         dataset = GradientTrainingDataset(
+            device=torch.device("cpu"),
             training_data=training_data,
             gradient_creator=gradient_creator,
             source="factual",
@@ -496,6 +522,7 @@ class TestGradientTrainingDataset:
         gradient_creator = MagicMock(return_value=torch.randn(100))
         
         dataset = GradientTrainingDataset(
+            device=torch.device("cpu"),
             training_data=training_data,
             gradient_creator=gradient_creator
         )
@@ -516,6 +543,7 @@ class TestGradientTrainingDataset:
         
         with pytest.raises(AssertionError, match="Invalid source"):
             GradientTrainingDataset(
+                device=torch.device("cpu"),
                 training_data=training_data,
                 gradient_creator=gradient_creator,
                 source="invalid_source"
@@ -531,6 +559,7 @@ class TestGradientTrainingDataset:
         
         with pytest.raises(AssertionError, match="Invalid target"):
             GradientTrainingDataset(
+                device=torch.device("cpu"),
                 training_data=training_data,
                 gradient_creator=gradient_creator,
                 target="invalid_target"
@@ -547,6 +576,7 @@ class TestGradientTrainingDataset:
         # Note: source=None might not be allowed by the assertion, but let's test the behavior
         # if it's allowed
         dataset = GradientTrainingDataset(
+            device=torch.device("cpu"),
             training_data=training_data,
             gradient_creator=gradient_creator,
             source="factual",  # Use valid source for now
@@ -565,6 +595,7 @@ class TestGradientTrainingDataset:
         gradient_creator = MagicMock(return_value=torch.randn(100))
 
         dataset = GradientTrainingDataset(
+            device=torch.device("cpu"),
             training_data=training_data,
             gradient_creator=gradient_creator,
             source="factual",
@@ -585,6 +616,7 @@ class TestGradientTrainingDataset:
         gradient_creator = MagicMock(return_value=torch.randn(100))
 
         dataset = GradientTrainingDataset(
+            device=torch.device("cpu"),
             training_data=training_data,
             gradient_creator=gradient_creator,
             source="alternative",
@@ -594,3 +626,24 @@ class TestGradientTrainingDataset:
         batch = dataset[0]
         assert batch["target"] is None
         assert gradient_creator.call_count == 1
+
+    def test_dataset_out_of_range_index_raises_index_error(self):
+        """Past the end must fail clearly, not return an empty batch (``KeyError: 'factual'`` downstream)."""
+        training_data = MockTrainingData(
+            [{"factual": torch.randn(10), "alternative": torch.randn(10)} for _ in range(4)],
+            batch_size=2,
+        )
+        dataset = GradientTrainingDataset(
+            device=torch.device("cpu"),
+            training_data=training_data,
+            gradient_creator=MagicMock(return_value=torch.randn(100)),
+        )
+
+        assert len(dataset) == 2
+        for bad in (2, 5, -3):
+            with pytest.raises(IndexError, match="out of range"):
+                dataset[bad]
+        # in range, including negative indexing, still works and iteration stops at len()
+        dataset[1]
+        dataset[-1]
+        assert len(list(dataset)) == 2

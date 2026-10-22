@@ -49,6 +49,23 @@ plot_cross_encoding_heatmap(
 ```
 
 
+**From saved runs (no trainers or data):** run folders with a saved model and the cached encoder evaluation, such as the published
+[BERT](https://huggingface.co/aieng-lab/gradiend-multilingual-bert-features) and
+[Qwen](https://huggingface.co/aieng-lab/gradiend-qwen2.5-0.5b-features) models, can be plotted directly:
+
+```python
+from gradiend.comparison import compute_anchor_aligned_encoding_matrix, load_saved_cross_encoding_inputs
+from gradiend.visualizer.heatmaps import plot_comparison_heatmap
+
+pair_by_id, source_by_id, encoder_summary = load_saved_cross_encoding_inputs("runs/my_experiment")
+matrix = compute_anchor_aligned_encoding_matrix(
+    pair_by_id=pair_by_id, encoder_summary=encoder_summary, feature_classes=feature_classes, source_by_id=source_by_id,
+)
+plot_comparison_heatmap(matrix, order=feature_classes)
+```
+
+The [demo notebook "compare features"](https://colab.research.google.com/github/aieng-lab/gradiend/blob/main/gradiend/examples/demo/03_compare_features.ipynb) does this for the 45 published models.
+
 > When you only deal with a *single* feature and train all GRADIENDs using a SymmetricTrainerSuite, you can directly use
 [`suite.plot_cross_encoding_heatmap()`][gradiend.trainer.suite.base.TrainerSuite.plot_cross_encoding_heatmap], see
 [Trainer suites](trainer-suites.md) and

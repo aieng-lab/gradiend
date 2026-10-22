@@ -621,8 +621,10 @@ def merged_to_unified(
 ) -> pd.DataFrame:
     """Convert a merged DataFrame into the unified schema.
 
-    Handles two modes: (1) explicit target columns (target_col, target_class_col)
-    provide factual and alternative tokens per row; (2) when those are absent,
+    Handles three modes: (1) explicit target columns (target_col, target_class_col)
+    provide factual and alternative tokens per row; (2) one counterpart column per
+    class (named like the class, as written for paired targets) provides the
+    alternative of each row, like per-class input; (3) otherwise
     pair (class_a, class_b) is used to derive alternative tokens from the other
     class in the pair.
 
@@ -694,6 +696,15 @@ def merged_to_unified(
                 UNIFIED_TRANSITION: transition_id(str(src), str(tgt)),
             })
         return pd.DataFrame(rows)
+
+    classes = df[label_class_col].astype(str).unique().tolist()
+    if len(classes) >= 2 and all(c in df.columns for c in classes):
+        return per_class_dict_to_unified(
+            per_class_dict_from_label_class_table(df, label_class_col=label_class_col),
+            masked_col=masked_col,
+            split_col=split_col,
+            pair=pair,
+        )
 
     if pair is None:
         raise ValueError("Merged data without target_col/target_class_col requires pair.")

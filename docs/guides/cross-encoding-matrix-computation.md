@@ -4,8 +4,6 @@ This page defines the **oriented cross-encoding matrix** $M$ and how library cod
 aggregates pre-anchor encoder means into one square cell. It complements the
 workflow guide [Oriented cross-encoding matrix](cross-encoding-matrix.md).
 
-Paper appendix: [cross_encoding_matrix.tex](../paper/cross_encoding_matrix.tex).
-
 ---
 
 ## Setup
@@ -106,7 +104,7 @@ In code, `alignment="auto"` follows the GRADIEND source side: factual-source
 models use factual probe classes, and counterfactual-source models use
 counterfactual probe classes. Explicit `alignment` values are diagnostic
 overrides. See
-[`encoding_view_sign_for_source`][gradiend.model._source_target.encoding_view_sign_for_source]
+`gradiend.model._source_target.encoding_view_sign_for_source`
 for the view sign applied before anchor aggregation.
 
 ---

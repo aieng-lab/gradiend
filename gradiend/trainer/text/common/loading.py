@@ -6,6 +6,8 @@ lazily when loading a path with config_mlm_head.json to avoid circular imports.
 """
 
 import os
+from pathlib import Path
+
 import torch
 import torch.nn as nn
 import transformers
@@ -38,14 +40,99 @@ def _is_gemma3_multimodal_text_checkpoint(config) -> bool:
     )
 
 
+class _CatastrophicWeightLoad(Exception):
+    """Raised when ``from_pretrained`` returned a model without actually loading its weights.
+
+    ``AutoModelForMaskedLM.from_pretrained`` does not reliably RAISE for an architecture it
+    cannot really load (confirmed on a real Gemma 3 4B/27B checkpoint, transformers 5.x: it
+    returns a model with every backbone weight -- embeddings, every layer, ``lm_head`` --
+    reported "newly initialized", plus a "this checkpoint seem corrupted" tied-weights
+    warning, and no exception). The ``except Exception`` fallback to the causal-LM path
+    (which already special-cases Gemma 3's multimodal wrapper, see
+    ``_load_causal_lm_for_config``) therefore never ran, and every trainer-based method
+    (GRADIEND/ACTIEND/AGIEND/CGA/CAGA) silently trained against a randomly initialized
+    backbone. CAA/SAE were unaffected because the study loads them directly via
+    ``AutoModelForCausalLM``, bypassing this class entirely.
+    """
+
+
+def _missing_weight_fraction(model: nn.Module, loading_info: dict) -> float:
+    missing = set(loading_info.get("missing_keys") or ())
+    total = sum(1 for _ in model.state_dict())
+    return len(missing) / total if total else 0.0
+
+
+def _catastrophic_load_message(name_or_path, model: nn.Module, loading_info: dict, *, threshold: float = 0.8):
+    """The failure message when (almost) every weight came back "missing", else None.
+
+    A legitimate head mismatch (e.g. a masked-LM head absent from a causal checkpoint)
+    leaves a handful of keys missing, not the embeddings and every transformer block.
+    """
+    fraction = _missing_weight_fraction(model, loading_info)
+    if fraction < threshold:
+        return None
+    missing = loading_info.get("missing_keys") or ()
+    return (
+        f"{name_or_path!r}: {len(missing)}/{sum(1 for _ in model.state_dict())} "
+        f"({fraction:.0%}) of this model's weights came back 'missing' -- the checkpoint "
+        "almost certainly does not match this architecture (e.g. a multimodal wrapper's "
+        "weights live under a different key prefix). Treating the load as failed instead "
+        "of silently training on a randomly initialized backbone. "
+        f"Sample missing keys: {sorted(missing)[:5]}"
+    )
+
+
+def _raise_if_catastrophic_load(name_or_path, model: nn.Module, loading_info: dict, *, threshold: float = 0.8) -> None:
+    """Fail loudly when (almost) every weight came back "missing" instead of loaded."""
+    message = _catastrophic_load_message(name_or_path, model, loading_info, threshold=threshold)
+    if message is not None:
+        raise _CatastrophicWeightLoad(message)
+
+
+def _release_accelerator_memory() -> None:
+    import gc
+
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
+def _from_pretrained_checked(loader, name_or_path, **load_kwargs):
+    """``loader.from_pretrained`` + the catastrophic-load check, FREEING a failed load first.
+
+    Every fallback attempt used to keep the failed model alive (in the caller's local and in
+    the exception traceback's frames) while the next attempt loaded. With a device map, the
+    second and third copies of a 27B backbone then no longer fit an 80 GiB GPU and accelerate
+    silently offloaded part of the real model to the CPU (gemma-3-27b on one A100: masked-LM
+    attempt + Gemma3ForCausalLM attempt + the working AutoModelForCausalLM load). The check
+    runs in a helper that does not raise, so no frame holding the failed model survives.
+    """
+    model, loading_info = loader.from_pretrained(name_or_path, output_loading_info=True, **load_kwargs)
+    message = _catastrophic_load_message(name_or_path, model, loading_info)
+    if message is None:
+        return model
+    del model, loading_info
+    _release_accelerator_memory()
+    raise _CatastrophicWeightLoad(message)
+
+
 def _load_causal_lm_for_config(name_or_path, config, load_kwargs):
     """
     Load a causal LM, preferring text-only wrappers for multimodal HF auto mappings.
 
     Transformers maps ``gemma3`` to ``Gemma3ForConditionalGeneration`` in
     ``AutoModelForCausalLM``, which loads the vision tower even for text-only GRADIEND
-    training and can yield unusable backbone gradients. ``Gemma3ForCausalLM`` omits
-    vision weights and uses the standard text forward path.
+    training and can yield unusable backbone gradients. ``Gemma3ForCausalLM`` is meant to
+    omit vision weights and use the standard text forward path -- but on some installed
+    Transformers builds its state-dict key layout does not match a real Gemma 3 4B/27B
+    checkpoint's safetensors at all (confirmed on the cluster: ``Gemma3ForCausalLM.
+    from_pretrained`` reports 100% of weights "missing" for both ``google/gemma-3-4b-pt``
+    and ``google/gemma-3-27b-pt``, i.e. it is itself a silent no-op on those checkpoints,
+    not merely "vision tower omitted"). Prefer it when it actually binds real weights;
+    otherwise fall back to plain ``AutoModelForCausalLM`` (loads the full
+    ``Gemma3ForConditionalGeneration`` wrapper, vision tower included) rather than hard
+    failing -- that path is independently proven to work (the study's CAA/SAE stage loads
+    these exact checkpoints this way, successfully, in production).
     """
     if _is_gemma3_multimodal_text_checkpoint(config):
         if _Gemma3ForCausalLM is None:
@@ -56,12 +143,26 @@ def _load_causal_lm_for_config(name_or_path, config, load_kwargs):
                 name_or_path,
             )
         else:
-            logger.info(
-                "Loading %r with Gemma3ForCausalLM (text-only; vision tower omitted).",
-                name_or_path,
-            )
-            return _Gemma3ForCausalLM.from_pretrained(name_or_path, token=HF_TOKEN, **load_kwargs)
-    return AutoModelForCausalLM.from_pretrained(name_or_path, token=HF_TOKEN, **load_kwargs)
+            try:
+                model = _from_pretrained_checked(
+                    _Gemma3ForCausalLM, name_or_path, token=HF_TOKEN, **load_kwargs
+                )
+            except _CatastrophicWeightLoad as exc:
+                logger.warning(
+                    "Gemma3ForCausalLM could not load %r (%s); its key layout does not match "
+                    "this checkpoint on the installed Transformers build. Falling back to "
+                    "AutoModelForCausalLM (loads the vision tower too, but is a correct text "
+                    "load).",
+                    name_or_path,
+                    exc,
+                )
+            else:
+                logger.info(
+                    "Loading %r with Gemma3ForCausalLM (text-only; vision tower omitted).",
+                    name_or_path,
+                )
+                return model
+    return _from_pretrained_checked(AutoModelForCausalLM, name_or_path, token=HF_TOKEN, **load_kwargs)
 
 
 def _is_unknown_transformers_architecture_error(error: Exception) -> bool:
@@ -74,8 +175,68 @@ def _is_unknown_transformers_architecture_error(error: Exception) -> bool:
     )
 
 
+def _describe_local_checkpoint(path) -> str:
+    """Describe what a local checkpoint directory actually contains.
+
+    Hugging Face reports a config without a usable ``model_type`` as
+    "Unrecognized model in <path>", which is indistinguishable from a genuinely
+    too-new architecture. For a directory this repo wrote itself, the real cause
+    is almost always an incomplete artifact -- e.g. a checkpoint promoted after
+    zero seeds converged -- and blaming the Transformers version sends the reader
+    somewhere unrelated.
+    """
+    import json
+    import os
+
+    directory = Path(path)
+    config_path = directory / "config.json"
+    if not config_path.exists():
+        present = sorted(p.name for p in directory.iterdir())[:12]
+        return (
+            f"the directory has no config.json (contains: {present or 'nothing'}), "
+            "so it is not a loadable model checkpoint"
+        )
+    try:
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+    except Exception as exc:  # noqa: BLE001 - report, do not mask
+        return f"config.json could not be parsed ({exc})"
+    if not isinstance(config, dict) or not config:
+        return "config.json is empty"
+    if not config.get("model_type"):
+        keys = sorted(config)[:10]
+        return (
+            "config.json has no 'model_type' key "
+            f"(keys present: {keys}), which is what Transformers reports as an "
+            "unrecognized architecture"
+        )
+    weights = [
+        name
+        for name in os.listdir(directory)
+        if name.endswith((".safetensors", ".bin", ".pt"))
+    ]
+    if not weights:
+        return (
+            f"config.json declares model_type={config['model_type']!r} but the "
+            "directory contains no weight files"
+        )
+    return (
+        f"config.json declares model_type={config['model_type']!r}, which this "
+        "Transformers version does not support"
+    )
+
+
 def _raise_unknown_transformers_architecture_error(name_or_path, error: Exception) -> None:
     version = getattr(transformers, "__version__", "unknown")
+    if Path(str(name_or_path)).is_dir():
+        detail = _describe_local_checkpoint(name_or_path)
+        raise ValueError(
+            f"Could not load the local checkpoint {str(name_or_path)!r}: {detail}. "
+            "A local directory that fails to load is usually an incomplete or "
+            "partially written artifact rather than a Transformers version "
+            "problem -- check whether the run that produced it actually "
+            "converged and finished saving. "
+            f"(Installed Transformers: {version}.)"
+        ) from error
     raise ValueError(
         f"Could not load {name_or_path!r} because Transformers {version} does not "
         "recognize the checkpoint architecture. This usually means the model was "
@@ -115,7 +276,9 @@ class AutoModelForLM(nn.Module):
             raise
         if getattr(config, "is_encoder_decoder", False):
             try:
-                model = AutoModelForSeq2SeqLM.from_pretrained(name_or_path, token=HF_TOKEN, **load_kwargs)
+                model = _from_pretrained_checked(
+                    AutoModelForSeq2SeqLM, name_or_path, token=HF_TOKEN, **load_kwargs
+                )
                 set_requires_grad_true(model)
                 return model
             except Exception as seq2seq_error:
@@ -123,7 +286,10 @@ class AutoModelForLM(nn.Module):
                     _raise_unknown_transformers_architecture_error(name_or_path, seq2seq_error)
                 raise
         try:
-            model = AutoModelForMaskedLM.from_pretrained(name_or_path, **load_kwargs)
+            # ``from_pretrained`` does not reliably raise for an architecture it cannot really
+            # load (see ``_CatastrophicWeightLoad``'s docstring) -- verify the load actually
+            # bound real weights before trusting this branch over the causal-LM fallback below.
+            model = _from_pretrained_checked(AutoModelForMaskedLM, name_or_path, **load_kwargs)
         except Exception:
             config_file = os.path.join(name_or_path, 'config_mlm_head.json')
             if os.path.exists(config_file):

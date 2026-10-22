@@ -14,6 +14,7 @@ Standalone plot functions (module-level). Trainer convenience wrappers such as
 
 ## Multi-model comparison
 
+- **[`plot_topk_overlap`][gradiend.visualizer.topk.plot_topk_overlap]** — Top-k weight overlap for a dict or list of models
 - **[`plot_topk_overlap_heatmap`][gradiend.visualizer.topk.pairwise_heatmap.plot_topk_overlap_heatmap]** — Pairwise top-k weight overlap
 - **[`plot_topk_overlap_venn`][gradiend.visualizer.topk.venn_.plot_topk_overlap_venn]** — Top-k overlap Venn diagram
 - **[`plot_similarity_heatmap`][gradiend.visualizer.heatmaps.similarity.plot_similarity_heatmap]** — Similarity matrix heatmap

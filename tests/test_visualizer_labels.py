@@ -93,6 +93,12 @@ def test_resolve_highlight_non_convergence():
     assert resolve_highlight_non_convergence(None) is True
 
 
+def test_plot_title_is_omitted_without_run_id_or_default():
+    from types import SimpleNamespace
+
+    assert resolve_plot_title_with_convergence(True, trainer=SimpleNamespace(run_id=None), default=None) is False
+
+
 def test_resolve_plot_title_with_convergence():
     marker = non_convergence_marker_for_matplotlib()
     trainer = _TrainerStub(run_id="my_run", converged=False)

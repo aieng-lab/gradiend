@@ -6,6 +6,7 @@ get_model(), evaluator_class with lazy Evaluator. Training logic lives in _train
 override _train() in subclasses to customize.
 """
 
+import dataclasses
 import gc
 import os
 import tempfile
@@ -44,8 +45,15 @@ from gradiend.trainer.core.annotation import TrainerAnnotationMixin
 from gradiend.trainer.core.training import format_non_convergence_error, train as core_train
 from gradiend.trainer.factory import create_model_with_gradiend
 from gradiend.trainer.core.arguments import TrainingArguments
+from gradiend.trainer.core.lr_search import (
+    LRSearchConfig,
+    LRSearchResult,
+    NoConvergentLearningRate,
+    tune_learning_rate as _run_lr_search,
+)
 from gradiend.trainer.core.config import validate_source_target
 from gradiend.trainer.core.cache_policy import (
+    coerce_artifact_use_cache,
     is_unconditional_training_cache,
     should_reuse_seed_training_cache,
     should_reuse_training_cache,
@@ -328,6 +336,8 @@ class Trainer(TrainerAnnotationMixin, FeatureLearningDefinition):
         self._model_instance: Optional[Any] = None
         self._model_manually_unloaded: bool = False
         self._training_args = args
+        self._tuned_learning_rate: Optional[float] = None
+        self.lr_search_result: Optional[LRSearchResult] = None
         self._evaluator_class = evaluator_class if evaluator_class is not None else Evaluator
         self._evaluator: Optional[Any] = None
         self._model_with_gradiend_cls: Optional[Type[Any]] = None
@@ -1227,6 +1237,86 @@ class Trainer(TrainerAnnotationMixin, FeatureLearningDefinition):
                 torch.cuda.empty_cache()
         return selected_output_dir
 
+    def tune_learning_rate(
+        self,
+        initial_lr: Optional[float] = None,
+        *,
+        config: Optional[LRSearchConfig] = None,
+        force: bool = False,
+        **config_overrides: Any,
+    ) -> LRSearchResult:
+        """Search the learning rate with short probe trainings; the next :meth:`train` uses the result.
+
+        ``initial_lr`` defaults to ``TrainingArguments.learning_rate`` (1e-5 if that is ``"tune"``). The search options
+        come from ``config`` (default ``TrainingArguments.lr_search_config``); single fields can be overridden as
+        keyword arguments, e.g. ``probe_steps=100``. The result is stored in ``<experiment_dir>/lr_search.json`` and
+        reused by later calls with the same settings unless ``force=True`` or ``use_cache=False``.
+
+        Returns:
+            The :class:`~gradiend.trainer.core.lr_search.LRSearchResult`, also kept as ``trainer.lr_search_result``.
+
+        Raises:
+            NoConvergentLearningRate: If no learning rate converged (``.result`` holds the probe trace).
+            ValueError: If evaluation is disabled (``do_eval=False``), which the search needs.
+        """
+        args = self._training_args or TrainingArguments()
+        return self._tune_learning_rate(
+            args, self._resolve_experiment_dir(args.experiment_dir), initial_lr, config, force, config_overrides
+        )
+
+    def _tune_learning_rate(
+        self,
+        args: TrainingArguments,
+        exp_dir: Optional[str],
+        initial_lr: Optional[float] = None,
+        config: Optional[LRSearchConfig] = None,
+        force: bool = False,
+        overrides: Optional[Dict[str, Any]] = None,
+    ) -> LRSearchResult:
+        if not getattr(args, "do_eval", True):
+            raise ValueError("Learning-rate tuning needs evaluation (the probes are judged by it): set do_eval=True.")
+        cfg = dataclasses.replace(config or args.lr_search_config or LRSearchConfig(), **(overrides or {}))
+        if initial_lr is None:
+            initial_lr = 1e-5 if args.learning_rate == "tune" else args.learning_rate
+        start = float(initial_lr)
+        exp_dir = exp_dir or tempfile.mkdtemp(prefix="gradiend_lr_search_")
+        meta = {"probe_steps": cfg.probe_steps, "max_steps": args.max_steps, "resolution": cfg.resolution, "confirm": cfg.confirm}
+        path = os.path.join(exp_dir, "lr_search.json")
+        result = None
+        if not force and coerce_artifact_use_cache(args.use_cache) and os.path.isfile(path):
+            with open(path, encoding="utf-8") as fh:
+                stored = json.load(fh)
+            if stored.get("status") == "converged" and stored.get("initial_lr") == start and all(
+                stored.get(k) == v for k, v in meta.items()
+            ):
+                logger.info("Reusing the learning-rate search in %s (best_lr=%g).", path, stored["best_lr"])
+                result = LRSearchResult.from_dict(stored)
+        if result is None:
+            result = _run_lr_search(self, start, experiment_dir=exp_dir, config=cfg, metadata=meta)
+            if getattr(args, "seed", None) is not None:
+                _apply_seed(int(args.seed))  # the probes consumed random numbers; training starts from the seed
+        self.lr_search_result = result
+        if result.status != "converged":
+            raise NoConvergentLearningRate(
+                f"The learning-rate search ended with {result.status!r} after {len(result.probes)} probes (see {path}). "
+                "'no_convergent_lr' means no learning rate converges (check data and setup); "
+                "'budget_exhausted' means the probe budget was too small (raise lr_search_config.max_probes).",
+                result,
+            )
+        self._tuned_learning_rate = float(result.best_lr)
+        logger.info("Tuned learning rate: %g", self._tuned_learning_rate)
+        return result
+
+    def _resolve_learning_rate(self, args: TrainingArguments, exp_dir: Optional[str], overrides: Dict[str, Any]) -> None:
+        """Replace ``learning_rate="tune"`` (or the result of ``tune_learning_rate()``) in ``args`` by the number to train with."""
+        if "learning_rate" in overrides:  # an explicit value always wins (the probes pass one as well)
+            return
+        if args.learning_rate == "tune" and self._tuned_learning_rate is None:
+            self._tune_learning_rate(args, exp_dir)
+        if self._tuned_learning_rate is not None:
+            args.learning_rate = self._tuned_learning_rate
+            args.metadata = {**args.metadata, "learning_rate_tuned": True}
+
     def train(
         self,
         output_dir: Optional[str] = None,
@@ -1349,6 +1439,8 @@ class Trainer(TrainerAnnotationMixin, FeatureLearningDefinition):
             return self
 
         self._last_train_used_cache = False
+        self._resolve_learning_rate(args, exp_dir, training_args_overrides)
+
         def _set_seed(seed_value: int) -> None:
             _apply_seed(seed_value)
 
@@ -2131,7 +2223,7 @@ class Trainer(TrainerAnnotationMixin, FeatureLearningDefinition):
         finally:
             self._cleanup_pre_prune_cache(args)
 
-    def post_training(self, model_with_gradiend, **kwargs):
+    def post_training(self, model_with_gradiend: Any, **kwargs: Any):
         """
         Optional post-training hook.
 
@@ -2812,7 +2904,9 @@ class Trainer(TrainerAnnotationMixin, FeatureLearningDefinition):
         The decoder evaluation selects a feature factor and learning rate per target class and direction
         (strengthening vs weakening). This method applies the selected config: by default it strengthens
         the given target class(es); use increase_target_probabilities=False to apply the weakening config
-        instead (evaluate_decoder currently only produces strengthen summaries).
+        instead. The weakening config must have been computed first by calling
+        ``evaluate_decoder(..., increase_target_probabilities=False)``, whose summary keys carry the
+        ``"_weaken"`` suffix (e.g. ``"3SG_weaken"``).
 
         ``learning_rate`` and ``feature_factor`` from decoder results (and probability-shift plots)
         are passed through unchanged to :meth:`ModelWithGradiend.rewrite_base_model` for every
@@ -2835,7 +2929,9 @@ class Trainer(TrainerAnnotationMixin, FeatureLearningDefinition):
                 "<class>_weaken" but you pass the class id here and set increase_target_probabilities=False.
             increase_target_probabilities: If True (default), apply the config that strengthens the
                 target class (higher probability for that class). If False, apply the config that weakens
-                it (uses opposite feature factor; evaluate_decoder currently only produces strengthen summaries).
+                it (uses opposite feature factor). This requires decoder results computed with
+                ``evaluate_decoder(..., increase_target_probabilities=False)``, i.e. summaries with
+                the ``"_weaken"`` key suffix.
             output_dir: Optional directory where the rewritten model(s) should be saved.
                 If provided, models are saved to disk. If None, models are returned in memory only.
                 For a single target_class, this is the exact save directory. For multiple target_classes,
@@ -2939,12 +3035,9 @@ class Trainer(TrainerAnnotationMixin, FeatureLearningDefinition):
         for key in keys_to_process:
             summary = summary_source.get(key)
             if not summary or "feature_factor" not in summary or "learning_rate" not in summary:
-                hint = ""
-                if not increase_target_probabilities and not key.endswith("_weaken"):
-                    hint = " evaluate_decoder currently only produces strengthen summaries."
                 raise ValueError(
                     f"Decoder results do not contain summary for metric '{key}'. "
-                    f"Available keys: {list(summary_source.keys())}.{hint}"
+                    f"Available keys: {list(summary_source.keys())}."
                 )
             feature_factor = summary["feature_factor"]
             lr = summary["learning_rate"]

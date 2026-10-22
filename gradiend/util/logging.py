@@ -10,6 +10,9 @@ from contextlib import contextmanager
 from typing import Generator
 
 
+_NOISY_LOGGER_NAMES = ("httpx", "httpcore", "urllib3", "huggingface_hub")
+
+
 def setup_logging(level=logging.INFO):
     """
     Set up logging configuration for GRADIEND.
@@ -19,6 +22,9 @@ def setup_logging(level=logging.INFO):
     """
     if not isinstance(level, int):
         raise TypeError(f"level must be int (e.g. logging.INFO), got {type(level).__name__}")
+    # HTTP clients log every request at INFO ("HTTP Request: HEAD https://huggingface.co/..."); keep them quiet
+    for name in _NOISY_LOGGER_NAMES:
+        logging.getLogger(name).setLevel(max(level, logging.WARNING))
     # Get root logger
     root_logger = logging.getLogger()
     

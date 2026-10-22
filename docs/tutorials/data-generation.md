@@ -82,6 +82,20 @@ feature_targets = [
 ]
 ```
 
+## Counterpart words
+
+If every word has exactly one counterpart in the other class (e.g. British and American spelling), list the pairs once with [`PairedTextFilterConfig`][gradiend.data.text.filter_config.PairedTextFilterConfig]. Each training row then carries its counterpart as the explicit alternative instead of a randomly drawn one.
+
+```python
+from gradiend.data import PairedTextFilterConfig
+
+feature_targets = [
+    PairedTextFilterConfig(pairs=[("colour", "color"), ("centre", "center")], ids=("BE", "AE")),
+]
+```
+
+It takes the same filter options as [`TextFilterConfig`][gradiend.data.text.filter_config.TextFilterConfig] (e.g. `spacy_tags`) and cannot be combined with plain filter configs in one creator. With `split_by_target=True` in `generate_training_data`, whole pairs are held out for validation and test. With plain [`TextFilterConfig`][gradiend.data.text.filter_config.TextFilterConfig] targets, `split_by_target=True` holds out whole words; casing is ignored (`Bad` and `bad` are one word).
+
 ## Base Data
 
 The [`TextPredictionTrainer`][gradiend.trainer.text.prediction.trainer.TextPredictionTrainer] supports a variety of base data inputs:

@@ -88,8 +88,10 @@ class TestGradiendModel:
         )
         assert has_weights, "Model weights should be saved"
         
-        # Load (should default to CPU if CUDA not available)
-        loaded = GradiendModel.from_pretrained(save_path)
+        # Load onto the same (CPU) device the original lives on: the default would pick CUDA when available
+        loaded = GradiendModel.from_pretrained(
+            save_path, device_encoder=torch.device("cpu"), device_decoder=torch.device("cpu")
+        )
         assert loaded.input_dim == model.input_dim
         assert loaded.latent_dim == model.latent_dim
         
@@ -603,6 +605,7 @@ class TestModelWithGradiend:
             latent_dim=1,
             param_map={"embed_tokens.weight": {"shape": (3, 2), "repr": "all"}},
             bias_decoder=False,
+            device=torch.device("cpu"),  # the tiny base model lives on the CPU
         )
         with torch.no_grad():
             gradiend.decoder[0].linear.weight.fill_(1.0)

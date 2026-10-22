@@ -17,6 +17,7 @@ from gradiend.comparison.common import (
     _validate_models,
     _validate_topk_optional,
     _normalize_model_groups,
+    topk_base_indices,
 )
 from gradiend.util.logging import get_logger
 
@@ -305,7 +306,7 @@ def _compute_topk_overlap_similarity_matrix(models: Dict[str, object], *, part: 
     sets: Dict[str, set] = {}
     set_sizes: Dict[str, int] = {}
     for model_id, model in models.items():
-        indices = model.get_topk_weights(part=part, topk=topk)
+        indices = topk_base_indices(model, part, topk)
         per_model[model_id] = indices
         sets[model_id] = set(indices)
         set_sizes[model_id] = len(indices)
@@ -639,8 +640,8 @@ def _score_similarity_pair(
     if measure == "topk_overlap":
         if topk is None:
             raise ValueError("topk must be provided for measure='topk_overlap'")
-        indices_i = model_i.get_topk_weights(part=part, topk=topk)
-        indices_j = model_j.get_topk_weights(part=part, topk=topk)
+        indices_i = topk_base_indices(model_i, part, topk)
+        indices_j = topk_base_indices(model_j, part, topk)
         inter = len(set(indices_i) & set(indices_j))
         if value == "intersection":
             return float(inter)

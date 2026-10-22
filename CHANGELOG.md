@@ -6,6 +6,37 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-10-22
+
+Patch release. Training defaults and numerics are unchanged from 0.2.1.
+
+### Added
+
+- Automatic learning-rate search with short probe runs: `learning_rate="tune"` or `trainer.tune_learning_rate()`, options in `LRSearchConfig`, and `trainer.lr_search_result.plot()` shows what the search did ([guide](docs/guides/learning-rate-search.md)).
+- `PairedTextFilterConfig` for `TextPredictionDataCreator`: list 1:1 counterpart words once (e.g. British/American spelling) and every row carries its explicit alternative. `split_by_target=True` holds out whole target words (or pairs) for validation and test; the trainer's `split_col="heldout"` keeps such pairs and their alternatives intact.
+- Callbacks can stop training after any step by setting `control["should_stop"]`.
+- `plot_topk_overlap`, `plot_topk_overlap_venn` and the top-k heatmaps accept a list of models, labelled after their checkpoint folders.
+- `mask_placeholder` (`TextPredictionConfig` / `TrainingArguments`, default `"[MASK]"`) for data that marks the prediction slot differently, e.g. `"[PRONOUN]"`. Templates without the placeholder now fail early. Decoder evaluation still expects `[MASK]`.
+- `gradiend.comparison.load_saved_cross_encoding_inputs`: the class pairs, sources and cached encodings of saved run folders, so the oriented cross-encoding matrix can be computed without trainers or data (e.g. for the published multilingual models).
+
+### Changed
+
+- `plot_encoder_by_target` shows targets that differ only in casing as one target, in their most frequent spelling (`ignore_case=True`, the default).
+- The interactive by-target plot (`interactive=True`) shows the masked sentence on hover, together with the factual, alternative and encoder input token. Before, it showed the original sentence with the factual word, which did not contain the plotted token (the alternative is the encoder input by default). For this, the encoder rows of text training data keep their `template` column; encoder caches written by earlier versions lack it and fall back to the original sentence.
+- `multilingual_demo_labels` (labels and styles of the multilingual demo figures) moved from `gradiend.visualizer` to `gradiend.examples` and is no longer part of the installed package.
+
+### Fixed
+
+- `split_by_target=True` with plain `TextFilterConfig` targets treated `Bad` and `bad` as different targets, so a word could end up in several splits. Casing and surrounding whitespace are now ignored (override with `split_group_key`). Paired targets were not affected.
+- Tokenizers that pad on the left (Gemma-2/3): the supervised label landed in the padding, so all inputs of a class were identical and training "converged" without learning anything. Models trained with 0.2.1 or earlier on such tokenizers should be retrained.
+- Language-model score (LMS) of decoder-only models: the causal-LM perplexity compared each position's logits with the token at the same position instead of the next token, so it measured how well the model repeats the current token, not its language-model loss. It now uses the next-token shift and ignores targets predicted from padding. LMS values, and the update strength `evaluate_decoder` selects with them, can differ from 0.2.1 for decoder-only models; re-run their decoder evaluations. Masked language models are not affected.
+- Decoder-only detection reads the model config instead of the tokenizer's mask token. Gemma-3 is causal but ships an unused mask token and was trained as a masked LM.
+- Loading a base model fails loudly when nearly all weights come back uninitialised (seen with Gemma 3) instead of silently training on random weights. Incomplete local checkpoints get a clearer error.
+- CUDA out-of-memory (or other CUDA errors) during evaluation now abort training. Before, evaluation was skipped silently and no checkpoint was selected.
+- A stale decoder-grid cache (other direction or target, or missing metrics) is recomputed instead of reused.
+- Decoder evaluation no longer fails with `KeyError` when no candidate reaches the language-model score (LMS) threshold (seen in multi-seed runs). In that case the candidate with the smallest non-zero learning rate is selected, as before; the fallback only broke on the dict-style candidate ids of multi-seed grids.
+- `GradientTrainingDataset` raises `IndexError` for an out-of-range index (before: an empty batch and a confusing `KeyError` later).
+
 ## [0.2.1] - 2026-07-16
 
 ### Changed

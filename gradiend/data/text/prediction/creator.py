@@ -16,6 +16,7 @@ from gradiend.data.core import (
     split_dataframe_per_group,
 )
 from gradiend.data.text import (
+    PairedTextFilterConfig,
     SpacyTagSpec,
     TextFilterConfig,
     TextPreprocessConfig,
@@ -30,6 +31,7 @@ from gradiend.data.text.prediction.formats import _to_merged, _to_minimal, _to_p
 from gradiend.data.text.prediction.ids import _class_id
 from gradiend.data.text.prediction.io import _related_output_path, _save_data
 from gradiend.data.text.prediction.neutral import _filter_neutral
+from gradiend.data.text.prediction.pairing import expand_feature_targets, split_by_pair
 from gradiend.data.text.prediction.summary import (
     SUMMARY_LOG_CLASS_THRESHOLD,
     SUMMARY_LOG_EXAMPLES,
@@ -38,6 +40,8 @@ from gradiend.data.text.prediction.summary import (
 from gradiend.util.logging import get_logger
 
 logger = get_logger(__name__)
+
+_TARGET_SPLIT_GROUP_KEY = (str.strip, str.casefold)
 
 MIN_ROWS_PER_CLASS_FOR_SPLIT = 10
 """Minimum rows per class to perform train/val/test split. Splitting fewer rows yields tiny splits (e.g. 80/10/10 of 5 rows)."""
@@ -68,7 +72,7 @@ class TextPredictionDataCreator:
         trust_remote_code: Optional[bool] = None,
         preprocess: Optional[TextPreprocessConfig] = None,
         spacy_model: Optional[str] = None,
-        feature_targets: Optional[List[TextFilterConfig]] = None,
+        feature_targets: Optional[List[Union[TextFilterConfig, PairedTextFilterConfig]]] = None,
         min_left_context_words: int = 10,
         seed: int = 42,
         download_if_missing: bool = True,
@@ -79,6 +83,7 @@ class TextPredictionDataCreator:
         use_cache: bool = False,
         split_group_col: Optional[str] = None,
         split_group_key: SplitGroupKey = None,
+        split_by_target: bool = False,
     ) -> None:
         """Initialize with shared config for both generate methods.
 
@@ -93,6 +98,8 @@ class TextPredictionDataCreator:
             preprocess: Optional TextPreprocessConfig.
             spacy_model: Spacy model name (e.g. "de_core_news_sm"); lazy-loaded.
             feature_targets: List of TextFilterConfig. Each config's id (or first target) names the class.
+                Alternatively, PairedTextFilterConfig groups (1:1 counterpart words, all classes paired): every
+                row then also gets the counterpart of its word in one column per other class.
             min_left_context_words: Default minimum word-like strings required before a matched target.
                 Per-config overrides via TextFilterConfig.min_left_context_words are still supported.
                 Mainly useful for decoder-only models where masked targets need left context.
@@ -106,11 +113,16 @@ class TextPredictionDataCreator:
                 "hf" requires the datasets library; falls back to csv with a warning if not installed.
             use_cache: If True and output_dir is set, generate_training_data and generate_neutral_data
                 load from existing files in output_dir when available instead of regenerating.
-            split_group_col: Column used for vocabulary-held-out splits (e.g. ``"label"`` for
-                masked target tokens). Each unique value is assigned to exactly one of
+            split_group_col: Column of the generated table used for vocabulary-held-out splits (e.g.
+                ``"label"``, the matched target token). Each unique value is assigned to exactly one of
                 train/validation/test. None = random row split (legacy default).
             split_group_key: Callable or sequence of callables applied to ``split_group_col``
                 values before grouping (e.g. ``[str.strip, str.casefold]``).
+            split_by_target: If True, every target word (with ``PairedTextFilterConfig``: every pair, so both
+                counterparts) is assigned to exactly one of train/validation/test, so validation and test
+                contain unseen target words. Casing and surrounding whitespace are ignored (``Bad`` and ``bad``
+                are one target) unless ``split_group_key`` is given. For plain targets this equals
+                ``split_group_col="label"``; it cannot be combined with ``split_group_col``.
         """
         if not isinstance(text_column, str):
             raise TypeError(f"text_column must be str, got {type(text_column).__name__}")
@@ -149,6 +161,10 @@ class TextPredictionDataCreator:
         if split_group_col is not None and not isinstance(split_group_col, str):
             raise TypeError(f"split_group_col must be str or None, got {type(split_group_col).__name__}")
         normalize_split_group_key(split_group_key)
+        if not isinstance(split_by_target, bool):
+            raise TypeError(f"split_by_target must be bool, got {type(split_by_target).__name__}")
+        if split_by_target and split_group_col is not None:
+            raise ValueError("split_by_target and split_group_col are alternatives: use only one of them")
 
         self.base_data = base_data
         self.text_column = text_column
@@ -158,7 +174,8 @@ class TextPredictionDataCreator:
         self.trust_remote_code = trust_remote_code
         self.preprocess = preprocess
         self.spacy_model = spacy_model
-        self.feature_targets = feature_targets or []
+        self.feature_targets, self._pairs = expand_feature_targets(feature_targets or [])
+        self._pair_cols = self._pairs.ids if self._pairs else ()
         self.min_left_context_words = min_left_context_words
         self.seed = seed
         self.download_if_missing = download_if_missing
@@ -169,6 +186,7 @@ class TextPredictionDataCreator:
         self.use_cache = use_cache
         self.split_group_col = split_group_col
         self.split_group_key = split_group_key
+        self.split_by_target = split_by_target
         self._texts_cache: Optional[List[str]] = None
 
     def _resolve_output_path(self, name: Literal["training", "neutral"], explicit: Optional[str]) -> Optional[str]:
@@ -210,8 +228,8 @@ class TextPredictionDataCreator:
                 if format == "per_class":
                     return class_dfs
                 if format == "minimal":
-                    return _to_minimal(class_dfs)
-                return _to_merged(class_dfs)
+                    return _to_minimal(class_dfs, self._pair_cols)
+                return _to_merged(class_dfs, self._pair_cols)
             df = ds.to_pandas()
         if format == "per_class":
             group_col = "label_class" if "label_class" in df.columns else "feature_class_id"
@@ -227,7 +245,7 @@ class TextPredictionDataCreator:
         if format == "minimal":
             minimal_cols = ["masked", "label", "label_class", "split"]
             if all(c in df.columns for c in minimal_cols):
-                return df[minimal_cols].copy()
+                return df[minimal_cols + [c for c in self._pair_cols if c in df.columns]].copy()
         return df
 
     def _load_cached_neutral(self, path: str) -> Optional[pd.DataFrame]:
@@ -285,6 +303,7 @@ class TextPredictionDataCreator:
         raise_on_incomplete_classes: bool = False,
         split_group_col: Optional[str] = None,
         split_group_key: SplitGroupKey = None,
+        split_by_target: Optional[bool] = None,
     ) -> Union[Dict[str, pd.DataFrame], pd.DataFrame]:
         """Generate masked training data by filtering configured target tokens.
 
@@ -319,8 +338,10 @@ class TextPredictionDataCreator:
                 min_rows_per_class_for_split rows. Main and incomplete-class files are still saved before raising.
                 Defaults to False, so incomplete classes are excluded from the main generated training data.
             split_group_col: Override instance ``split_group_col`` for this call. When set (e.g. ``"label"``),
-                each unique target token is confined to a single train/validation/test split.
+                each unique value of that column is confined to a single train/validation/test split.
             split_group_key: Override instance ``split_group_key`` (e.g. ``[str.strip, str.casefold]``).
+            split_by_target: Override instance ``split_by_target`` for this call: each target word (each pair for
+                paired targets) is confined to a single train/validation/test split.
 
         Returns:
             Per format: dict of DataFrames, or single DataFrame.
@@ -354,7 +375,7 @@ class TextPredictionDataCreator:
             download_if_missing=self.download_if_missing,
         )
         total_target = (
-            len(self.feature_targets) * max_size_per_class
+            len(config_by_id) * max_size_per_class
             if max_size_per_class is not None
             else None
         )
@@ -393,11 +414,17 @@ class TextPredictionDataCreator:
                 masked = mask_sentence(sent, spans, cfg.mask)
                 labels = [m[2] for m in spans]
                 label = labels[0] if labels else ""
+                counterparts = {}
+                if self._pairs is not None:
+                    counterparts = self._pairs.row_counterparts(class_id, labels)
+                    if counterparts is None:
+                        continue  # one row has one counterpart: skip sentences with several different pair words
                 rows.append({
                     "text": sent,
                     "masked": masked,
                     "label": label,
                     "token_count": len(spans),
+                    **counterparts,
                 })
             if not rows:
                 empty_class_ids.append(class_id)
@@ -485,27 +512,38 @@ class TextPredictionDataCreator:
 
         split_group_col = self.split_group_col if split_group_col is None else split_group_col
         split_group_key = self.split_group_key if split_group_key is None else split_group_key
+        split_by_target = self.split_by_target if split_by_target is None else split_by_target
+        if split_by_target and split_group_col is not None:
+            raise ValueError("split_by_target and split_group_col are alternatives: use only one of them")
+        if split_by_target and split_group_key is None:
+            split_group_key = _TARGET_SPLIT_GROUP_KEY
 
-        split_dataframe_per_group(
-            split_class_dfs,
-            train_ratio,
-            val_ratio,
-            test_ratio,
-            self.seed,
-            split_col="split",
-            min_rows_per_group=0,
-            split_group_col=split_group_col,
-            split_group_key=split_group_key,
-        )
+        if split_by_target and self._pairs is not None:
+            split_by_pair(
+                split_class_dfs, self._pairs.ids, train_ratio, val_ratio, test_ratio, self.seed, split_group_key=split_group_key
+            )
+        else:
+            split_dataframe_per_group(
+                split_class_dfs,
+                train_ratio,
+                val_ratio,
+                test_ratio,
+                self.seed,
+                split_col="split",
+                min_rows_per_group=0,
+                split_group_col="label" if split_by_target else split_group_col,
+                split_group_key=split_group_key,
+            )
 
+        to_unified = _to_partial_merged if interrupted or len(split_class_dfs) < 2 else _to_merged
         if format == "per_class":
             result: Union[Dict[str, pd.DataFrame], pd.DataFrame] = split_class_dfs
-            df_to_save = _to_partial_merged(split_class_dfs) if interrupted or len(split_class_dfs) < 2 else _to_merged(split_class_dfs)
+            df_to_save = to_unified(split_class_dfs, self._pair_cols)
         elif format == "minimal":
-            result = _to_minimal(split_class_dfs)
+            result = _to_minimal(split_class_dfs, self._pair_cols)
             df_to_save = result
         elif format == "unified":
-            result = _to_partial_merged(split_class_dfs) if interrupted or len(split_class_dfs) < 2 else _to_merged(split_class_dfs)
+            result = to_unified(split_class_dfs, self._pair_cols)
             df_to_save = result
         else:
             raise ValueError(f"format must be 'per_class', 'unified', or 'minimal'; got {format!r}")
@@ -526,7 +564,7 @@ class TextPredictionDataCreator:
             )
             if incomplete_class_dfs:
                 incomplete_output = _related_output_path(output, "incomplete_classes", fmt)
-                incomplete_df = _to_partial_merged(incomplete_class_dfs)
+                incomplete_df = _to_partial_merged(incomplete_class_dfs, self._pair_cols)
                 _save_data(
                     incomplete_output,
                     fmt,

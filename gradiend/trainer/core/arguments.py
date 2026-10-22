@@ -10,6 +10,7 @@ import torch
 import torch.nn as nn
 
 from gradiend.trainer.core.config import validate_source_target
+from gradiend.trainer.core.lr_search import LRSearchConfig
 from gradiend.trainer.core.pruning import PostPruneConfig, PrePruneConfig, _validate_topk
 
 
@@ -88,8 +89,11 @@ class TrainingArguments:
     balance groups). This parameter primarily reduces total dataset size for memory/performance. 
     None = use all data."""
 
-    learning_rate: float = 1e-5
-    """Peak learning rate."""
+    learning_rate: Union[float, Literal["tune"]] = 1e-5
+    """Peak learning rate. ``"tune"`` searches it automatically before training (see ``lr_search_config``)."""
+
+    lr_search_config: Optional["LRSearchConfig"] = None
+    """Options of the learning-rate search used for ``learning_rate="tune"`` and ``trainer.tune_learning_rate()`` (defaults if None)."""
 
     num_train_epochs: int = 3
     """Number of training epochs."""
@@ -183,6 +187,15 @@ class TrainingArguments:
     ``seq2seq_encoder_mlm``.
     ``auto``: seq2seq models → ``seq2seq_encoder_mlm``; decoder-only → ``clm_next_token`` (or cached
     ``clm_mlm_head`` when a saved head exists); else ``mlm_mask_token``."""
+
+    mask_placeholder: str = "[MASK]"
+    """Dataset-level prediction placeholder used inside masked text templates.
+
+    This is independent of ``tokenizer.mask_token``. Prefer setting
+    ``TextPredictionConfig.mask_placeholder`` with the data schema (e.g.
+    ``mask_placeholder=\"[PRONOUN]\"``). A non-default value here still overrides
+    when the config field is left at its default.
+    """
 
     decoder_mlm_head_epochs: int = 5
     """Epochs used when prediction_objective="clm_mlm_head" has to train the auxiliary head."""
@@ -337,6 +350,12 @@ class TrainingArguments:
             raise TypeError(f"reuse_pre_prune must be bool, got {type(self.reuse_pre_prune).__name__}")
         if not isinstance(self.fail_on_non_convergence, bool):
             raise TypeError(f"fail_on_non_convergence must be bool, got {type(self.fail_on_non_convergence).__name__}")
+        if not isinstance(self.mask_placeholder, str):
+            raise TypeError(
+                f"mask_placeholder must be a non-empty str, got {type(self.mask_placeholder).__name__}"
+            )
+        if not self.mask_placeholder:
+            raise ValueError("mask_placeholder must be a non-empty str")
         if not isinstance(self.highlight_non_convergence, bool):
             raise TypeError(
                 f"highlight_non_convergence must be bool, got {type(self.highlight_non_convergence).__name__}"
@@ -413,8 +432,10 @@ class TrainingArguments:
             raise TypeError(f"train_max_size must be int or None, got {type(self.train_max_size).__name__}")
         if self.train_max_size is not None and self.train_max_size < 0:
             raise ValueError(f"train_max_size must be >= 0, got {self.train_max_size}")
-        if not isinstance(self.learning_rate, (int, float)):
-            raise TypeError(f"learning_rate must be float, got {type(self.learning_rate).__name__}")
+        if self.learning_rate != "tune" and not isinstance(self.learning_rate, (int, float)):
+            raise TypeError(f"learning_rate must be a number or 'tune', got {type(self.learning_rate).__name__}")
+        if self.lr_search_config is not None and not isinstance(self.lr_search_config, LRSearchConfig):
+            raise TypeError(f"lr_search_config must be LRSearchConfig or None, got {type(self.lr_search_config).__name__}")
         if not isinstance(self.num_train_epochs, int):
             raise TypeError(f"num_train_epochs must be int, got {type(self.num_train_epochs).__name__}")
         if not isinstance(self.max_steps, int):
@@ -512,6 +533,8 @@ class TrainingArguments:
                 cfg = dataclasses.asdict(v)
                 cfg["mask"] = None  # do not serialize tensor
                 result[k] = cfg
+            elif k == "lr_search_config" and v is not None:
+                result[k] = dataclasses.asdict(v)
             else:
                 result[k] = v
         return result
@@ -526,6 +549,8 @@ class TrainingArguments:
             d["pre_prune_config"] = PrePruneConfig(**d["pre_prune_config"])
         if "post_prune_config" in d and isinstance(d.get("post_prune_config"), dict):
             d["post_prune_config"] = PostPruneConfig(**d["post_prune_config"])
+        if "lr_search_config" in d and isinstance(d.get("lr_search_config"), dict):
+            d["lr_search_config"] = LRSearchConfig(**d["lr_search_config"])
         return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
 
     def get(self, key: str, default: Any = None) -> Any:

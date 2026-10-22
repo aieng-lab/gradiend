@@ -31,7 +31,11 @@ from gradiend.trainer.trainer import Trainer, _apply_seed
 from gradiend.trainer.config import TrainerConfig
 from gradiend.trainer.core.arguments import TrainingArguments
 from gradiend.model import ModelWithGradiend
-from gradiend.trainer.text.prediction.dataset import TextTrainingDataset, create_masked_pair_from_text
+from gradiend.trainer.text.prediction.dataset import (
+    TextTrainingDataset,
+    create_masked_pair_from_text,
+    resolve_mask_placeholder,
+)
 from pathlib import Path
 from gradiend.trainer.core.unified_data import (
     all_subsets_to_mlm_df,
@@ -218,6 +222,11 @@ class TextPredictionConfig(TrainerConfig):
     masked_col: str = "masked"
     label_col: str = "label"
     label_class_col: str = "label_class"
+    mask_placeholder: str = "[MASK]"
+    """Prediction-slot marker inside the masked column of your data (default ``"[MASK]"``).
+    It is a dataset-schema marker, independent of ``tokenizer.mask_token``: if your data uses
+    ``[PRONOUN]`` in the masked column, set ``mask_placeholder=\"[PRONOUN]\"``.
+    ``TrainingArguments.mask_placeholder`` may override when this stays at the default."""
     split_col: Optional[str] = "split"
     """Dataset split column. ``\"split\"`` (default) uses row-level splits from the data.
     ``None`` assigns random row-level train/validation/test splits (reshuffled when
@@ -1894,7 +1903,7 @@ class TextPredictionTrainer(Trainer):
             use_all_transitions: bool = False,
             transition_selection: Optional[List[Union[TransitionSpec, Tuple[str, str]]]] = None,
             balance_column: Optional[str] = "feature_class_id",
-            **kwargs,
+            **kwargs: Any,
     ) -> Any:
         """
         Create training dataset from unified data.
@@ -2103,7 +2112,9 @@ class TextPredictionTrainer(Trainer):
         objective = self._prediction_objective(tokenizer)
         objective_name = objective.name
         if is_decoder_only_model is None:
-            is_decoder_only_model = False if is_seq2seq else tokenizer.mask_token_id is None
+            # Read the model config (via the wrapper / tokenizer), not the tokenizer's mask token:
+            # a causal model may ship an unused mask special (Gemma-3).
+            is_decoder_only_model = False if is_seq2seq else is_decoder_only_model_from_obj(model_or_tokenizer)
         if objective_name == "clm_sequence_cloze":
             is_decoder_only_model = True
         elif objective_name == "seq2seq_decoder_sequence_cloze":
@@ -2136,6 +2147,10 @@ class TextPredictionTrainer(Trainer):
             prediction_objective=objective_name,
             rhs_window=getattr(getattr(self, "_training_args", None), "decoder_sequence_cloze_rhs_window", -1),
             mlm_head_target_labels=mlm_head_target_labels,
+            mask_placeholder=resolve_mask_placeholder(
+                config=self.config,
+                training_args=getattr(self, "_training_args", None),
+            ),
         )
 
     def create_gradient_training_dataset(
@@ -2145,7 +2160,7 @@ class TextPredictionTrainer(Trainer):
         *,
         cache_dir: Optional[str] = None,
         use_cached_gradients: bool = False,
-        **kwargs,
+        **kwargs: Any,
     ) -> Any:
         """Wrap raw training data into TextGradientTrainingDataset for gradient creation (text modality).
         source and target are resolved from TrainingArguments (override via kwargs if needed).
@@ -2689,6 +2704,7 @@ class TextPredictionTrainer(Trainer):
                 "source_token": r.get("source_token"),
                 "factual_token": r.get("factual_token"),
                 "alternative_token": r.get("alternative_token"),
+                "template": r.get("template"),
                 "data_split": r.get("data_split"),
             })
         logger.debug(f"Processed {len(rows)} training data entries")
@@ -2794,6 +2810,10 @@ class TextPredictionTrainer(Trainer):
         objective_name = self._prediction_objective(getattr(model_with_gradiend, "base_model", tokenizer)).name
         neutral_objective_name = self._neutral_encoder_prediction_objective(objective_name)
         rhs_window = getattr(getattr(self, "_training_args", None), "decoder_sequence_cloze_rhs_window", -1)
+        mask_placeholder = resolve_mask_placeholder(
+            config=self.config,
+            training_args=getattr(self, "_training_args", None),
+        )
         logger.debug(f"Tokenizer: is_decoder_only_model={is_decoder_only_model}, mask_token={mask_token}")
 
         # Collect training data entries and re-mask non-target tokens
@@ -2805,17 +2825,17 @@ class TextPredictionTrainer(Trainer):
             if max_size and i >= max_size:
                 break
 
-            # Get original masked template (TextTrainingDataset provides "template" with [MASK] placeholder)
+            # Get original masked template (TextTrainingDataset provides "template" with the mask placeholder)
             template = entry["template"]
 
-            # Reconstruct unmasked text by replacing [MASK] with the actual factual token
+            # Reconstruct unmasked text by replacing the placeholder with the actual factual token
             factual_token = entry[factual_token_key]
             if i == 0:
                 logger.debug(
                     f"Sample neutral training masked entry: template={template[:50]}..., "
                     f"factual_token_key={factual_token_key}, factual_token={factual_token}"
                 )
-            unmasked_text = template.replace("[MASK]", factual_token)
+            unmasked_text = template.replace(mask_placeholder, factual_token)
 
             pair = create_masked_pair_from_text(
                 unmasked_text,
@@ -2824,6 +2844,7 @@ class TextPredictionTrainer(Trainer):
                 excluded_tokens=excluded_for_masked,
                 mask_token=mask_token,
                 min_prefix_tokens=5,
+                mask_placeholder=mask_placeholder,
             )
             if pair is None:
                 continue
@@ -2860,6 +2881,7 @@ class TextPredictionTrainer(Trainer):
                 rhs_window=rhs_window,
                 target_key="label",
                 balance_column="feature_class_id",
+                mask_placeholder=mask_placeholder,
             )
 
             # Create TextGradientTrainingDataset for encoding
@@ -2925,6 +2947,10 @@ class TextPredictionTrainer(Trainer):
         objective_name = self._prediction_objective(getattr(model_with_gradiend, "base_model", tokenizer)).name
         neutral_objective_name = self._neutral_encoder_prediction_objective(objective_name)
         rhs_window = getattr(getattr(self, "_training_args", None), "decoder_sequence_cloze_rhs_window", -1)
+        mask_placeholder = resolve_mask_placeholder(
+            config=self.config,
+            training_args=getattr(self, "_training_args", None),
+        )
 
         # Prepare neutral data: create masked texts with one mask per entry
         # Use provided text_col, or fall back to masked_col_name, or try common defaults
@@ -2969,6 +2995,7 @@ class TextPredictionTrainer(Trainer):
                 excluded_tokens=excluded_tokens,
                 mask_token=mask_token,
                 min_prefix_tokens=5,
+                mask_placeholder=mask_placeholder,
             )
             if pair is None:
                 continue
@@ -3008,6 +3035,7 @@ class TextPredictionTrainer(Trainer):
             rhs_window=rhs_window,
             target_key="label",
             balance_column="feature_class_id",
+            mask_placeholder=mask_placeholder,
         )
 
         # Create TextGradientTrainingDataset for encoding

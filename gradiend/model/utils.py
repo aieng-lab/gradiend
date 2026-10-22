@@ -1,6 +1,7 @@
 """
 Utility functions for GRADIEND models.
 """
+import functools
 import json
 import logging
 import os
@@ -254,22 +255,126 @@ def prediction_eval_kind(model_or_tokenizer):
     return "mlm_mask_token"
 
 
+# ----------------------------------------------------------------------------------------------
+# Decoder-only detection
+#
+# "Is this a causal LM?" is a property of the MODEL, so it is read from the model configuration
+# (``architectures``, ``is_encoder_decoder``, ``model_type``), not from names or from whether the
+# tokenizer happens to ship a mask token: Gemma-3 is causal but its tokenizer has an unused mask
+# special, and a GRADIEND wrapper class has "Model" in its name whatever it wraps.
+# ----------------------------------------------------------------------------------------------
+_CAUSAL_ARCHITECTURE_SUFFIXES = ("ForCausalLM", "LMHeadModel")  # LlamaForCausalLM, GPT2LMHeadModel, ...
+# Generative heads that are not encoder-decoder (encoder-decoders are excluded via
+# ``is_encoder_decoder`` before this is consulted), e.g. Gemma3ForConditionalGeneration.
+_CONDITIONAL_GENERATION_SUFFIX = "ForConditionalGeneration"
+_MASKED_LM_MODEL_TYPES = frozenset({
+    "bert", "roberta", "xlm-roberta", "xlm-roberta-xl", "albert", "distilbert", "electra", "deberta",
+    "deberta-v2", "camembert", "mpnet", "modernbert", "eurobert", "convbert", "roformer", "ernie",
+    "flaubert", "megatron-bert", "nystromformer", "squeezebert", "mobilebert", "layoutlm", "rembert",
+})
+_CAUSAL_MODEL_TYPES = frozenset({
+    "gpt2", "gpt_neo", "gpt_neox", "gptj", "gpt_bigcode", "llama", "mistral", "mixtral", "qwen2", "qwen2_moe",
+    "qwen3", "qwen3_moe", "gemma", "gemma2", "gemma3", "gemma3_text", "phi", "phi3", "opt", "bloom",
+    "falcon", "olmo", "olmo2", "cohere", "stablelm", "starcoder2", "smollm3", "granite", "deepseek_v3",
+})
+
+
+def _decoder_only_from_class_name(name):
+    """Verdict from a Hugging Face class name, or ``None`` when the name says nothing."""
+    name = str(name or "")
+    if "MaskedLM" in name:
+        return False
+    if name.endswith(_CAUSAL_ARCHITECTURE_SUFFIXES):
+        return True
+    return None
+
+
+def decoder_only_from_config(config):
+    """Whether a Hugging Face model config describes a decoder-only (causal) language model.
+
+    Returns ``True`` / ``False``, or ``None`` when the config does not say (callers then fall back
+    to weaker evidence). Encoder-decoders and masked LMs are ``False``; causal heads and
+    multimodal wrappers around a causal text backbone (``Gemma3ForConditionalGeneration``) are
+    ``True``.
+    """
+    if config is None:
+        return None
+    if getattr(config, "is_encoder_decoder", False):
+        return False
+    architectures = [str(a) for a in (getattr(config, "architectures", None) or [])]
+    if any("MaskedLM" in a for a in architectures):
+        return False
+    if any(a.endswith(_CAUSAL_ARCHITECTURE_SUFFIXES) or a.endswith(_CONDITIONAL_GENERATION_SUFFIX)
+           for a in architectures):
+        return True
+    model_type = str(getattr(config, "model_type", "") or "").lower()
+    if model_type in _MASKED_LM_MODEL_TYPES:
+        return False
+    if model_type in _CAUSAL_MODEL_TYPES:
+        return True
+    if getattr(config, "is_decoder", False):
+        return True
+    text_config = getattr(config, "text_config", None)  # multimodal config: judge its text backbone
+    if text_config is not None and text_config is not config:
+        return decoder_only_from_config(text_config)
+    return None
+
+
+def _is_hf_tokenizer(obj):
+    try:
+        from transformers import PreTrainedTokenizerBase
+    except Exception:  # pragma: no cover - transformers is a hard dependency
+        return False
+    return isinstance(obj, PreTrainedTokenizerBase)
+
+
+@functools.lru_cache(maxsize=64)
+def _config_for_name(name):
+    """``AutoConfig`` for a model id/path: the local cache first, then the hub; ``None`` if unavailable."""
+    from transformers import AutoConfig
+
+    for local_files_only in (True, False):
+        try:
+            return AutoConfig.from_pretrained(name, local_files_only=local_files_only)
+        except Exception:  # not cached, offline, or custom code that needs trust_remote_code
+            continue
+    return None
+
+
+def _resolve_model_config(obj):
+    """Best available model config for a model, a GRADIEND wrapper or a Hugging Face tokenizer."""
+    config = getattr(obj, "config", None)
+    if config is not None and hasattr(config, "model_type"):
+        return config
+    base_model = getattr(obj, "base_model", None)  # ModelWithGradiend wrapper
+    config = getattr(base_model, "config", None)
+    if config is not None and hasattr(config, "model_type"):
+        return config
+    name = getattr(obj, "name_or_path", None)
+    if isinstance(name, str) and name and _is_hf_tokenizer(obj):
+        return _config_for_name(name)  # tokenizers carry no config: read it from the same repo
+    return None
+
+
 def is_decoder_only_model(model_or_tokenizer):
     """
-    Single place of truth: whether the model or tokenizer is decoder-only (causal LM, no [MASK]).
+    Single place of truth: whether the model is decoder-only (a causal LM, not a masked or
+    encoder-decoder model).
 
-    Pass either a model or a tokenizer. Prefers tokenizer-style attributes when present.
+    Pass a Hugging Face model, a GRADIEND ``ModelWithGradiend`` wrapper, or a tokenizer. The
+    decision is read from the model configuration, in this order:
 
-    - **Tokenizer** (has ``mask_token`` or ``mask_token_id``): decoder-only if
+    1. ``config.is_encoder_decoder`` -> ``False``.
+    2. ``config.architectures``: ``*ForMaskedLM`` -> ``False``; ``*ForCausalLM``, ``*LMHeadModel`` and ``*ForConditionalGeneration`` -> ``True``. Then ``model_type``, ``is_decoder`` and a multimodal ``text_config``.
+    3. The class name of a Hugging Face model object.
+    4. Only when none of that is available (a tokenizer whose config cannot be loaded, test doubles): the tokenizer's ``mask_token`` -- no mask token means decoder-only.
 
-      ``mask_token`` is None (no [MASK] token), unless the model is encoder-decoder.
-
-    - **Model** (no mask_token): decoder-only if the class name does not indicate
-
-      MaskedLM/MLM (e.g. GPT-2, LLaMA are decoder-only; BERT with MLM head is not).
+    A model or wrapper passes step 2 through its ``config`` / ``base_model.config``; a tokenizer
+    through its ``name_or_path`` (``AutoConfig``, local cache first). The tokenizer's mask token is
+    deliberately not the primary evidence: Gemma-3 is causal but ships an unused mask special.
 
     Args:
-        model_or_tokenizer: A Hugging Face model or tokenizer.
+        model_or_tokenizer: A Hugging Face model, GRADIEND wrapper or tokenizer.
 
     Returns:
         True if decoder-only (causal LM), False if masked LM or encoder-decoder.
@@ -277,15 +382,16 @@ def is_decoder_only_model(model_or_tokenizer):
     if is_seq2seq_model(model_or_tokenizer):
         return False
     obj = model_or_tokenizer
+    verdict = decoder_only_from_config(_resolve_model_config(obj))
+    if verdict is not None:
+        return verdict
+    verdict = _decoder_only_from_class_name(getattr(getattr(obj, "__class__", None), "__name__", ""))
+    if verdict is not None:
+        return verdict
     if hasattr(obj, "mask_token"):
         return getattr(obj, "mask_token", None) is None
     if hasattr(obj, "mask_token_id"):
         return getattr(obj, "mask_token_id", None) is None
-    if hasattr(obj, "__class__") and hasattr(obj.__class__, "__name__"):
-        name = obj.__class__.__name__
-        if "Model" in name and "ForMaskedLM" not in name and "MLM" not in name:
-            return True
-        return "ForMaskedLM" not in name and "MLMHead" not in name and "WithMLM" not in name
     return False
 
 
