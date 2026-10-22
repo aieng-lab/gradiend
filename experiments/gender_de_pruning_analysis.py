@@ -41,7 +41,7 @@ from gradiend.trainer.core.pruning import post_prune
 from gradiend.util.logging import get_logger
 from gradiend.util.paths import ARTIFACT_MODEL, resolve_output_path
 from gradiend.util.runtime_monitor import CudaMemorySpan
-from gradiend.visualizer.multilingual_demo_labels import pretty_demo_feature_id
+from gradiend.examples.multilingual_demo_labels import pretty_demo_feature_id
 from gradiend.visualizer.plot_style import configure_matplotlib_style
 
 logger = get_logger(__name__)

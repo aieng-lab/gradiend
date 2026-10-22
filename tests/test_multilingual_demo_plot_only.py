@@ -16,6 +16,33 @@ def demo():
     return mod
 
 
+# Small Hugging Face text corpus (8.5k short reviews) with plenty of first/second/third-person pronouns.
+_SMALL_BASE_DATASET = "cornell-movie-review-data/rotten_tomatoes"
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _small_probe_corpus(demo, tmp_path_factory):
+    """Generate the probe-pool pronoun data from a small Hugging Face corpus in a temp directory.
+
+    These tests check plot-only wiring with the heavy steps mocked, but ``plot_cross_encoding`` still
+    builds probe trainers from the English pronoun data and generates it when missing. From the real
+    source (``wikimedia/wikipedia``, 50,000 articles, spaCy over every segment) that took tens of
+    minutes and wrote into ``data/`` of the working directory. The same generation code path (Hugging
+    Face loading, spaCy tag filtering, splits) runs here on a small corpus, so it stays covered.
+    """
+    import gradiend.examples.create_english_pronoun_data as pronoun_data
+
+    data_dir = tmp_path_factory.mktemp("english_pronouns")
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(pronoun_data, "WIKIPEDIA_DATASET", _SMALL_BASE_DATASET)
+        patch.setattr(pronoun_data, "WIKIPEDIA_HF_CONFIG", None)
+        patch.setattr(pronoun_data, "WIKIPEDIA_BASE_MAX_SIZE", 8000)
+        patch.setattr(pronoun_data, "MAX_SIZE_PER_CLASS", 10)
+        patch.setattr(pronoun_data, "NEUTRAL_MAX_SIZE", 20)
+        patch.setattr(demo, "PRONOUN_DATA_DIR", str(data_dir))
+        yield
+
+
 def _write_minimal_gradiend_checkpoint(model_dir: str) -> None:
     os.makedirs(model_dir, exist_ok=True)
     with open(os.path.join(model_dir, "config.json"), "w", encoding="utf-8") as handle:
@@ -226,6 +253,14 @@ def test_plot_cross_encoding_plot_only_uses_cache_without_hf_pool(demo, monkeypa
     )
     monkeypatch.setattr(demo, "plot_gradiend_transition_cross_encoding_heatmap", lambda *a, **k: {})
     monkeypatch.setattr(demo, "plot_cross_encoding_heatmap", lambda *a, **k: {})
+    # seed stability is requested but there are no trainers: the std matrices need at least one, and
+    # computing them is not what this test is about
+    import gradiend.comparison as comparison
+
+    monkeypatch.setattr(
+        comparison, "compute_gradiend_transition_cross_encoding_matrix", lambda *a, **k: {}, raising=False
+    )
+    monkeypatch.setattr(demo, "_plot_std_heatmap_from_cell_stats", lambda *a, **k: None)
 
     config = demo.ExperimentConfig(
         model_name="google-bert/bert-base-multilingual-cased",
@@ -640,7 +675,9 @@ def test_plot_cross_encoding_plot_only_allows_partial_missing_cells_with_warning
         model_name="google-bert/bert-base-multilingual-cased",
         decoder_eval_mode=demo.DecoderEvalMode.NONE,
         mlm_head_scope=demo.MlmHeadScope.GLOBAL,
-        args=demo.TrainingArguments(experiment_dir=str(tmp_path), encoder_eval_max_size=50),
+        args=demo.TrainingArguments(
+            experiment_dir=str(tmp_path), encoder_eval_max_size=50, analyze_seed_stability=True
+        ),
         mlm_head_args={},
     )
 

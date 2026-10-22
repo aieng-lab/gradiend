@@ -189,6 +189,7 @@ More examples: [gradiend/examples](https://github.com/aieng-lab/gradiend/tree/ma
 
 Example scripts and notebooks: [gradiend/examples](https://github.com/aieng-lab/gradiend/tree/main/gradiend/examples) on GitHub (not in the pip package; download a file or read to get inspired).
 
+- [demo](gradiend/examples/demo) — Demo notebooks, each opens in Google Colab: [quickstart](https://colab.research.google.com/github/aieng-lab/gradiend/blob/main/gradiend/examples/demo/01_quickstart_english_pronouns.ipynb), [sentiment](https://colab.research.google.com/github/aieng-lab/gradiend/blob/main/gradiend/examples/demo/02_sentiment.ipynb), [compare features](https://colab.research.google.com/github/aieng-lab/gradiend/blob/main/gradiend/examples/demo/03_compare_features.ipynb), [learn your own feature](https://colab.research.google.com/github/aieng-lab/gradiend/blob/main/gradiend/examples/demo/04_learn_your_own_feature.ipynb)
 - [start_workflow.py](gradiend/examples/start_workflow.py) — Minimal runnable example
 - [train_english_pronouns.ipynb](gradiend/examples/train_english_pronouns.ipynb) — English pronouns (3SG vs 3PL): data creation from Wikipedia → training → evaluation ([script](gradiend/examples/train_english_pronouns.py))
 - [train_sentiment.py](gradiend/examples/train_sentiment.py) — Sentiment example with split-aware evaluation and visualization

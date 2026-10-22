@@ -10,6 +10,11 @@ evaluation, and plotting loop is clear.
 
 ## Quick examples
 
+- [:material-notebook-outline: Demo notebooks](https://github.com/aieng-lab/gradiend/tree/main/gradiend/examples/demo), each opens in Google Colab:
+    - [Quickstart: singular vs plural pronouns](https://colab.research.google.com/github/aieng-lab/gradiend/blob/main/gradiend/examples/demo/01_quickstart_english_pronouns.ipynb) (data creation, training, check, rewriting)
+    - [Sentiment](https://colab.research.google.com/github/aieng-lab/gradiend/blob/main/gradiend/examples/demo/02_sentiment.ipynb) (held-out adjectives)
+    - [Compare features](https://colab.research.google.com/github/aieng-lab/gradiend/blob/main/gradiend/examples/demo/03_compare_features.ipynb) (45 trained models from the Hugging Face Hub)
+    - [Learn your own feature](https://colab.research.google.com/github/aieng-lab/gradiend/blob/main/gradiend/examples/demo/04_learn_your_own_feature.ipynb) (British vs American spelling)
 - [:material-file-code-outline: `start_workflow.py`](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/start_workflow.py) — [Train your first GRADIEND model](start.md)
 - [:material-file-code-outline: `train_english_pronouns.py`](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/train_english_pronouns.py)
 - [:material-file-code-outline: `train_gender_de.py`](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/train_gender_de.py)

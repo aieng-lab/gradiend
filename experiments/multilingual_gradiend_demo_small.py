@@ -246,7 +246,7 @@ def plot_cross_encoding(
     config: ExperimentConfig,
     trainers_by_id: Dict[str, TextPredictionTrainer],
 ) -> None:
-    from gradiend.visualizer.multilingual_demo_labels import (
+    from gradiend.examples.multilingual_demo_labels import (
         build_demo_feature_label_mapping,
         build_demo_feature_plot_groups,
         build_demo_trainer_label_mapping,

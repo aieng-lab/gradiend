@@ -28,6 +28,7 @@ At the end, plots in the experiment directory root:
 Usage:
   python experiments/multilingual_gradiend_demo.py
   python experiments/multilingual_gradiend_demo.py --plot-only
+  python experiments/multilingual_gradiend_demo.py --plot-only --experiment-dir aieng-lab/gradiend-multilingual-bert-features
   python experiments/multilingual_gradiend_demo.py --decoder-eval-mode mlm_head
   python experiments/multilingual_gradiend_demo.py --decoder-eval-mode default \\
       --problem-learning-rate pronoun=5e-5 --problem-learning-rate sentiment=2e-5
@@ -86,6 +87,7 @@ from gradiend.trainer.text.prediction.decoder_only_mlm import train_mlm_head
 from gradiend.trainer.core.cache_policy import USE_CACHE_ALWAYS
 from gradiend.visualizer.labels import converged_for_trainer
 from gradiend.visualizer.plot_style_config import PlotStyleConfig
+from gradiend.util.logging import get_logger
 from gradiend.util.paths import (
     ARTIFACT_MODEL,
     has_saved_decoder_mlm_head,
@@ -93,6 +95,8 @@ from gradiend.util.paths import (
     resolve_decoder_mlm_head_dir,
     resolve_output_path,
 )
+
+logger = get_logger(__name__)
 
 
 ENCODER_MODEL = "google-bert/bert-base-multilingual-cased"
@@ -254,6 +258,7 @@ religion_configs = [
 
 PRONOUN_DATA_DIR = "data/english_pronouns"
 SENTIMENT_DATA_DIR = "data/sentiment_tweets"
+GENERATE_MISSING_DATA = True  # False (--no-data-generation): never create the local pronoun/sentiment datasets
 SENTIMENT_GOOD_BAD_DATA_DIR = "data/sentiment_nrc_good_bad"
 SENTIMENT_GOOD_BAD_PAIR = ("good", "bad")
 SENTIMENT_PRE_PRUNE_TOPK = 0.01
@@ -391,6 +396,15 @@ def parse_args() -> argparse.Namespace:
         help="Post-prune keep fraction after training. Default: 0.05 with pre-prune 0.01, else 0.01.",
     )
     parser.add_argument(
+        "--no-data-generation",
+        action="store_true",
+        help=(
+            "Never generate the local pronoun and sentiment datasets (streaming Wikipedia, NRC lexicon). With --plot-only "
+            "the cached encoder evaluations are then used without validating them against the probe data. "
+            "Implied when --experiment-dir is a Hugging Face repo id, which has no local data."
+        ),
+    )
+    parser.add_argument(
         "--plot-only",
         action="store_true",
         help=(
@@ -434,8 +448,9 @@ def parse_args() -> argparse.Namespace:
         "--experiment-dir",
         default=None,
         help=(
-            "Override the default runs/... experiment directory. "
-            "Useful with --plot-only to replot an existing run."
+            "Override the default runs/... experiment directory, or give a Hugging Face repo id with trained "
+            "models (e.g. aieng-lab/gradiend-multilingual-bert-features), which is downloaded to runs/<name> and "
+            "replotted without generating data (--no-data-generation). Useful with --plot-only to replot an existing run."
         ),
     )
     parser.add_argument(
@@ -598,6 +613,21 @@ def _resolve_decoder_eval_mode(raw: str) -> DecoderEvalMode:
     return DecoderEvalMode(raw)
 
 
+def resolve_experiment_dir(value: str) -> str:
+    """Return ``value`` for a local folder; for a Hugging Face repo id (``org/name``) download it to ``runs/<name>``."""
+    if os.path.exists(value) or value.count("/") != 1:
+        return value
+    from huggingface_hub import HfApi, snapshot_download
+
+    try:
+        is_repo = HfApi().repo_exists(value, repo_type="model")
+    except Exception:  # offline: treat it as a (new) local folder
+        return value
+    if not is_repo:
+        return value
+    return snapshot_download(value, local_dir=os.path.join("runs", value.split("/")[-1]))
+
+
 def build_experiment_config(cli_args: argparse.Namespace) -> ExperimentConfig:
     decoder_eval_mode = _resolve_decoder_eval_mode(cli_args.decoder_eval_mode)
     repair_encoder_cache = bool(getattr(cli_args, "repair_encoder_cache", False))
@@ -633,7 +663,7 @@ def build_experiment_config(cli_args: argparse.Namespace) -> ExperimentConfig:
     pre_suffix = "" if pre_prune_topk == 0.01 else f"_pre{pre_prune_topk:g}"
     three_seed = bool(getattr(cli_args, "three_seed", False))
     seed_suffix = "_3seed" if three_seed else ""
-    experiment_dir = cli_args.experiment_dir or (
+    experiment_dir = resolve_experiment_dir(cli_args.experiment_dir) if cli_args.experiment_dir else (
         f"runs/multilingual_gradiend_demo_{model_name.split('/')[-1]}"
         f"{mode_suffix}{pre_suffix}{seed_suffix}_v42"
     )
@@ -1022,6 +1052,9 @@ def _problem_for_trainer(trainer: TextPredictionTrainer) -> str:
 
 
 def _pronoun_data_paths() -> Tuple[Path, Path]:
+    if not GENERATE_MISSING_DATA:
+        base = Path(PRONOUN_DATA_DIR)  # used as given; plotting from cached encoder evaluations never reads them
+        return base / "training.csv", base / "neutral.csv"
     return ensure_english_pronoun_data(output_dir=PRONOUN_DATA_DIR)
 
 
@@ -1061,6 +1094,14 @@ def _require_local_prediction_data(data_dir: str, *, label: str, creation_module
     return training_path, neutral_path
 
 
+def _published_sentiment_training_data() -> pd.DataFrame:
+    """The held-out sentiment data as published on the Hub (same result as ``load_and_split_sentiment_training_data``)."""
+    from datasets import load_dataset
+
+    splits = load_dataset("aieng-lab/en-sentiment-nrc", "split")
+    return pd.concat([splits[name].to_pandas() for name in splits], ignore_index=True)
+
+
 def _sentiment_data_paths() -> Tuple[Path, Path]:
     base = Path(SENTIMENT_DATA_DIR)
     training_path = base / "training.csv"
@@ -1071,6 +1112,8 @@ def _sentiment_data_paths() -> Tuple[Path, Path]:
         cached = _normalize_training_labels(pd.read_csv(training_path))
         if len(cached):
             cached.to_csv(training_path, index=False)
+        return training_path, neutral_path
+    if not GENERATE_MISSING_DATA:
         return training_path, neutral_path
 
     from gradiend.examples.train_sentiment import (
@@ -1570,10 +1613,13 @@ def _build_sentiment_full_lexicon_suite(
     objective = prediction_objective_for_problem(config, "sentiment")
     if objective is not None:
         sentiment_args = replace(sentiment_args, prediction_objective=objective)
-    training_df = load_and_split_sentiment_training_data(
-        training_path,
-        seed=int(sentiment_args.seed or 0),
-    )
+    if not GENERATE_MISSING_DATA and not training_path.is_file():
+        training_df = _published_sentiment_training_data()  # a replot only needs the trainer, not new data
+    else:
+        training_df = load_and_split_sentiment_training_data(
+            training_path,
+            seed=int(sentiment_args.seed or 0),
+        )
     return SymmetricTrainerSuite(
         TextPredictionTrainer,
         data=training_df,
@@ -1831,7 +1877,7 @@ def load_models_for_heatmap_from_cache(
 
 
 def _pretty_label(mid: str) -> str:
-    from gradiend.visualizer.multilingual_demo_labels import pretty_demo_trainer_id
+    from gradiend.examples.multilingual_demo_labels import pretty_demo_trainer_id
 
     return pretty_demo_trainer_id(mid)
 
@@ -1840,6 +1886,8 @@ def _cross_task_probe_trainers(config: ExperimentConfig) -> Dict[str, TextPredic
     """Untrained trainers used only to materialize full-domain test transition pools."""
     probes: Dict[str, TextPredictionTrainer] = {}
     training_path, neutral_path = _pronoun_data_paths()
+    if not GENERATE_MISSING_DATA and not training_path.is_file():
+        raise FileNotFoundError(f"No local cross-task probe data at {training_path} and --no-data-generation is set.")
     probe_args = problem_args(config, experiment_dir=None, use_cache=False)
     objective = prediction_objective_for_problem(config, "pronoun")
     if objective is not None:
@@ -1884,13 +1932,13 @@ def _cross_task_probe_trainers(config: ExperimentConfig) -> Dict[str, TextPredic
 
 
 def _build_plot_order_and_groups(all_ids: Sequence[str]) -> Tuple[List[str], Dict[str, List[str]]]:
-    from gradiend.visualizer.multilingual_demo_labels import build_demo_trainer_order_and_groups
+    from gradiend.examples.multilingual_demo_labels import build_demo_trainer_order_and_groups
 
     return build_demo_trainer_order_and_groups(all_ids)
 
 
 def _build_feature_plot_groups() -> Dict[str, List[str]]:
-    from gradiend.visualizer.multilingual_demo_labels import build_demo_feature_plot_groups
+    from gradiend.examples.multilingual_demo_labels import build_demo_feature_plot_groups
 
     return build_demo_feature_plot_groups(
         MULTILINGUAL_FEATURE_CLASSES,
@@ -1945,7 +1993,7 @@ def plot_cross_encoding(
         pair_by_id_from_trainers,
         source_by_id_from_trainers,
     )
-    from gradiend.visualizer.multilingual_demo_labels import (
+    from gradiend.examples.multilingual_demo_labels import (
         build_demo_feature_label_mapping,
         build_demo_trainer_label_mapping,
         build_demo_transition_label_mapping,
@@ -2047,7 +2095,7 @@ def plot_cross_encoding(
         )
         return
     supplemental_eval_rows = None
-    if cache_only and load_cross_task_transition_order(config.args.experiment_dir) is None:
+    if cache_only and GENERATE_MISSING_DATA and load_cross_task_transition_order(config.args.experiment_dir) is None:
         local_trainers = filter_trainers_without_hf_dataset(trainers_by_id)
         if local_trainers:
             supplemental_eval_rows = collect_unified_test_rows(
@@ -2333,7 +2381,7 @@ def plot_results(
     recompute_encoder_cache: bool = False,
     plot_incomplete_encoder_cache: bool = False,
 ) -> None:
-    from gradiend.visualizer.multilingual_demo_labels import demo_topk_overlap_style_kwargs
+    from gradiend.examples.multilingual_demo_labels import demo_topk_overlap_style_kwargs
 
     _validate_multiseed_plot_cache(config, trainers_by_id)
 
@@ -2453,9 +2501,21 @@ def plot_results(
         print("Skipping Venn plot: fewer than 3 pronoun GRADIENDs available.")
 
 
+def _is_hub_download(requested: Optional[str], resolved: str) -> bool:
+    """True when ``requested`` was a Hugging Face repo id that ``resolve_experiment_dir`` downloaded to ``resolved``."""
+    return bool(requested) and not os.path.exists(requested) and resolved != requested
+
+
 def main() -> None:
+    global GENERATE_MISSING_DATA
     cli_args = parse_args()
     config = build_experiment_config(cli_args)
+    if cli_args.no_data_generation or _is_hub_download(cli_args.experiment_dir, config.args.experiment_dir):
+        GENERATE_MISSING_DATA = False
+        print(
+            "--no-data-generation: local pronoun/sentiment datasets are not generated; cached encoder "
+            "evaluations are used without validating them against the probe data."
+        )
     print(f"Model: {config.model_name}")
     print(f"Decoder eval mode: {config.decoder_eval_mode.value}")
     print(f"MLM head scope: {config.mlm_head_scope.value}")
