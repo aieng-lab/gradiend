@@ -2735,8 +2735,10 @@ class TextPredictionTrainer(Trainer):
     def _resolve_encoder_neutral_excluded_tokens(self) -> List[str]:
         """Tokens that must not be selected as neutral mask targets.
 
-        Matches ``generate_neutral_data`` exclusion: all feature target tokens plus
-        ``eval_neutral_additional_excluded_words`` (and optional decoder LMS ignores).
+        Matches ``generate_neutral_data`` exclusion: the feature tokens of the training data plus
+        ``eval_neutral_additional_excluded_words`` (and optional decoder LMS ignores). ``decoder_eval_targets`` is
+        deliberately not used: it only scores the decoder and may be a large vocabulary subset that would remove
+        thousands of unrelated words from the neutral data.
         """
         excluded: List[str] = []
         try:
@@ -2746,10 +2748,6 @@ class TextPredictionTrainer(Trainer):
                 excluded.extend(str(t) for t in tokens)
         except (ValueError, AttributeError, TypeError):
             pass
-        raw_targets = getattr(self.config, "decoder_eval_targets", None)
-        if isinstance(raw_targets, dict):
-            for tokens in raw_targets.values():
-                excluded.extend(str(t) for t in tokens)
         additional = getattr(self.config, "eval_neutral_additional_excluded_words", None) or []
         excluded.extend(str(w) for w in additional)
         ignore = getattr(self.config, "decoder_eval_ignore_tokens", None) or []

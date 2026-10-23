@@ -58,6 +58,14 @@ def test_resolve_encoder_neutral_excluded_tokens_includes_targets_and_additional
     assert "we" in lowered
 
 
+def test_resolve_encoder_neutral_excluded_tokens_ignores_decoder_eval_targets():
+    """decoder_eval_targets only score the decoder: a large vocabulary subset must not remove neutral words."""
+    trainer = _make_trainer(decoder_eval_targets={"3SG": ["he", "short", "ship", "sand"], "3PL": ["they", "apple", "banana"]})
+    lowered = {w.lower() for w in trainer._resolve_encoder_neutral_excluded_tokens()}
+    assert {"he", "they", "you", "we"} <= lowered
+    assert lowered.isdisjoint({"short", "ship", "sand", "apple", "banana"})
+
+
 def test_create_masked_pair_from_text_skips_excluded_tokens():
     tokenizer = MockTokenizer()
     pair = create_masked_pair_from_text(
