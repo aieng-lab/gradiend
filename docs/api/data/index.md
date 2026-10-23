@@ -3,7 +3,7 @@
 Data creation, filtering and preprocessing:
 
 - **[`TextFilterConfig`][gradiend.data.text.filter_config.TextFilterConfig]** — Filter configuration for text data
-- **[`PairedTextFilterConfig`][gradiend.data.text.filter_config.PairedTextFilterConfig]** — Filter configuration for 1:1 counterpart words (explicit alternatives)
+- **[`PairedTextFilterConfig`][gradiend.data.text.filter_config.PairedTextFilterConfig]** — Filter configuration for word pairs: a fixed alternative for every word
 - **[`TextPredictionDataCreator`][gradiend.data.text.prediction.creator.TextPredictionDataCreator]** — Creation of text-prediction datasets
 - **[`TextPreprocessConfig`][gradiend.data.text.preprocess.TextPreprocessConfig]** — Text preprocessing (tokenization, normalization)
 

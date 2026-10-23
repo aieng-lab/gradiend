@@ -7,7 +7,7 @@ GRADIEND uses train / validation / test splits in two places:
 
 For text prediction, the main choice is **row-level** splits vs **vocabulary-held-out**
 splits (group by target token). The second is stricter: it tests whether a feature
-generalizes to **target words never seen during training**.
+generalizes to **target words never seen during training**. The data creator (`split_by_target=True`) or the trainer (`split_col="heldout"`) can make that split, see below.
 
 ---
 
@@ -50,6 +50,8 @@ trainer = TextPredictionTrainer(
 2. Whole groups are assigned to train, validation, or test — a lemma never spans splits.
 3. Example: all rows with target `great` → train; all with `excellent` → test.
 
+For data with paired targets (see [`PairedTextFilterConfig`][gradiend.data.text.filter_config.PairedTextFilterConfig]), the groups are the pairs: the two words of a pair always share a split.
+
 This avoids testing on the same adjectives used to fit gradients (a common memorization trap).
 
 **Tune `split_group_key` carefully** — it defines the generalization unit. Grouping
@@ -58,6 +60,30 @@ This avoids testing on the same adjectives used to fit gradients (a common memor
 **Minimum groups:** for train + validation + test, each class needs **≥3 distinct target
 groups**. Otherwise GRADIEND raises a validation error. Fix by adding targets, using
 fewer splits, or switching to row-level `split_col`.
+
+---
+
+## Hold out words when creating the data
+
+The data creator can assign the splits itself. With `split_by_target=True`, every target word is placed in exactly one of train, validation and test, so validation and test contain words the model has never seen. The result has the usual `split` column, so the trainer needs no extra setting:
+
+```python
+training = creator.generate_training_data(
+    max_size_per_class=1500, split_by_target=True, train_ratio=0.6, val_ratio=0.2, test_ratio=0.2,
+)
+trainer = TextPredictionTrainer(model="bert-base-uncased", data=training, target_classes=["BE", "AE"])  # split_col="split"
+```
+
+With [`PairedTextFilterConfig`][gradiend.data.text.filter_config.PairedTextFilterConfig] targets the unit is the pair, so *colour* and *color* always share a split. With plain targets the unit is the word; casing and surrounding whitespace are ignored (*Bad* and *bad* are one word) unless you pass `split_group_key`. `split_by_target` can be set on the creator or per call, and cannot be combined with `split_group_col`.
+
+Both ways hold out whole words. They differ in when the words are chosen:
+
+| | `split_by_target=True` (creator) | `split_col="heldout"` (trainer) |
+|---|---|---|
+| Held-out words are chosen | once, when the data is created, and stored in the `split` column | when training starts |
+| Different held-out words per seed | no | yes, with `split_resplit_per_seed=True` |
+| The two words of a pair | share a split | share a split |
+| Grouping of words | `split_group_key` (optional) | `split_group_key` (optional) |
 
 ---
 

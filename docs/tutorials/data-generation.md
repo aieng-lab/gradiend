@@ -82,19 +82,33 @@ feature_targets = [
 ]
 ```
 
-## Counterpart words
+## Paired targets
 
-If every word has exactly one counterpart in the other class (e.g. British and American spelling), list the pairs once with [`PairedTextFilterConfig`][gradiend.data.text.filter_config.PairedTextFilterConfig]. Each training row then carries its counterpart as the explicit alternative instead of a randomly drawn one.
+GRADIEND learns a feature from the difference between two words at the same position of a sentence: the **factual** word (the one in the text) and an **alternative** word. With one [`TextFilterConfig`][gradiend.data.text.filter_config.TextFilterConfig] per class, the creator picks the alternative of a row from the words of the other class, at random. That is the right setup when any word of one class can stand in for any word of the other, for example male and female first names.
+
+It is the wrong setup when the feature is a *specific change of a word*. Take British and American spelling: the feature is *colour* → *color*, *centre* → *center*, not *colour* → *center*. A random draw pairs *colour* with whichever American word it picks, so the training data no longer shows the change. If every word has exactly one alternative that you know in advance, list these pairs once with [`PairedTextFilterConfig`][gradiend.data.text.filter_config.PairedTextFilterConfig]. Every row then carries the alternative of its own word.
+
+British vs American spelling (class ids `BE` and `AE`) is the *example* used below and in the [demo notebook](https://github.com/aieng-lab/gradiend/blob/main/gradiend/examples/demo/04_learn_your_own_feature.ipynb). The same setup fits any feature that is defined by word pairs, such as singular and plural (*child* / *children*) or verb forms (*go* / *went*).
 
 ```python
 from gradiend.data import PairedTextFilterConfig
 
 feature_targets = [
-    PairedTextFilterConfig(pairs=[("colour", "color"), ("centre", "center")], ids=("BE", "AE")),
+    PairedTextFilterConfig(
+        pairs=[("colour", "color"), ("centre", "center")],  # (British, American): one word per class in every pair
+        ids=("BE", "AE"),                                   # the class ids, in the order of the words in a pair
+    ),
 ]
 ```
 
-It takes the same filter options as [`TextFilterConfig`][gradiend.data.text.filter_config.TextFilterConfig] (e.g. `spacy_tags`) and cannot be combined with plain filter configs in one creator. With `split_by_target=True` in `generate_training_data`, whole pairs are held out for validation and test. With plain [`TextFilterConfig`][gradiend.data.text.filter_config.TextFilterConfig] targets, `split_by_target=True` holds out whole words; casing is ignored (`Bad` and `bad` are one word).
+`pairs` can also be a dict of aligned word lists, `{"BE": ["colour", "centre"], "AE": ["color", "center"]}`; `ids` is then omitted. The generated per-class data has the usual columns plus one column per class: the word in the text is in the column of its own class (`BE`) and its alternative in the column of the other class (`AE`). This is the "one column per class" shape described in [Data handling](../guides/data-handling.md#variant-b-all-tokens-per-row-one-column-per-class), so it goes to the trainer like any other per-class data, with `target_classes=["BE", "AE"]`.
+
+Things to know:
+
+- **Choose unambiguous pairs.** A word that is also normal in the other class makes the label noisy. *program* is also British English for software, so *programme* / *program* is a poor pair.
+- **One pair per sentence.** A sentence with several different words of the same class (*colour* and *favour*) is skipped, because a row has only one alternative.
+- **Same options as [`TextFilterConfig`][gradiend.data.text.filter_config.TextFilterConfig]**, given once for all classes: `spacy_tags`, `use_lemma`, `min_left_context_words` and others. Several groups with the same `ids` extend the same classes, for example one group per part of speech. Paired and plain configs cannot be mixed in one creator.
+- **Hold out whole pairs** for validation and test with `split_by_target=True` in `generate_training_data`: both words of a pair then share a split. See [Data splits](../guides/data-splits.md#hold-out-words-when-creating-the-data).
 
 ## Base Data
 

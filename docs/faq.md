@@ -17,6 +17,7 @@ You should check the training log and inspect the mean probabilities per label c
 - **Learning rate** — Try the [automatic learning-rate search](guides/learning-rate-search.md).
 - **Source** — Using `source="alternative"` typically yields simpler conversion than `source='factual'`.
 - **Data balance and size** — Ensure both classes in your pair have enough examples; use `train_max_size` per class if needed. See [Data handling](guides/data-handling.md) for balancing.
+- **Paired targets** — If your feature is defined by word pairs (e.g. British vs American spelling: *colour* → *color*), list the pairs with [`PairedTextFilterConfig`][gradiend.data.text.filter_config.PairedTextFilterConfig] so that every row has the alternative of its own word; a randomly drawn alternative pairs unrelated words. See [Paired targets](tutorials/data-generation.md#paired-targets).
 - **Encoder evaluation** — Run [`trainer.evaluate_encoder(return_df=True, plot=True)`][gradiend.trainer.trainer.Trainer.evaluate_encoder] and check convergence plots for debugging; use [`trainer.plot_training_convergence()`][gradiend.trainer.trainer.Trainer.plot_training_convergence] to see correlation over steps.
 - **Data Quality** — Check the quality of your data and labels (spaCy misclassifies, etc.).
 - **Pruning** — try first to train the full (un-pruned) model to check if pre-pruning may accidently removes actually important weigths that are required for convergence

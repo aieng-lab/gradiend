@@ -86,6 +86,7 @@ Each subset has columns for every class, so factual and alternative tokens are i
 - Configs: `white`, `black`, `asian` (or `christian`, `jewish`, `muslim`)
 - Each config has: `masked`, `split`, `white`, `black`, `asian` (columns = class names)
 - The column matching the subset holds the factual token; other columns hold alternatives
+- [`TextPredictionDataCreator`][gradiend.data.text.prediction.creator.TextPredictionDataCreator] writes this variant for [`PairedTextFilterConfig`][gradiend.data.text.filter_config.PairedTextFilterConfig] targets (word pairs), see [Paired targets](../tutorials/data-generation.md#paired-targets)
 
 ```python
 # Hugging Face per-class-column dataset example
