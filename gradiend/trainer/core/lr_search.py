@@ -778,6 +778,13 @@ class LRSearchConfig:
     center_window: bool = True
     max_window_probes: int = 4
 
+    probe_seeds: int = 1
+    """Seeds a probe may try. Some regimes (the GRADIEND pair) drift to a common pole for one seed and converge for
+    another, so a single-seed probe can report ``collapsed`` or ``degrading`` at a learning rate that multi-seed
+    training (``max_seeds`` > 1) converges at. With ``probe_seeds`` > 1 a probe that ends ``collapsed`` or ``degrading``
+    is repeated with the next seeds (``seed + 1``, ...) and the best run is kept (converged first, then the highest
+    score). ``frozen``, ``slow`` and ``diverged`` probes are not repeated: another seed does not change their verdict."""
+
     keep_probe_artifacts: bool = False
     """Keep the probe checkpoints (default: only each probe's ``training.json``)."""
 
@@ -790,6 +797,8 @@ class LRSearchConfig:
             raise ValueError(f"resolution must be 'coarse' or 'fine', got {self.resolution!r}")
         if self.probe_steps is not None and self.probe_steps < 1:
             raise ValueError(f"probe_steps must be >= 1 or None, got {self.probe_steps}")
+        if self.probe_seeds < 1:
+            raise ValueError(f"probe_seeds must be >= 1, got {self.probe_seeds}")
 
 
 def tune_learning_rate(
@@ -816,7 +825,8 @@ def tune_learning_rate(
     Probe checkpoints are deleted after each probe (only ``training.json`` is kept) unless
     ``config.keep_probe_artifacts``. ``metadata`` (e.g. the first guess and probe length) is stored next to the
     result in ``lr_search.json`` so a later run can tell whether a finished search still applies. The search options
-    are those of :class:`LRSearchConfig`; ``train_overrides`` are passed to every probe's ``trainer.train``.
+    are those of :class:`LRSearchConfig` (``probe_seeds`` > 1 repeats a ``collapsed`` or ``degrading`` probe with
+    the next seeds); ``train_overrides`` are passed to every probe's ``trainer.train``.
     """
     cfg = config or LRSearchConfig()
     misplaced = sorted(set(train_overrides) & {f.name for f in fields(LRSearchConfig)})
@@ -830,12 +840,17 @@ def tune_learning_rate(
     full_steps = getattr(base_args, "max_steps", None)
     full_eval = getattr(base_args, "eval_steps", None)
 
-    def _train_and_read(lr: float, steps: Optional[int], eval_steps: Optional[int], tag: str) -> ProbeResult:
-        probe_dir = os.path.join(experiment_dir, "lr_search", f"{tag}_{lr:.3g}")
+    base_seed = int(getattr(base_args, "seed", 0) or 0)
+    seed_dependent = (RunState.COLLAPSED, RunState.DEGRADING)
+
+    def _one_seed(lr: float, steps: Optional[int], eval_steps: Optional[int], tag: str, k: int) -> ProbeResult:
+        probe_dir = os.path.join(experiment_dir, "lr_search", f"{tag}_{lr:.3g}" + (f"_seed{k}" if k else ""))
         overrides: Dict[str, Any] = dict(train_overrides)
         overrides.update(
             learning_rate=lr, experiment_dir=probe_dir, max_seeds=1, use_cache=False,
         )
+        if k:
+            overrides["seed"] = base_seed + k
         if steps is not None:
             overrides["max_steps"] = int(steps)
         if eval_steps is not None:
@@ -848,6 +863,20 @@ def tune_learning_rate(
         if not cfg.keep_probe_artifacts:
             _prune_probe_dir(probe_dir)
         return result
+
+    def _train_and_read(lr: float, steps: Optional[int], eval_steps: Optional[int], tag: str) -> ProbeResult:
+        best: Optional[ProbeResult] = None
+        for k in range(cfg.probe_seeds):
+            result = _one_seed(lr, steps, eval_steps, tag, k)
+            if best is None or _better_probe(result, best):
+                best = result
+            if classify_probe(best) not in seed_dependent:
+                break  # converged, frozen, slow or diverged: another seed cannot change that verdict
+            if k + 1 < cfg.probe_seeds:
+                logger.info("lr_search: lr=%g seed %d ended %s; trying the next seed", lr, k,
+                            classify_probe(result).value)
+        assert best is not None
+        return best
 
     eval_steps = cfg.probe_eval_steps
     if eval_steps is None and cfg.probe_steps is not None:
@@ -871,6 +900,16 @@ def tune_learning_rate(
     with open(os.path.join(experiment_dir, "lr_search.json"), "w", encoding="utf-8") as fh:
         json.dump(payload, fh, indent=2)
     return result
+
+
+def _better_probe(a: ProbeResult, b: ProbeResult) -> bool:
+    """``a`` beats ``b``: converged first, then the higher best score."""
+    if a.converged != b.converged:
+        return bool(a.converged)
+    score_a = max(a.scores) if a.scores else float("-inf")
+    score_b = max(b.scores) if b.scores else float("-inf")
+    return score_a > score_b
+
 
 @contextlib.contextmanager
 def _quiet_logs(enabled: bool) -> Iterator[None]:

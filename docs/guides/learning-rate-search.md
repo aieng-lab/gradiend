@@ -83,5 +83,6 @@ Set them with a [`LRSearchConfig`][gradiend.trainer.core.lr_search.LRSearchConfi
 | `lr_bounds` | `(1e-12, 10.0)` | Never try a learning rate outside these bounds. |
 | `center_window` | `True` | Choose the middle of the convergent range instead of the first convergent value. |
 | `max_window_probes` | `4` | Extra probes for that walk (on top of `max_probes`). |
+| `probe_seeds` | `1` | Seeds a probe may try. A probe that ends collapsed or degrading is repeated with the next seeds and the best run is kept, because some regimes collapse for one seed and converge for another. |
 | `keep_probe_artifacts` | `False` | Keep the probe checkpoints. By default only each probe's `training.json` stays. |
 | `verbose` | `False` | Show the full training log of every probe. By default the search logs one line per probe. |

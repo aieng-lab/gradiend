@@ -272,6 +272,62 @@ class _FakeTrainer:
         return self
 
 
+class _SeedDependentTrainer(_FakeTrainer):
+    """Only seed 1 converges; every other seed drifts both classes to the same pole (a collapse)."""
+
+    def __init__(self, tmp_path):
+        super().__init__(tmp_path)
+        self._training_args = type("A", (), {"max_steps": 500, "eval_steps": 50, "seed": 0})()
+        self.seeds = []
+
+    def train(self, **kw):
+        self.seeds.append(kw.get("seed", 0))
+        good = kw.get("seed", 0) == 1
+        out = kw["experiment_dir"] + "/model"
+        import os
+
+        os.makedirs(out, exist_ok=True)
+        payload = {
+            "training_stats": {
+                "scores": {"0": 0.2, "50": 0.95 if good else 0.0},
+                "mean_by_class": {"0": {"1.0": 0.05, "-1.0": 0.04},
+                                  "50": {"1.0": 0.9, "-1.0": -0.9} if good else {"1.0": -0.8, "-1.0": -0.7}},
+            },
+            "losses": [0.1],
+            "convergence_info": {"converged": good},
+        }
+        with open(out + "/training.json", "w") as fh:
+            json.dump(payload, fh)
+        self._model_arg, self._model_instance = out, object()
+        return self
+
+
+def test_a_collapsed_probe_is_retried_with_the_next_seed(tmp_path):
+    from gradiend.trainer.core.lr_search import LRSearchConfig, RunState, tune_learning_rate
+
+    single = _SeedDependentTrainer(tmp_path)
+    one = tune_learning_rate(single, 1e-6, experiment_dir=str(tmp_path / "a"),
+                             config=LRSearchConfig(probe_steps=100, confirm=False, max_probes=1))
+    assert one.probes[0].state is RunState.COLLAPSED and single.seeds == [0]
+
+    multi = _SeedDependentTrainer(tmp_path)
+    three = tune_learning_rate(multi, 1e-6, experiment_dir=str(tmp_path / "b"),
+                               config=LRSearchConfig(probe_steps=100, confirm=False, max_probes=1, probe_seeds=3))
+    assert three.probes[0].state is RunState.CONVERGED
+    # the first probe: seed 0 collapsed, seed 1 converged, so the third seed never runs;
+    # whatever probes follow (window centring) start again at seed 0
+    assert multi.seeds[:2] == [0, 1] and 2 not in multi.seeds
+
+
+def test_probe_seeds_must_be_positive():
+    import pytest
+
+    from gradiend.trainer.core.lr_search import LRSearchConfig
+
+    with pytest.raises(ValueError, match="probe_seeds"):
+        LRSearchConfig(probe_seeds=0)
+
+
 def test_every_probe_starts_from_the_base_model_and_the_trainer_is_left_untouched(tmp_path):
     from gradiend.trainer.core.lr_search import tune_learning_rate
 
