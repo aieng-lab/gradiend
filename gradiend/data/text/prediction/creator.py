@@ -98,8 +98,8 @@ class TextPredictionDataCreator:
             preprocess: Optional TextPreprocessConfig.
             spacy_model: Spacy model name (e.g. "de_core_news_sm"); lazy-loaded.
             feature_targets: List of TextFilterConfig. Each config's id (or first target) names the class.
-                Alternatively, PairedTextFilterConfig groups (1:1 counterpart words, all classes paired): every
-                row then also gets the counterpart of its word in one column per other class.
+                Alternatively, PairedTextFilterConfig groups (paired targets, one word per class): every
+                row then also gets the alternative of its word in one column per other class.
             min_left_context_words: Default minimum word-like strings required before a matched target.
                 Per-config overrides via TextFilterConfig.min_left_context_words are still supported.
                 Mainly useful for decoder-only models where masked targets need left context.
@@ -119,7 +119,7 @@ class TextPredictionDataCreator:
             split_group_key: Callable or sequence of callables applied to ``split_group_col``
                 values before grouping (e.g. ``[str.strip, str.casefold]``).
             split_by_target: If True, every target word (with ``PairedTextFilterConfig``: every pair, so both
-                counterparts) is assigned to exactly one of train/validation/test, so validation and test
+                words of a pair) is assigned to exactly one of train/validation/test, so validation and test
                 contain unseen target words. Casing and surrounding whitespace are ignored (``Bad`` and ``bad``
                 are one target) unless ``split_group_key`` is given. For plain targets this equals
                 ``split_group_col="label"``; it cannot be combined with ``split_group_col``.
@@ -414,17 +414,17 @@ class TextPredictionDataCreator:
                 masked = mask_sentence(sent, spans, cfg.mask)
                 labels = [m[2] for m in spans]
                 label = labels[0] if labels else ""
-                counterparts = {}
+                alternatives = {}
                 if self._pairs is not None:
-                    counterparts = self._pairs.row_counterparts(class_id, labels)
-                    if counterparts is None:
-                        continue  # one row has one counterpart: skip sentences with several different pair words
+                    alternatives = self._pairs.row_alternatives(class_id, labels)
+                    if alternatives is None:
+                        continue  # one row has one alternative: skip sentences with several different pair words
                 rows.append({
                     "text": sent,
                     "masked": masked,
                     "label": label,
                     "token_count": len(spans),
-                    **counterparts,
+                    **alternatives,
                 })
             if not rows:
                 empty_class_ids.append(class_id)

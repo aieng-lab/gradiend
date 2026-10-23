@@ -120,16 +120,16 @@ class TextFilterConfig:
 
 
 class PairedTextFilterConfig:
-    """Group of 1:1 counterpart targets with one class per tuple position (e.g. British/American spelling).
+    """Group of paired targets: one word per class in every pair, one class per tuple position (e.g. British/American spelling).
 
     Use it in ``TextPredictionDataCreator.feature_targets`` instead of one :class:`TextFilterConfig` per class.
-    Every pair lists one word per class; the creator adds the counterpart of each matched word as an extra
-    column, so every training row carries its explicit alternative.
+    Every pair lists one word per class; the creator adds the other word of the pair as an extra column
+    for each matched word, so every training row carries its explicit alternative.
 
     ``pairs`` is a list of tuples together with ``ids`` (one class id per tuple position), or a dict
     ``{class_id: [words]}`` of aligned lists (``ids`` then comes from the keys). Several groups with the same
     ``ids`` extend the same classes, e.g. one group per part of speech. A sentence with several different words
-    of the same class is skipped, because a row has only one counterpart.
+    of the same class is skipped, because a row has only one alternative.
 
     Args:
         pairs: List of tuples (one word per class) or dict of aligned word lists.

@@ -46,8 +46,8 @@ def resplit_unified_dataframe(
 ) -> pd.DataFrame:
     """Assign vocabulary-held-out splits to a unified prediction DataFrame.
 
-    If every alternative is an explicit 1:1 counterpart (paired targets), the rows are split by pair across all
-    classes, so both counterparts share a split, and the alternatives are kept as they are.
+    If every alternative is the other word of an explicit pair (paired targets), the rows are split by pair across all
+    classes, so both words of a pair share a split, and the alternatives are kept as they are.
 
     Args:
         df: Unified DataFrame to resplit. The input is not modified.
@@ -97,11 +97,11 @@ def resplit_unified_dataframe(
 
 
 def _explicit_pair_groups(df: pd.DataFrame, group_key: SplitGroupKey, feature_class_col: str) -> pd.Series:
-    """Group id per row whose alternative is an explicit 1:1 counterpart, ``None`` for all other rows.
+    """Group id per row whose alternative is the other word of an explicit pair, ``None`` for all other rows.
 
     A row is an explicit pair if its factual word always has this one alternative within the alternative class, no
     other word has it, and the alternative has no other alternative back. Sampled alternatives do not satisfy this.
-    The id joins all words of a pair (for three or more classes too), so counterparts share a split. The caller
+    The id joins all words of a pair (for three or more classes too), so the words of a pair share a split. The caller
     treats the data as paired only if every row is.
     """
     needed = {feature_class_col, UNIFIED_ALTERNATIVE_CLASS, UNIFIED_FACTUAL, UNIFIED_ALTERNATIVE}

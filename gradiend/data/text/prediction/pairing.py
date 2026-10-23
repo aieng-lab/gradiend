@@ -1,7 +1,7 @@
-"""Counterpart lookup for :class:`~gradiend.data.text.filter_config.PairedTextFilterConfig`.
+"""Word-pair lookup for :class:`~gradiend.data.text.filter_config.PairedTextFilterConfig`.
 
 Paired groups are expanded into ordinary per-class ``TextFilterConfig`` objects, so filtering, balancing and
-splitting stay the generic per-class code. This module only builds the word lookup used to add the counterpart
+splitting stay the generic per-class code. This module only builds the word lookup used to add the alternative
 columns to the generated rows.
 """
 
@@ -18,34 +18,34 @@ from gradiend.data.text.filter_config import PairedTextFilterConfig, TextFilterC
 
 @dataclass(frozen=True)
 class PairTable:
-    """Counterparts of all paired words: ``(class id, lower-cased word) -> one word per class (in ids order)``."""
+    """All paired words: ``(class id, lower-cased word) -> the pair, one word per class (in ids order)``."""
 
     ids: Tuple[str, ...]
-    counterparts: Dict[Tuple[str, str], Tuple[str, ...]]
+    pair_of: Dict[Tuple[str, str], Tuple[str, ...]]
 
-    def row_counterparts(self, class_id: str, labels: Sequence[str]) -> Optional[Dict[str, str]]:
-        """Counterpart columns for a row whose masked words are ``labels``.
+    def row_alternatives(self, class_id: str, labels: Sequence[str]) -> Optional[Dict[str, str]]:
+        """Alternative columns (one per other class) for a row whose masked words are ``labels``.
 
-        Returns ``None`` if the row has no unique counterpart (several different pair words in one sentence).
+        Returns ``None`` if the row has no unique alternative (several different pair words in one sentence).
         """
-        pairs = {self.counterparts.get((class_id, label.lower())) for label in labels}
-        if len(pairs) != 1 or None in pairs:
+        found = {self.pair_of.get((class_id, label.lower())) for label in labels}
+        if len(found) != 1 or None in found:
             return None
-        (pair,) = pairs
+        (pair,) = found
         return {cid: word for cid, word in zip(self.ids, pair) if cid != class_id}
 
 
 def expand_feature_targets(
     feature_targets: Sequence[Union[TextFilterConfig, PairedTextFilterConfig]],
 ) -> Tuple[List[TextFilterConfig], Optional[PairTable]]:
-    """Expand paired groups into per-class configs and build the counterpart lookup.
+    """Expand paired groups into per-class configs and build the word-pair lookup.
 
     Without paired groups the configs are returned unchanged and the lookup is ``None``.
 
     Raises:
         TypeError: If an entry is neither a ``TextFilterConfig`` nor a ``PairedTextFilterConfig``.
-        ValueError: If paired groups are mixed with plain configs, groups use different ids, or a word has two
-            different counterparts.
+        ValueError: If paired groups are mixed with plain configs, groups use different ids, or a word is in two
+            different pairs.
     """
     for entry in feature_targets:
         if not isinstance(entry, (TextFilterConfig, PairedTextFilterConfig)):
@@ -56,7 +56,7 @@ def expand_feature_targets(
     if len(groups) != len(feature_targets):
         raise ValueError("PairedTextFilterConfig cannot be combined with plain TextFilterConfig in one creator")
     ids = groups[0].ids
-    counterparts: Dict[Tuple[str, str], Tuple[str, ...]] = {}
+    pair_of: Dict[Tuple[str, str], Tuple[str, ...]] = {}
     for group in groups:
         if set(group.ids) != set(ids):
             raise ValueError(f"All PairedTextFilterConfig groups need the same ids, got {group.ids!r} and {ids!r}")
@@ -64,10 +64,10 @@ def expand_feature_targets(
             by_id = dict(zip(group.ids, pair))
             ordered = tuple(by_id[cid] for cid in ids)
             for cid, word in by_id.items():
-                known = counterparts.setdefault((cid, word.lower()), ordered)
+                known = pair_of.setdefault((cid, word.lower()), ordered)
                 if [w.lower() for w in known] != [w.lower() for w in ordered]:
-                    raise ValueError(f"'{word}' in class '{cid}' has two different counterparts: {known!r} and {ordered!r}")
-    return [cfg for group in groups for cfg in group.to_configs()], PairTable(ids=ids, counterparts=counterparts)
+                    raise ValueError(f"'{word}' in class '{cid}' is in two different pairs: {known!r} and {ordered!r}")
+    return [cfg for group in groups for cfg in group.to_configs()], PairTable(ids=ids, pair_of=pair_of)
 
 
 def split_by_pair(
@@ -80,7 +80,7 @@ def split_by_pair(
     *,
     split_group_key: SplitGroupKey = None,
 ) -> None:
-    """Vocabulary-held-out split in which a pair is one group: both counterparts land in the same split.
+    """Vocabulary-held-out split in which a pair is one group: both words of a pair land in the same split.
 
     Same as ``split_dataframe_per_group(..., split_group_col="label")``, but the groups are shared across the
     classes instead of being formed per class. ``ids`` are the class ids; every class table has one column per id.

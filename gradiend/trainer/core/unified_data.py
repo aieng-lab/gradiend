@@ -622,7 +622,7 @@ def merged_to_unified(
     """Convert a merged DataFrame into the unified schema.
 
     Handles three modes: (1) explicit target columns (target_col, target_class_col)
-    provide factual and alternative tokens per row; (2) one counterpart column per
+    provide factual and alternative tokens per row; (2) one alternative column per
     class (named like the class, as written for paired targets) provides the
     alternative of each row, like per-class input; (3) otherwise
     pair (class_a, class_b) is used to derive alternative tokens from the other

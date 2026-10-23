@@ -13,7 +13,7 @@ UNIFIED_SPLIT = "split"
 
 
 def _to_minimal(class_dfs: Dict[str, pd.DataFrame], extra_cols: Sequence[str] = ()) -> pd.DataFrame:
-    """Convert per-class to minimal (masked, label, label_class, split), plus ``extra_cols`` (counterparts)."""
+    """Convert per-class to minimal (masked, label, label_class, split), plus ``extra_cols`` (the alternative columns of paired targets)."""
     rows = []
     for class_id, df in class_dfs.items():
         for _, row in df.iterrows():
@@ -31,7 +31,7 @@ def _to_merged(class_dfs: Dict[str, pd.DataFrame], extra_cols: Sequence[str] = (
     """Build training DataFrame (factual only): masked, split, label_class, label, feature_class_id.
 
     feature_class_id is the string id from TextFilterConfig (same as label_class per row). ``extra_cols``
-    (the counterpart columns of paired targets) are appended.
+    (the alternative columns of paired targets) are appended.
     Splits are applied per feature class in _apply_auto_split.
     """
     rows = []
