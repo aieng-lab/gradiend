@@ -41,6 +41,9 @@ SENTENCES = [
     "Alles wird gut."
 ]
 
+# Only a handful of rows per class: split them 60/20/20 so that every split gets at least one row
+SPLIT_RATIOS = dict(train_ratio=0.6, val_ratio=0.2, test_ratio=0.2)
+
 if __name__ == "__main__":
     creator = TextPredictionDataCreator(
         base_data=SENTENCES,
@@ -79,13 +82,14 @@ if __name__ == "__main__":
             ),
             # more configs needed to represent full German singular definite article paradigm
         ],
+        min_left_context_words=0,  # the example sentences are short (the default asks for 10 words before the article)
         seed=42,
         download_if_missing=True,
     )
 
     print("=== Training data (per_class) ===")
     training = creator.generate_training_data(
-        max_size_per_class=5, format="per_class", min_rows_per_class_for_split=0
+        max_size_per_class=5, format="per_class", min_rows_per_class_for_split=0, **SPLIT_RATIOS
     )
     for class_id, df in training.items():
         print(f"\n  {class_id} ({len(df)} rows):")
@@ -97,7 +101,7 @@ if __name__ == "__main__":
 
     print("\n=== Training data (minimal) ===")
     minimal = creator.generate_training_data(
-        format="minimal", min_rows_per_class_for_split=0
+        format="minimal", min_rows_per_class_for_split=0, **SPLIT_RATIOS
     )
     print(minimal.head(20).to_string())
 
