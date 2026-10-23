@@ -26,6 +26,7 @@ from gradiend.trainer.core.unified_schema import (
 )
 from gradiend.util import normalize_split_name
 from gradiend.util.logging import suppress_tokenizer_length_warning
+from gradiend.util.tokenization import offset_pairs, tokenize_with_offsets
 from gradiend.util.positions import (
     assert_labels_on_real_tokens,
     first_real_token_positions,
@@ -156,6 +157,37 @@ def _targetable_token_text(token: str) -> str:
     """
     token = str(token).strip()
     return token.lstrip("#").lstrip("Ġ").lstrip("▁").strip()
+
+
+def _window_around_masks(tokenizer: Any, text: str, *, mask_token: str, max_length: int) -> str:
+    """Return the part of ``text`` that fits ``max_length`` tokens and keeps every ``mask_token``.
+
+    Naive ``truncation=True`` keeps the start of the text and cuts the masks off a long row, which then cannot be
+    trained on. This keeps a window of whole tokens around the masks, with as much left and right context as fits
+    (a masked LM needs both sides). Text that fits is returned unchanged, and so is text of a tokenizer without
+    offset support (the caller then fails with its usual message).
+    """
+    encoded, raw_offsets = tokenize_with_offsets(tokenizer, text, add_special_tokens=False, truncation=False)
+    if raw_offsets is None:
+        return text
+    ids = list(encoded["input_ids"])
+    budget = int(max_length) - int(getattr(tokenizer, "num_special_tokens_to_add", lambda pair=False: 2)(pair=False))
+    if len(ids) <= budget:
+        return text
+    mask_id = tokenizer.convert_tokens_to_ids(mask_token)
+    positions = [i for i, token_id in enumerate(ids) if token_id == mask_id]
+    if not positions:
+        return text
+    first, last = positions[0], positions[-1] + 1
+    spare = max(0, budget - (last - first))
+    start = max(0, first - spare // 2)
+    end = min(len(ids), last + (spare - spare // 2))
+    if start == 0:
+        end = min(len(ids), budget)  # no left context to spend: use the room on the right
+    elif end == len(ids):
+        start = max(0, len(ids) - budget)
+    offsets = offset_pairs(raw_offsets)
+    return text[offsets[start][0]:offsets[end - 1][1]]
 
 
 def create_masked_pair_from_text(
@@ -422,6 +454,24 @@ class TextBatchedDataset(TextBatchedDatasetBase):
         else:
             mask_token_id = self.tokenizer.convert_tokens_to_ids(self.mask_token)
             mask_positions = (input_ids == mask_token_id).nonzero(as_tuple=False)
+            if len(mask_positions) == 0:
+                # a long row: truncation kept the start of the text and cut the mask off. Keep a window around it.
+                windowed = _window_around_masks(
+                    self.tokenizer, expanded_text, mask_token=self.mask_token, max_length=self.max_length
+                )
+                if windowed != expanded_text:
+                    with suppress_tokenizer_length_warning():
+                        encoded = self.tokenizer(windowed, return_tensors="pt", add_special_tokens=True, truncation=True, max_length=self.max_length, padding="max_length")
+                    input_ids = encoded["input_ids"]
+                    attention_mask = encoded["attention_mask"]
+                    labels = torch.full_like(input_ids, -100)
+                    mask_positions = (input_ids == mask_token_id).nonzero(as_tuple=False)
+            if len(mask_positions) == 0:
+                # without a mask no label is set and the row would train on nothing
+                raise ValueError(
+                    f"Classic MLM training found no mask position after tokenization (max_length={self.max_length}); "
+                    f"the mask was cut off. text={text!r}."
+                )
             for i, idx in enumerate(mask_positions):
                 b, pos = idx.tolist()
                 labels[b, pos] = target_tokens[min(i, len(target_tokens) - 1)]
