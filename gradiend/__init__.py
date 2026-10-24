@@ -51,7 +51,7 @@ patch_sys_stderr_for_tqdm()
 try:
     __version__ = version("gradiend")
 except PackageNotFoundError:
-    __version__ = "0.2.2"  # editable install before package is installed
+    __version__ = "0.2.3"  # editable install before package is installed
 
 __all__ = [
     # Core model

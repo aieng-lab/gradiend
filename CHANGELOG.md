@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-10-23
+
+Patch release. Training defaults are unchanged from 0.2.2.
+
+### Added
+
+- `LRSearchConfig.probe_seeds` (default `1`): with `probe_seeds > 1` a probe run that ends `collapsed` or `degrading` is repeated with the next seeds before the learning rate is judged, so one unlucky seed does not decide the search ([guide](docs/guides/learning-rate-search.md)).
+
+### Fixed
+
+- Masked-language-model training: a row whose mask lay beyond `max_length` lost its mask in the truncation and was trained on without any label (loss over zero positions, no error). The text is now cut to a window around the mask; if the mask cannot be kept, a `ValueError` names the row.
+- The quick-start example in the README (`gradiend/examples/readme.py`) failed in about 30% of the runs with `fail_on_non_convergence`: only 3 validation rows were left, so an untrained model could reach a perfect correlation at step 0 by chance and no later step could beat it. It now uses a 60/20/20 split.
+- `gradiend/examples/create_german_article_data.py` produced no rows (the default of ten context words before the article is longer than its example sentences) and failed on its tiny splits.
+- The neutral data of the encoder evaluation no longer excludes the words of `decoder_eval_targets`. Those only score the decoder and can be a large subset of the vocabulary, which removed thousands of unrelated words from the neutral data.
+
 ## [0.2.2] - 2026-10-22
 
 Patch release. Training defaults and numerics are unchanged from 0.2.1.
