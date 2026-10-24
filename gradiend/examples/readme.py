@@ -88,7 +88,8 @@ if __name__ == "__main__":
             TextFilterConfig(target="they", id="3PL"),
         ],
     )
-    training = creator.generate_training_data(max_size_per_class=30)
+    # a few more validation rows than the default 10%: with only 3 of them an untrained model can reach a perfect correlation by chance
+    training = creator.generate_training_data(max_size_per_class=30, train_ratio=0.6, val_ratio=0.2, test_ratio=0.2)
     neutral = creator.generate_neutral_data(additional_excluded_words=["i", "we", "you"], max_size=10)
 
     args = TrainingArguments(
