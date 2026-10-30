@@ -764,17 +764,17 @@ class DecoderEvaluator:
         base_metrics = summary_metrics if summary_metrics is not None else classes_to_eval
         metrics_for_summary = list(base_metrics) if base_metrics else list(classes_to_eval or [])
         # Strengthen: we maximize P(target_class) on the *other* class's dataset (e.g. P(3SG) on 3PL data).
-        # The trainer keys probs by dataset class (which data we ran on), so the raw result key is the
-        # other class (e.g. "3PL"). We expose the result under the target class the user asked for
-        # (e.g. "3SG") and hide the internal key so the API matches user intent.
+        # With decoder_eval_prob_on_other_class the trainer exposes exactly that as probs[target_class], for static
+        # targets and for row-wise scoring alike. Without it the trainer keys probs by dataset class (which data we
+        # ran on), so the raw result key is the other class (e.g. "3PL"). We then expose the result under the
+        # target class the user asked for (e.g. "3SG") and hide the internal key so the API matches user intent.
         summary_key_aliases: Optional[Dict[str, str]] = None
         prob_on_other_class = getattr(
             getattr(trainer, "config", None), "decoder_eval_prob_on_other_class", True
         )
-        _, decoder_row_wise = trainer._resolve_decoder_eval_targets(training_like_df=None)
         if summary_metrics is None and classes_to_eval:
             if increase_target_probabilities:
-                if prob_on_other_class and not decoder_row_wise:
+                if prob_on_other_class:
                     # probs[target] is P(target) on the other class's factual dataset.
                     metrics_for_summary = list(classes_to_eval)
                 else:

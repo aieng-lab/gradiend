@@ -2418,10 +2418,11 @@ class TextPredictionTrainer(Trainer):
             class_names_for_metrics = list(targets.keys()) if targets else []
 
         # Strengthen + prob_on_other_class: P(target) on the other class's factual dataset
-        # (e.g. P(3SG) on label_class=3PL rows → star on Dataset 3PL, 3SG line).
+        # (e.g. P(3SG) on label_class=3PL rows → star on Dataset 3PL, 3SG line), for static targets
+        # and for row-wise scoring alike.
         # Weaken: P(class) on its own factual dataset.
         probs_factual: Dict[str, float] = {}
-        if prob_on_other_class and label_dataset_col and not use_row_wise:
+        if prob_on_other_class and label_dataset_col:
             counterfactual_probs = {}
             for class_name in class_names_for_metrics:
                 other_classes = [c for c in class_names_for_metrics if c != class_name]
