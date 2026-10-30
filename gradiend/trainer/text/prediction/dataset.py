@@ -4,6 +4,7 @@ Prediction datasets: TextBatchedDataset, TextTrainingDataset, create_masked_pair
 
 import random
 import re
+from functools import cached_property
 from typing import Any, List, Optional, Tuple
 
 import pandas as pd
@@ -313,6 +314,15 @@ class TextBatchedDataset(TextBatchedDatasetBase):
         self.mask_token_id = getattr(tokenizer, "mask_token_id", None)
         self.mask_placeholder = DEFAULT_DATASET_MASK_PLACEHOLDER
 
+    @cached_property
+    def _vocab_ids(self) -> Optional[Any]:
+        """The tokenizer's token -> id mapping, or None for a tokenizer without one.
+
+        Read once per dataset: Hugging Face fast tokenizers build a new dict on every ``tokenizer.vocab`` access
+        (about 40 ms for a 150k vocabulary), which made decoder-only training CPU-bound when it was read per item.
+        """
+        return getattr(self.tokenizer, "vocab", None)
+
     def _create_item(self, text: str, target: str):
         """Create a single training item: input_ids, attention_mask, labels.
 
@@ -433,8 +443,9 @@ class TextBatchedDataset(TextBatchedDatasetBase):
         labels = torch.full_like(input_ids, -100)
         if is_decoder_only_model:
             last_idxs = attention_mask.sum(dim=1)
-            if hasattr(self.tokenizer, "vocab") and target in self.tokenizer.vocab:
-                target_idx = self.tokenizer.vocab[target]
+            vocab = self._vocab_ids
+            if vocab is not None and target in vocab:
+                target_idx = vocab[target]
             else:
                 target_idx = self.tokenizer(target, add_special_tokens=False)["input_ids"][0]
             last_positions = last_real_token_positions(attention_mask, allow_empty=True)
