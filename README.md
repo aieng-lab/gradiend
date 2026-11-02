@@ -209,14 +209,22 @@ Example scripts and notebooks: [gradiend/examples](https://github.com/aieng-lab/
 
 The Python package paper:
 ```bibtex
-@misc{drechsel2026gradiendpythonpackage,
-      title={The {GRADIEND} Python Package: An End-to-End System for Gradient-Based Feature Learning}, 
-      author={Jonathan Drechsel and Steffen Herbold},
-      year={2026},
-      eprint={2602.23993},
-      archivePrefix={arXiv},
-      primaryClass={cs.CL},
-      url={https://arxiv.org/abs/2602.23993}, 
+@inproceedings{drechsel2026gradiendpythonpackage,
+    title = "The {GRADIEND} Python Package: An End-to-End System for Gradient-Based Feature Learning",
+    author = "Drechsel, Jonathan  and
+      Herbold, Steffen",
+    editor = "Agrawal, Sweta  and
+      Abad, Alberto",
+    booktitle = "Proceedings of the 2026 Conference on Empirical Methods in Natural Language Processing: System Demonstrations",
+    month = oct,
+    year = "2026",
+    address = "Budapest, Hungary",
+    publisher = "Association for Computational Linguistics",
+    url = "https://aclanthology.org/2026.emnlp-demos.18/",
+    doi = "10.18653/2026.emnlp-demos.18",
+    pages = "189--198",
+    ISBN = "979-8-89176-461-3",
+    abstract = "We present `gradiend{`}, an open-source Python package that operationalizes the GRADIEND method for learning feature directions from factual-counterfactual MLM and CLM gradients in language models. The package provides a unified workflow for feature-related data creation, training, evaluation, visualization, persistent model rewriting via controlled weight updates, and multi-feature comparison. We demonstrate `gradiend{`} through an English pronoun running example, a semantic sentiment use case that evaluates lexical generalization to held-out target words, and a large-scale feature comparison."
 }
 ```
 
