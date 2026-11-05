@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.2.5] - 2026-11-02
+
+Patch release. Training defaults are unchanged from 0.2.4.
+
+### Added
+
+- `max_size_per_target` parameter in `TextPredictionDataCreator` and `TextPredictionDataCreator.generate_training_data()`: caps the number of rows per target token within each class to prevent dominant target tokens from overpowering rarer targets, without oversampling rare targets.
+
+### Fixed
+
+- Counterfactual token sampling in `per_class_dict_to_unified()` now samples only from the same split of the counterpart class when the dataset contains split metadata. Previously, counterfactuals were sampled globally across all splits, which leaked held-out validation and test target vocabulary into training counterfactuals when using `split_by_target=True`.
+
 ## [0.2.4] - 2026-10-30
 
 Patch release. Training defaults are unchanged from 0.2.3.

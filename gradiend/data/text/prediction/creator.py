@@ -84,6 +84,7 @@ class TextPredictionDataCreator:
         split_group_col: Optional[str] = None,
         split_group_key: SplitGroupKey = None,
         split_by_target: bool = False,
+        max_size_per_target: Optional[int] = None,
     ) -> None:
         """Initialize with shared config for both generate methods.
 
@@ -123,6 +124,7 @@ class TextPredictionDataCreator:
                 contain unseen target words. Casing and surrounding whitespace are ignored (``Bad`` and ``bad``
                 are one target) unless ``split_group_key`` is given. For plain targets this equals
                 ``split_group_col="label"``; it cannot be combined with ``split_group_col``.
+            max_size_per_target: Optional cap on the number of rows per target token within each class (>= 1).
         """
         if not isinstance(text_column, str):
             raise TypeError(f"text_column must be str, got {type(text_column).__name__}")
@@ -165,6 +167,10 @@ class TextPredictionDataCreator:
             raise TypeError(f"split_by_target must be bool, got {type(split_by_target).__name__}")
         if split_by_target and split_group_col is not None:
             raise ValueError("split_by_target and split_group_col are alternatives: use only one of them")
+        if max_size_per_target is not None and not isinstance(max_size_per_target, int):
+            raise TypeError(f"max_size_per_target must be int or None, got {type(max_size_per_target).__name__}")
+        if max_size_per_target is not None and max_size_per_target < 1:
+            raise ValueError(f"max_size_per_target must be >= 1, got {max_size_per_target}")
 
         self.base_data = base_data
         self.text_column = text_column
@@ -179,6 +185,7 @@ class TextPredictionDataCreator:
         self.min_left_context_words = min_left_context_words
         self.seed = seed
         self.download_if_missing = download_if_missing
+        self.max_size_per_target = max_size_per_target
         self.output_dir = Path(output_dir) if output_dir else None
         self.training_basename = training_basename
         self.neutral_basename = neutral_basename
@@ -304,6 +311,7 @@ class TextPredictionDataCreator:
         split_group_col: Optional[str] = None,
         split_group_key: SplitGroupKey = None,
         split_by_target: Optional[bool] = None,
+        max_size_per_target: Optional[int] = None,
     ) -> Union[Dict[str, pd.DataFrame], pd.DataFrame]:
         """Generate masked training data by filtering configured target tokens.
 
@@ -342,6 +350,7 @@ class TextPredictionDataCreator:
             split_group_key: Override instance ``split_group_key`` (e.g. ``[str.strip, str.casefold]``).
             split_by_target: Override instance ``split_by_target`` for this call: each target word (each pair for
                 paired targets) is confined to a single train/validation/test split.
+            max_size_per_target: Cap on rows per target token within each class (>= 1). Overrides instance setting.
 
         Returns:
             Per format: dict of DataFrames, or single DataFrame.
@@ -356,6 +365,15 @@ class TextPredictionDataCreator:
         """
         if abs((train_ratio + val_ratio + test_ratio) - 1.0) > 1e-6:
             raise ValueError("train_ratio, val_ratio, test_ratio must sum to 1.0")
+        eff_max_size_per_target = (
+            self.max_size_per_target if max_size_per_target is None else max_size_per_target
+        )
+        if eff_max_size_per_target is not None and not isinstance(eff_max_size_per_target, int):
+            raise TypeError(
+                f"max_size_per_target must be int or None, got {type(eff_max_size_per_target).__name__}"
+            )
+        if eff_max_size_per_target is not None and eff_max_size_per_target < 1:
+            raise ValueError(f"max_size_per_target must be >= 1, got {eff_max_size_per_target}")
         if self.use_cache and self.output_dir is not None:
             out_path = output or self._resolve_output_path("training", None)
             if out_path is not None:
@@ -456,6 +474,18 @@ class TextPredictionDataCreator:
                 empty_class_ids[:SUMMARY_LOG_EXAMPLES],
             )
 
+        if not interrupted and eff_max_size_per_target is not None:
+            for cid in list(class_dfs.keys()):
+                df = class_dfs[cid]
+                if df is not None and not df.empty and "label" in df.columns:
+                    shuffled_df = df.sample(frac=1.0, random_state=self.seed).reset_index(drop=True)
+                    target_key_series = shuffled_df["label"].astype(str).str.lower()
+                    class_dfs[cid] = (
+                        shuffled_df.groupby(target_key_series, sort=False)
+                        .head(eff_max_size_per_target)
+                        .reset_index(drop=True)
+                    )
+
         if interrupted:
             logger.warning("Skipping balancing after interrupt so only collected rows are saved.")
         elif balance is not False:
@@ -466,6 +496,7 @@ class TextPredictionDataCreator:
                 min_rows_per_target_for_balance,
                 self.feature_targets,
                 self.seed,
+                max_size_per_target=eff_max_size_per_target,
             )
         elif max_size_per_class is not None:
             for class_id in list(class_dfs.keys()):

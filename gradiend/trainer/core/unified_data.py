@@ -555,13 +555,26 @@ def per_class_dict_to_unified(
                 other_factual_col = col_for_class(target_class, other_df) or (target_class if target_class in other_df.columns else "label")
                 if other_factual_col not in other_df.columns:
                     continue
-                unique_lower, weights, lower_to_canonical = _counterfactual_distribution(other_df[other_factual_col])
-                if not unique_lower:
+                global_unique_lower, global_weights, global_lower_to_canonical = _counterfactual_distribution(other_df[other_factual_col])
+                if not global_unique_lower:
                     continue
-                k = min(max_counterfactuals_per_sentence, len(unique_lower))
+                split_dist = {}
+                if effective_split_col in other_df.columns:
+                    norm_splits = other_df[effective_split_col].astype(str).apply(normalize_split_name)
+                    for s_name, s_group in other_df.groupby(norm_splits):
+                        u, w, c = _counterfactual_distribution(s_group[other_factual_col])
+                        if u:
+                            split_dist[s_name] = (u, w, c)
+
                 for _, row in df.iterrows():
                     factual_str = str(row[factual_col])
                     spl = row.get(effective_split_col, "train")
+                    spl_norm = normalize_split_name(str(spl))
+                    if spl_norm in split_dist:
+                        unique_lower, weights, lower_to_canonical = split_dist[spl_norm]
+                    else:
+                        unique_lower, weights, lower_to_canonical = global_unique_lower, global_weights, global_lower_to_canonical
+                    k = min(max_counterfactuals_per_sentence, len(unique_lower))
                     if k <= 0:
                         continue
                     try:
@@ -577,7 +590,7 @@ def per_class_dict_to_unified(
                         alt_str = apply_factual_casing(factual_str, canonical)
                         rows.append({
                             UNIFIED_MASKED: row[masked_col],
-                            UNIFIED_SPLIT: normalize_split_name(str(spl)),
+                            UNIFIED_SPLIT: spl_norm,
                             UNIFIED_FACTUAL_CLASS: source_class,
                             UNIFIED_ALTERNATIVE_CLASS: target_class,
                             UNIFIED_FACTUAL: factual_str,
@@ -709,32 +722,16 @@ def merged_to_unified(
     if pair is None:
         raise ValueError("Merged data without target_col/target_class_col requires pair.")
     c1, c2 = pair
-    by_class = {}
-    for cls in [c1, c2]:
-        sub = df[df[label_class_col].astype(str) == str(cls)]
-        if len(sub) > 0:
-            tokens = sub[label_col].dropna().unique().tolist()
-            by_class[cls] = str(tokens[0]) if tokens else None
-    if by_class.get(c1) is None or by_class.get(c2) is None:
+    sub1 = df[df[label_class_col].astype(str) == str(c1)]
+    sub2 = df[df[label_class_col].astype(str) == str(c2)]
+    if sub1.empty or sub2.empty or not sub1[label_col].dropna().any() or not sub2[label_col].dropna().any():
         raise ValueError(f"Merged single-token mode: missing token for pair {pair}.")
-    rows = []
-    for _, row in df.iterrows():
-        src = str(row[label_class_col])
-        if src not in pair:
-            continue
-        tgt = c2 if src == c1 else c1
-        factual_str = str(row[label_col])
-        alternative_raw = by_class[tgt]
-        rows.append({
-            UNIFIED_MASKED: row[masked_col],
-            UNIFIED_SPLIT: normalize_split_name(str(row[effective_split_col])),
-            UNIFIED_FACTUAL_CLASS: src,
-            UNIFIED_ALTERNATIVE_CLASS: tgt,
-            UNIFIED_FACTUAL: factual_str,
-            UNIFIED_ALTERNATIVE: apply_factual_casing(factual_str, alternative_raw),
-            UNIFIED_TRANSITION: transition_id(src, tgt),
-        })
-    return pd.DataFrame(rows)
+    return per_class_dict_to_unified(
+        per_class_dict_from_label_class_table(df, label_class_col=label_class_col),
+        masked_col=masked_col,
+        split_col=effective_split_col,
+        pair=pair,
+    )
 
 
 def load_hf_per_class(

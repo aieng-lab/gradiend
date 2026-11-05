@@ -21,10 +21,23 @@ def _apply_balance(
     min_rows_per_target_for_balance: int,
     feature_targets: List[TextFilterConfig],
     seed: int,
+    max_size_per_target: Optional[int] = None,
 ) -> Dict[str, pd.DataFrame]:
     """Apply non-destructive try balancing or strict per-target/per-class balancing."""
     if not class_dfs:
         return class_dfs
+
+    if max_size_per_target is not None:
+        for cid in list(class_dfs.keys()):
+            df = class_dfs[cid]
+            if df is not None and not df.empty and "label" in df.columns:
+                shuffled_df = df.sample(frac=1.0, random_state=seed).reset_index(drop=True)
+                target_key_series = shuffled_df["label"].astype(str).str.lower()
+                class_dfs[cid] = (
+                    shuffled_df.groupby(target_key_series, sort=False)
+                    .head(max_size_per_target)
+                    .reset_index(drop=True)
+                )
 
     config_by_id = {_class_id(cfg, i): cfg for i, cfg in enumerate(feature_targets)}
     class_ids = list(class_dfs.keys())
