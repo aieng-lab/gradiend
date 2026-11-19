@@ -79,7 +79,7 @@ class TestTrainingDataset:
                 tokenizer=MockTokenizer(),
                 batch_size=1,
                 is_decoder_only_model=False,
-                mask_placeholder=placeholder,
+                mask_placeholder=placeholder, label_token_protocol="no_leading_space"
             )
             items[placeholder] = dataset[0]
         custom, default = items["[PRONOUN]"], items["[MASK]"]
@@ -96,7 +96,7 @@ class TestTrainingDataset:
             tokenizer=MockTokenizer(),
             batch_size=1,
             is_decoder_only_model=True,
-            mask_placeholder="[PRONOUN]",
+            mask_placeholder="[PRONOUN]", label_token_protocol="no_leading_space"
         )
         item = dataset[0]
         assert item["input_text"] == "token_5 token_6 "
@@ -109,7 +109,7 @@ class TestTrainingDataset:
                 tokenizer=MockTokenizer(),
                 batch_size=1,
                 is_decoder_only_model=True,
-                mask_placeholder="[MASK]",
+                mask_placeholder="[MASK]", label_token_protocol="no_leading_space"
             )
 
     def test_template_carrying_the_tokenizer_mask_token_is_still_accepted(self):

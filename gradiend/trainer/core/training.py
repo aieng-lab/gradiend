@@ -127,7 +127,7 @@ def train(
         Path to saved model
     """
     if training_args is None:
-        training_args = TrainingArguments.from_dict(kwargs)
+        training_args = TrainingArguments()._with_overrides(kwargs)
     else:
         # Create a copy to avoid modifying the original object
         if kwargs:

@@ -5,6 +5,7 @@ TextPredictionModelWithGradiend: MLM/CLM implementation of TextModelWithGradiend
 import torch
 
 from gradiend.util.logging import get_logger
+from gradiend.trainer.text.common.chat_format import require_first_differing_token_for_chat, uses_chat_format
 from gradiend.trainer.text.common.model_base import TextModelWithGradiend
 from gradiend.trainer.text.prediction.seq2seq import (
     SEQ2SEQ_DECODER_SEQUENCE_CLOZE,
@@ -67,8 +68,8 @@ class TextPredictionModelWithGradiend(TextModelWithGradiend):
         self._zero_base_grad(set_to_none=True)
         return gradients
 
-    def create_gradients(self, text, label, return_dict=False, verbose=False):
-        item = self.create_inputs(text, label)
+    def create_gradients(self, text, label, return_dict=False, verbose=False, alternative=None):
+        item = self.create_inputs(text, label, alternative=alternative)
         if self.use_seq2seq_encoder_mlm:
             loss_base_model = seq2seq_encoder_mlm_loss(self._get_base_forward_model(), item)
             if verbose:
@@ -107,7 +108,7 @@ class TextPredictionModelWithGradiend(TextModelWithGradiend):
         )
         return gradients
 
-    def create_inputs(self, masked_text, label):
+    def create_inputs(self, masked_text, label, alternative=None):
         with self.exclusive_base_gradient_access():
             if self.use_seq2seq_encoder_mlm:
                 item = create_seq2seq_mlm_item(
@@ -158,14 +159,52 @@ class TextPredictionModelWithGradiend(TextModelWithGradiend):
                 item["labels"] = torch.tensor([[label_map[label_str]]], dtype=torch.long)
                 return self._place_inputs_for_base_forward(item)
             max_len = _effective_max_length(self.tokenizer, self.base_model)
+            protocol = getattr(self, "label_token_protocol", "first_differing_token")
+            if uses_chat_format(self.tokenizer):
+                # Instruct model: the row is a chat prompt, built by the same builder as the training item, so a
+                # row scored here is the row that was trained on. Multi-token labels are supervised on their
+                # first token and an alternative gives a contrast row, as in training. Only this rule exists
+                # for a chat tokenizer.
+                from gradiend.trainer.text.prediction.dataset import build_first_differing_token_item
+
+                require_first_differing_token_for_chat(self.tokenizer, protocol)
+
+                chat_item = build_first_differing_token_item(
+                    self.tokenizer, str(masked_text).split("[MASK]")[0], label, alternative,
+                    max_length=max_len, pad_to_max_length=False,
+                )
+                return self._place_inputs_for_base_forward(chat_item)
             item = self.tokenizer(masked_text, return_tensors="pt", max_length=max_len, truncation=True)
             item = self._place_inputs_for_base_forward(item)
-            if self.is_instruction_model:
-                label_token_id = self.tokenizer.tokenizer(f'{label}', add_special_tokens=False)['input_ids']
-                if self.tokenizer.tokenizer.decode(label_token_id[0]).strip() == '':
-                    label_token_id = label_token_id[1:]
-            elif self.is_decoder_only_model:
-                label_token_id = self.tokenizer(f' {label}', add_special_tokens=False)['input_ids']
+            if self.is_decoder_only_model:
+                from gradiend.trainer.text.prediction.clm_alignment import label_token_ids
+                from gradiend.trainer.text.prediction.dataset import build_first_differing_token_item
+
+                if alternative is not None and str(alternative) != str(label):
+                    # (An alternative that is the very same string is a neutral identity row: no contrast,
+                    # so it keeps the plain leading-space label below, like the training dataset.)
+                    # Divergence item (see ``clm_alignment``): the label is the first token where
+                    # ``label`` and ``alternative`` differ, after the tokens they share.
+                    if protocol != "first_differing_token":
+                        raise ValueError(
+                            f"create_inputs(alternative=...) needs label_token_protocol='first_differing_token', "
+                            f"got {protocol!r}."
+                        )
+                    div_item = build_first_differing_token_item(
+                        self.tokenizer, str(masked_text).split("[MASK]")[0], label, alternative,
+                        max_length=max_len, pad_to_max_length=False,
+                    )
+                    return self._place_inputs_for_base_forward(div_item)
+                else:
+                    if protocol == "first_differing_token":
+                        # Same rule as the training dataset: the label word after this prefix.
+                        label_token_id = label_token_ids(
+                            self.tokenizer, str(masked_text).split("[MASK]")[0], label, protocol
+                        )
+                    else:
+                        # gradiend 0.2.5 rule of this single-row scorer, kept for a model trained under
+                        # ``no_leading_space``: the leading-space token, whatever the prefix.
+                        label_token_id = list(self.tokenizer(f" {label}", add_special_tokens=False)["input_ids"])
             else:
                 label_token_id = self.tokenizer(f'{label}', add_special_tokens=False)['input_ids']
             if len(label_token_id) > 1:

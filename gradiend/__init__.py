@@ -51,7 +51,7 @@ patch_sys_stderr_for_tqdm()
 try:
     __version__ = version("gradiend")
 except PackageNotFoundError:
-    __version__ = "0.2.5"  # editable install before package is installed
+    __version__ = "0.3.0"  # editable install before package is installed
 
 __all__ = [
     # Core model
@@ -70,6 +70,10 @@ __all__ = [
     # Trainers and configs
     "TextPredictionTrainer",
     "TextPredictionConfig",
+    "ClmAlignmentError",
+    "ClmDivergence",
+    "align_clm_divergence",
+    "audit_clm_alignment",
     "TrainerConfig",
     "PrePruneConfig",
     "PostPruneConfig",
@@ -134,6 +138,10 @@ _LAZY_IMPORTS = {
     # Text prediction trainer
     "TextPredictionTrainer": ("gradiend.trainer.text.prediction.trainer", "TextPredictionTrainer"),
     "TextPredictionConfig": ("gradiend.trainer.text.prediction.trainer", "TextPredictionConfig"),
+    "ClmAlignmentError": ("gradiend.trainer.text.prediction.clm_alignment", "ClmAlignmentError"),
+    "ClmDivergence": ("gradiend.trainer.text.prediction.clm_alignment", "ClmDivergence"),
+    "align_clm_divergence": ("gradiend.trainer.text.prediction.clm_alignment", "align_clm_divergence"),
+    "audit_clm_alignment": ("gradiend.trainer.text.prediction.clm_alignment", "audit_clm_alignment"),
     # Logging
     "setup_logging": ("gradiend.util.logging", "setup_logging"),
     "get_logger": ("gradiend.util.logging", "get_logger"),

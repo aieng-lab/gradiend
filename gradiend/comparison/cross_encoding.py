@@ -358,6 +358,14 @@ def _unified_df_for_text_training(unified_df: pd.DataFrame, pairs: List[Dict[str
     return out
 
 
+def _trainer_label_token_protocol(trainer: object) -> str:
+    """The label-token rule the trainer's own datasets use (single source: ``trainer._label_token_protocol``)."""
+    resolve = getattr(trainer, "_label_token_protocol", None)
+    if callable(resolve):
+        return str(resolve())
+    return str(getattr(getattr(trainer, "training_args", None), "label_token_protocol", None) or "no_leading_space")
+
+
 def _gradient_dataset_for_unified_df(
     trainer: object,
     model: object,
@@ -391,6 +399,7 @@ def _gradient_dataset_for_unified_df(
             config=getattr(trainer, "config", None),
             training_args=getattr(trainer, "_training_args", None),
         ),
+        label_token_protocol=_trainer_label_token_protocol(trainer),
     )
     return trainer.create_gradient_training_dataset(text_ds, model)
 

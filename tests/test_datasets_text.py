@@ -220,7 +220,7 @@ class TestTextTrainingDataset:
             tokenizer=tokenizer,
             batch_size=1,
             is_decoder_only_model=False,
-            max_size=None
+            max_size=None, label_token_protocol="no_leading_space"
         )
         
         assert len(dataset) > 0
@@ -250,7 +250,7 @@ class TestTextTrainingDataset:
                 data=data,
                 tokenizer=tokenizer,
                 batch_size=4,
-                balance_column="feature_class_id",
+                balance_column="feature_class_id", label_token_protocol="no_leading_space"
             )
         msg = str(exc_info.value)
         assert "batch_size" in msg
@@ -280,7 +280,7 @@ class TestTextTrainingDataset:
             data=data,
             tokenizer=tokenizer,
             batch_size=1,
-            max_size=None
+            max_size=None, label_token_protocol="no_leading_space"
         )
         # Length depends on batching logic, but should be <= 100
         assert len(dataset_full) <= 100
@@ -290,7 +290,7 @@ class TestTextTrainingDataset:
             data=data,
             tokenizer=tokenizer,
             batch_size=1,
-            max_size=50
+            max_size=50, label_token_protocol="no_leading_space"
         )
         # Should be limited to 50 samples
         assert len(dataset_limited) <= 50
@@ -316,7 +316,7 @@ class TestTextTrainingDataset:
             data=data,
             tokenizer=tokenizer,
             batch_size=1,
-            max_size=30
+            max_size=30, label_token_protocol="no_leading_space"
         )
         
         # Should have at most 30 samples (downsampled)
@@ -343,12 +343,12 @@ class TestTextTrainingDataset:
         dataset_bs1 = TextTrainingDataset(
             data=data,
             tokenizer=tokenizer,
-            batch_size=1
+            batch_size=1, label_token_protocol="no_leading_space"
         )
         dataset_bs2 = TextTrainingDataset(
             data=data,
             tokenizer=tokenizer,
-            batch_size=2
+            batch_size=2, label_token_protocol="no_leading_space"
         )
 
         assert dataset_bs1.total_batches == 20
@@ -378,7 +378,7 @@ class TestTextTrainingDataset:
             data=data,
             tokenizer=tokenizer,
             batch_size=2,
-            balance_column="feature_class_id"
+            balance_column="feature_class_id", label_token_protocol="no_leading_space"
         )
         
         # Should batch by feature_class_id
@@ -408,7 +408,7 @@ class TestTextTrainingDataset:
             data=data,
             tokenizer=tokenizer,
             batch_size=1,
-            is_decoder_only_model=True
+            is_decoder_only_model=True, label_token_protocol="no_leading_space"
         )
         
         # Should set pad_token to eos_token for decoder-only models
@@ -436,7 +436,7 @@ class TestTextTrainingDataset:
             data=data,
             tokenizer=tokenizer,
             batch_size=1,
-            is_decoder_only_model=False
+            is_decoder_only_model=False, label_token_protocol="no_leading_space"
         )
         
         item = dataset[0]
@@ -474,7 +474,7 @@ class TestTextTrainingDataset:
         dataset = TextTrainingDataset(
             data=data,
             tokenizer=tokenizer,
-            batch_size=1
+            batch_size=1, label_token_protocol="no_leading_space"
         )
         
         item = dataset[0]
@@ -504,7 +504,7 @@ class TestTextTrainingDataset:
             data=data,
             tokenizer=tokenizer,
             batch_size=1,
-            target_key="label"
+            target_key="label", label_token_protocol="no_leading_space"
         )
         
         item = dataset[0]
@@ -534,7 +534,7 @@ class TestTextTrainingDataset:
             data=data,
             tokenizer=tokenizer,
             batch_size=1,
-            max_length=128
+            max_length=128, label_token_protocol="no_leading_space"
         )
         
         item = dataset[0]
@@ -573,7 +573,8 @@ class TestTextDatasetDataLoadingVariations:
             data=data,
             tokenizer=tokenizer,
             batch_size=1,
-            max_size=30  # Total max_size
+            max_size=30,  # Total max_size
+            label_token_protocol="no_leading_space",
         )
         
         # Should have at most 30 samples total (downsampled)
@@ -604,7 +605,7 @@ class TestTextDatasetDataLoadingVariations:
         dataset = TextTrainingDataset(
             data=data,
             tokenizer=tokenizer,
-            batch_size=1
+            batch_size=1, label_token_protocol="no_leading_space"
         )
         
         # Should work fine with identity samples
@@ -633,7 +634,7 @@ class TestTextDatasetDataLoadingVariations:
             data=data,
             tokenizer=tokenizer,
             batch_size=2,
-            balance_column="feature_class_id"
+            balance_column="feature_class_id", label_token_protocol="no_leading_space"
         )
         
         # Should handle multiple classes

@@ -25,6 +25,7 @@ from gradiend.trainer.core.unified_schema import (
     UNIFIED_MASKED,
     UNIFIED_SPLIT,
 )
+from gradiend.trainer.core.arguments import LABEL_TOKEN_PROTOCOLS
 from gradiend.util import normalize_split_name
 from gradiend.util.logging import suppress_tokenizer_length_warning
 from gradiend.util.tokenization import offset_pairs, tokenize_with_offsets
@@ -32,6 +33,17 @@ from gradiend.util.positions import (
     assert_labels_on_real_tokens,
     first_real_token_positions,
     last_real_token_positions,
+)
+from gradiend.trainer.text.common.chat_format import (
+    raw_tokenizer,
+    require_first_differing_token_for_chat,
+    uses_chat_format,
+)
+from gradiend.trainer.text.prediction.clm_alignment import (
+    build_shared_prefix_item,
+    label_token_id,
+    label_token_ids,
+    resolve_clm_labels,
 )
 
 # Dataset-level cloze placeholder (matches TextFilterConfig.mask). Independent of
@@ -150,6 +162,42 @@ def _continuation_ids_from_prefix(tokenizer: Any, prefix: str, continuation: str
     return _ids_for_text(tokenizer, continuation)
 
 
+def build_first_differing_token_item(
+    tokenizer: Any,
+    prefix: str,
+    label: Any,
+    alternative: Optional[Any],
+    *,
+    max_length: int,
+    pad_to_max_length: bool,
+) -> dict:
+    """Build the decoder-only item of ``label`` after ``prefix`` under ``label_token_protocol="first_differing_token"``.
+
+    The one builder of these items: the training dataset and ``create_inputs`` both call it, for plain and for
+    chat (Instruct) tokenizers. With an ``alternative`` that differs from ``label`` the row is a contrast row: the
+    context is ``prefix`` plus the tokens ``label`` and ``alternative`` share, and the label is the first token where
+    they differ (unalignable pairs raise :class:`~gradiend.trainer.text.prediction.clm_alignment.ClmAlignmentError`).
+    Without one the row has nothing shared and the label is the first token of ``label`` after ``prefix``
+    (:func:`~gradiend.trainer.text.prediction.clm_alignment.label_token_ids`, the same rule as for a contrast row).
+
+    Args:
+        tokenizer: Plain or chat tokenizer.
+        prefix: Text before the prediction slot.
+        label: Factual target word.
+        alternative: Alternative target word, or None for a row without contrast.
+        max_length: Maximum sequence length.
+        pad_to_max_length: Pad to ``max_length`` (training item) or return the unpadded sequence.
+
+    Returns:
+        Dict of ``(1, L)`` tensors ``input_ids``, ``attention_mask``, ``labels``.
+    """
+    shared_ids, label_id = resolve_clm_labels(tokenizer, prefix, label, alternative)
+    return build_shared_prefix_item(
+        tokenizer, prefix, shared_ids, label_id, max_length=max_length, pad_to_max_length=pad_to_max_length
+    )
+
+
+
 def _targetable_token_text(token: str) -> str:
     """Normalize tokenizer artifacts before testing whether a token is targetable.
 
@@ -208,7 +256,7 @@ def create_masked_pair_from_text(
 
     Args:
         text: Raw input text to create a masked example from.
-        tokenizer: Tokenizer for encoding and decoding.
+        tokenizer: Tokenizer for encoding and decoding (a chat tokenizer is used through its raw tokenizer).
         is_decoder_only_model: If True, uses prefix+placeholder mode; else uses MLM mask mode.
         excluded_tokens: Tokens to avoid masking (e.g., target class tokens).
         mask_token: The tokenizer's MLM special, used only to decide whether the in-place masking
@@ -222,6 +270,10 @@ def create_masked_pair_from_text(
         Tuple of (masked_text, target_token), or None if no valid pair could be created.
     """
     excluded_tokens = excluded_tokens or []
+    # A chat tokenizer (Instruct model) chat-formats whatever it tokenizes. The masked target must come from
+    # the sentence itself, never from the system prompt or the chat headers, so the sentence is split with the
+    # raw tokenizer; the training item built from this pair is chat-formatted later, by the dataset.
+    tokenizer = raw_tokenizer(tokenizer)
     tokens = tokenizer.tokenize(text)
     if not tokens:
         return None
@@ -323,7 +375,7 @@ class TextBatchedDataset(TextBatchedDatasetBase):
         """
         return getattr(self.tokenizer, "vocab", None)
 
-    def _create_item(self, text: str, target: str):
+    def _create_item(self, text: str, target: str, alternative_target: Optional[str] = None):
         """Create a single training item: input_ids, attention_mask, labels.
 
         For decoder-only: labels at last non-pad position. For MLM: labels at mask positions.
@@ -331,6 +383,9 @@ class TextBatchedDataset(TextBatchedDatasetBase):
         Args:
             text: Input text or template used for the prediction objective.
             target: Target token/text to predict.
+            alternative_target: The other side of the transition. Under
+                ``label_token_protocol="first_differing_token"`` a decoder-only row with a different
+                alternative is labelled at the first token where the two targets differ.
         """
         is_decoder_only_model = getattr(self, "is_decoder_only_model", False)
         prediction_objective = getattr(self, "prediction_objective", None)
@@ -417,6 +472,22 @@ class TextBatchedDataset(TextBatchedDatasetBase):
             else:
                 item = create_seq2seq_decoder_item(**common)
             return {k: v.squeeze(0) for k, v in item.items()}
+        protocol = getattr(self, "label_token_protocol", "no_leading_space")
+        has_contrast = alternative_target is not None and str(alternative_target) != str(target)
+        if is_decoder_only_model and (uses_chat_format(self.tokenizer) or (protocol == "first_differing_token" and has_contrast)):
+            # (A row whose alternative is the very same string is a neutral identity transition: it has
+            # no contrast to align and keeps the plain leading-space label below. A chat tokenizer
+            # (Instruct model) has only this rule: every row is built here, identity rows with nothing
+            # shared; the dataset constructor rejects any other label_token_protocol for it.)
+            # The label is the first token where factual and alternative differ, given the tokens
+            # they share as context (rows whose targets are unalignable raise ClmAlignmentError;
+            # the trainer's pre-training check applies ``clm_unalignable_rows`` before this point).
+            prefix = text.split(mask_placeholder)[0] if mask_placeholder in text else text
+            item = build_first_differing_token_item(
+                self.tokenizer, prefix, target, alternative_target,
+                max_length=self.max_length, pad_to_max_length=True,
+            )
+            return {k: v.squeeze(0) for k, v in item.items()}
         if (
             not is_decoder_only_model
             and self.mask_token
@@ -443,11 +514,7 @@ class TextBatchedDataset(TextBatchedDatasetBase):
         labels = torch.full_like(input_ids, -100)
         if is_decoder_only_model:
             last_idxs = attention_mask.sum(dim=1)
-            vocab = self._vocab_ids
-            if vocab is not None and target in vocab:
-                target_idx = vocab[target]
-            else:
-                target_idx = self.tokenizer(target, add_special_tokens=False)["input_ids"][0]
+            target_idx = label_token_id(self.tokenizer, expanded_text, target, protocol, vocab=self._vocab_ids)
             last_positions = last_real_token_positions(attention_mask, allow_empty=True)
             for i, last_idx in enumerate(last_idxs):
                 if last_idx == 0:
@@ -512,10 +579,19 @@ class TextTrainingDataset(TextBatchedDataset):
         rhs_window: int = -1,
         mlm_head_target_labels: Optional[List[str]] = None,
         mask_placeholder: str = DEFAULT_DATASET_MASK_PLACEHOLDER,
+        *,
+        label_token_protocol: str,
     ):
         """Initialize the training dataset.
 
         Args:
+            label_token_protocol: Required, no default (a forgotten value would silently label under the wrong
+                rule). ``"first_differing_token"`` labels decoder-only items with the first
+                token where factual and alternative differ (for rows without alternative the token the label
+                is after the prefix, see :func:`~gradiend.trainer.text.prediction.clm_alignment.label_token_ids`);
+                ``"no_leading_space"`` uses ``vocab[label]``. The trainer passes
+                ``TrainingArguments.label_token_protocol``. A chat tokenizer (Instruct model) supports only
+                ``"first_differing_token"``; any other value raises a ``ValueError``.
             data: DataFrame with masked, factual, alternative columns (unified schema).
             tokenizer: Tokenizer for encoding.
             batch_size: Batch size.
@@ -548,6 +624,12 @@ class TextTrainingDataset(TextBatchedDataset):
         self.mlm_head_target_labels = list(mlm_head_target_labels) if mlm_head_target_labels else None
         self.rhs_window = rhs_window
         self.mask_placeholder = str(mask_placeholder)
+        if label_token_protocol not in LABEL_TOKEN_PROTOCOLS:
+            raise ValueError(
+                f"label_token_protocol must be one of {LABEL_TOKEN_PROTOCOLS}, got {label_token_protocol!r}"
+            )
+        require_first_differing_token_for_chat(tokenizer, label_token_protocol)
+        self.label_token_protocol = label_token_protocol
         validate_masked_templates_in_dataframe(
             self.data,
             self.mask_placeholder,
@@ -595,8 +677,8 @@ class TextTrainingDataset(TextBatchedDataset):
                 label = int(label)
         except Exception:
             pass
-        item_factual = self._create_item(input_text, entry[UNIFIED_FACTUAL])
-        item_alternative = self._create_item(input_text, entry[UNIFIED_ALTERNATIVE])
+        item_factual = self._create_item(input_text, entry[UNIFIED_FACTUAL], alternative_target=entry[UNIFIED_ALTERNATIVE])
+        item_alternative = self._create_item(input_text, entry[UNIFIED_ALTERNATIVE], alternative_target=entry[UNIFIED_FACTUAL])
         out = {
             "factual": item_factual,
             "alternative": item_alternative,

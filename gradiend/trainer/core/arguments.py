@@ -3,6 +3,8 @@ Training arguments for GRADIEND Trainer (HF-like API).
 """
 
 import dataclasses
+import datetime
+import re
 from dataclasses import dataclass, field
 from typing import Literal, Optional, Callable, Union, Any, List, Dict
 
@@ -12,6 +14,73 @@ import torch.nn as nn
 from gradiend.trainer.core.config import validate_source_target
 from gradiend.trainer.core.lr_search import LRSearchConfig
 from gradiend.trainer.core.pruning import PostPruneConfig, PrePruneConfig, _validate_topk
+
+
+def dtype_to_name(dtype: torch.dtype) -> str:
+    """Serialize a torch dtype as its bare name (``"bfloat16"``, not ``"torch.bfloat16"``).
+
+    ``str(torch.bfloat16)`` is ``"torch.bfloat16"``, and ``getattr(torch, "torch.bfloat16")`` finds nothing.
+    Releases up to 0.2.5 wrote that prefixed form and read it back with ``getattr(torch, name, torch.float32)``,
+    so a configured ``torch_dtype`` such as ``bfloat16`` was reset to ``float32`` whenever
+    :class:`TrainingArguments` went through ``to_dict()`` and ``from_dict()``.
+
+    Args:
+        dtype: The dtype to serialize.
+
+    Raises:
+        TypeError: If ``dtype`` is not a ``torch.dtype``.
+    """
+    if not isinstance(dtype, torch.dtype):
+        raise TypeError(f"dtype_to_name expects a torch.dtype, got {type(dtype).__name__}")
+    return str(dtype).split(".")[-1]
+
+
+def dtype_from_name(name: Any) -> torch.dtype:
+    """Resolve a serialized dtype name to the torch dtype.
+
+    Both the bare name (``"bfloat16"``) and the ``"torch."``-prefixed form written by 0.2.5 and earlier are read,
+    so saved records still load. An unknown name raises: falling back to ``float32`` is what hid the loss
+    described in :func:`dtype_to_name`.
+
+    Args:
+        name: A dtype name, or a ``torch.dtype`` (returned as it is).
+
+    Raises:
+        TypeError: If ``name`` is neither a string nor a ``torch.dtype``.
+        ValueError: If ``name`` does not name a torch dtype.
+    """
+    if isinstance(name, torch.dtype):
+        return name
+    if not isinstance(name, str):
+        raise TypeError(f"dtype_from_name expects a str or torch.dtype, got {type(name).__name__}")
+    resolved = getattr(torch, name.split(".")[-1], None)
+    if not isinstance(resolved, torch.dtype):
+        raise ValueError(f"Unknown torch dtype name {name!r}")
+    return resolved
+
+
+LABEL_TOKEN_PROTOCOLS = ("first_differing_token", "no_leading_space")
+"""Valid values of :attr:`TrainingArguments.label_token_protocol`."""
+
+
+def parse_chat_template_date(value: Any) -> datetime.date:
+    """Parse :attr:`TrainingArguments.chat_template_date`: an ISO date ``YYYY-MM-DD``.
+
+    The date is checked with :meth:`datetime.date.fromisoformat`. The shape is checked as well, because newer
+    Python versions also accept other ISO forms (``20240726``) that older ones reject.
+
+    Args:
+        value: The date as a string.
+
+    Raises:
+        ValueError: If ``value`` is not a string of the form ``YYYY-MM-DD`` that names a real date.
+    """
+    if isinstance(value, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+        try:
+            return datetime.date.fromisoformat(value)
+        except ValueError:
+            pass
+    raise ValueError(f"chat_template_date must be an ISO date 'YYYY-MM-DD' (e.g. '2024-07-26'), got {value!r}")
 
 
 @dataclass
@@ -180,6 +249,47 @@ class TrainingArguments:
     """When False (default), pass use_cache=False to decoder model forward during training (KV cache disabled).
     Use True only for inference/generation. Decoder-only MLM head training respects this via train_decoder_only_mlm_head."""
 
+    label_token_protocol: str = "first_differing_token"
+    """Which token a decoder-only (``clm_next_token``) training row supervises.
+
+    ``"first_differing_token"`` (default): the label is the first token where the factual and the
+    alternative target differ; tokens they share are appended to the context
+    (:func:`~gradiend.trainer.text.prediction.clm_alignment.align_clm_divergence`). When the two targets
+    already differ in their first token and the target follows whitespace, this is the leading-space
+    variant of the label (``▁she`` / ``Ġshe``, ``tokenizer(" " + label)``), the rule
+    :meth:`TextPredictionModelWithGradiend.create_inputs` uses. Rows without an alternative use that
+    leading-space rule. Rows that cannot be aligned (identical targets, or one a token-prefix of the
+    other) follow :attr:`clm_unalignable_rows`.
+
+    ``"no_leading_space"``: the rule of gradiend 0.2.5 and earlier, ``vocab[label]`` (the no-space variant
+    ``she``, else the first id of ``tokenizer(label)``). No alignment, no pre-training check. It exists
+    only to reproduce models trained with those releases.
+
+    Settings saved with the old names ``canonical`` / ``legacy`` still load (:meth:`from_dict`), and a
+    saved dict without this key loads as ``"no_leading_space"``, so trained artifacts are never
+    silently re-interpreted."""
+
+    instruction_model: Optional[bool] = None
+    """Whether the model is an instruction-tuned ("Instruct") model, whose rows are chat prompts.
+
+    ``None`` (default): decided by the model name. The base name (the last path component, for a hub id the part
+    after the organisation) split at non-alphanumeric characters must contain one of the words ``instruct``,
+    ``chat`` or ``it`` (case-insensitive), e.g. ``Qwen2.5-1.5B-Instruct``, ``gemma-2-2b-it``,
+    ``Llama-2-7b-chat-hf``. ``True``: chat-format the model whatever its name. ``False``: read plain text even if the
+    name matches. The decision in force (always ``True`` or ``False``, also for a plain model) is stored with the
+    trained model, and a loaded model keeps it, whatever the name rule says later. A model saved before the
+    decision was stored was trained under the old rule, so it is decided by that rule: ``"instruct"`` anywhere in
+    the name (any case)."""
+
+    chat_template_date: Optional[str] = None
+    """Fixed date (ISO ``YYYY-MM-DD``) for chat templates that write the current date into the prompt (Llama 3.1 and
+    later, gpt-oss). The template never reads the system clock, because the training rows would change with the day
+    they are built. ``None`` (default) uses ``gradiend.trainer.text.common.chat_format.DEFAULT_CHAT_TEMPLATE_DATE``,
+    the date Llama's own templates fall back to. A template that does not ask for the date ignores it. When a
+    template does ask for it, the trainer stores the date actually used here (also when it was the default), the
+    record of a trained model keeps it, and a loaded model uses it, so changing the default later never changes an
+    existing model."""
+
     prediction_objective: str = "auto"
     """Prediction objective for text-gradient training and decoder probability scoring.
     Supported: ``auto``, ``mlm_mask_token``, ``clm_next_token``, ``clm_mlm_head``,
@@ -211,6 +321,13 @@ class TrainingArguments:
 
     decoder_sequence_cloze_rhs_window: int = -1
     """Right-context token window for clm_sequence_cloze / seq2seq_decoder_sequence_cloze scoring and training. -1 uses the full RHS."""
+
+    clm_unalignable_rows: Literal["error", "drop"] = "error"
+    """Policy for unalignable decoder-only CLM rows where one target is a token-prefix of the other or token sequences are identical.
+
+    - ``"error"`` (default): fail fast with an aggregated error during pre-training check.
+    - ``"drop"``: drop unalignable rows during pre-training check and log counts per feature class.
+    """
 
     params: Optional[List[str]] = None
     """If set, only these parameter names or wildcards are included in the GRADIEND param map when building from a base model. None = include all backbone parameters (default). Enables future params selection processes."""
@@ -346,6 +463,14 @@ class TrainingArguments:
         from gradiend.trainer.core.cache_policy import normalize_use_cache
 
         normalize_use_cache(self.use_cache)
+        if self.label_token_protocol not in LABEL_TOKEN_PROTOCOLS:
+            raise ValueError(
+                f"label_token_protocol must be one of {LABEL_TOKEN_PROTOCOLS}, got {self.label_token_protocol!r}"
+            )
+        if self.instruction_model is not None and not isinstance(self.instruction_model, bool):
+            raise TypeError(f"instruction_model must be True, False or None, got {self.instruction_model!r}")
+        if self.chat_template_date is not None:
+            parse_chat_template_date(self.chat_template_date)
         if not isinstance(self.reuse_pre_prune, bool):
             raise TypeError(f"reuse_pre_prune must be bool, got {type(self.reuse_pre_prune).__name__}")
         if not isinstance(self.fail_on_non_convergence, bool):
@@ -467,6 +592,10 @@ class TrainingArguments:
             )
         if self.criterion is None:
             self.criterion = nn.MSELoss()
+        if self.clm_unalignable_rows not in ("error", "drop"):
+            raise ValueError(
+                f"clm_unalignable_rows must be 'error' or 'drop', got {self.clm_unalignable_rows!r}"
+            )
         if self.supervised_encoder and self.supervised_decoder:
             raise ValueError(
                 "Cannot set both supervised_encoder and supervised_decoder. "
@@ -523,7 +652,9 @@ class TrainingArguments:
             v = getattr(self, k, None)
             if callable(v):
                 continue
-            if isinstance(v, (nn.Module, torch.dtype)):
+            if isinstance(v, torch.dtype):
+                result[k] = dtype_to_name(v)
+            elif isinstance(v, nn.Module):
                 result[k] = str(v) if v is not None else None
             elif k == "pre_prune_config" and v is not None:
                 cfg = dataclasses.asdict(v)
@@ -541,10 +672,22 @@ class TrainingArguments:
 
     @classmethod
     def from_dict(cls, d: dict) -> "TrainingArguments":
-        """Create from dict (e.g. loaded from JSON). Canonical keys only."""
+        """Read a serialized record (e.g. loaded from JSON). Canonical keys only.
+
+        A key missing from the record was written before that key existed and takes the value of those releases:
+        a record without ``label_token_protocol`` loads as ``"no_leading_space"``. This reads records; it is not
+        how arguments are built from user input (use ``TrainingArguments(...)``, whose defaults are the current ones).
+        """
         d = dict(d)
+        # A serialized dict without the key was written before the protocol existed:
+        # it must keep the old label convention, not silently pick up the new default.
+        d.setdefault("label_token_protocol", "no_leading_space")
+        # Settings saved under the pre-rename names; this is the only place that knows them.
+        d["label_token_protocol"] = {"canonical": "first_differing_token", "legacy": "no_leading_space"}.get(
+            d["label_token_protocol"], d["label_token_protocol"]
+        )
         if "torch_dtype" in d and isinstance(d.get("torch_dtype"), str):
-            d["torch_dtype"] = getattr(torch, d["torch_dtype"], torch.float32)
+            d["torch_dtype"] = dtype_from_name(d["torch_dtype"])
         if "pre_prune_config" in d and isinstance(d.get("pre_prune_config"), dict):
             d["pre_prune_config"] = PrePruneConfig(**d["pre_prune_config"])
         if "post_prune_config" in d and isinstance(d.get("post_prune_config"), dict):
@@ -552,6 +695,15 @@ class TrainingArguments:
         if "lr_search_config" in d and isinstance(d.get("lr_search_config"), dict):
             d["lr_search_config"] = LRSearchConfig(**d["lr_search_config"])
         return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
+
+    def _with_overrides(self, overrides: Dict[str, Any]) -> "TrainingArguments":
+        """A copy of these arguments with ``overrides`` applied; keys that are not fields are ignored.
+
+        This is how user-supplied keyword arguments are merged into arguments (``Trainer.train(**overrides)``,
+        ``gradiend.trainer.core.train(**kwargs)``). Every field that is not overridden keeps this instance's value,
+        so a default is the current default; :meth:`from_dict` alone would read a missing key as an old record.
+        """
+        return type(self).from_dict({**self.to_dict(), **overrides})
 
     def get(self, key: str, default: Any = None) -> Any:
         """Dict-like get method."""

@@ -24,6 +24,8 @@ Trainer, arguments, suites, and pruning:
 
 - **[`TransitionSpec`][gradiend.trainer.core.transition_selection.TransitionSpec]** — Explicit encoder-eval transition (`pair()`, `identity()`)
 - **[`set_seed`][gradiend.trainer.trainer.set_seed]** — Reproducible RNG seeding
+- **[`audit_clm_alignment`][gradiend.trainer.text.prediction.clm_alignment.audit_clm_alignment]** — Check decoder-only factual/alternative targets before training
 - **[`tune_learning_rate`][gradiend.trainer.core.lr_search.tune_learning_rate]** — Automatic learning-rate search
+- **[`register_chat_format`][gradiend.trainer.text.common.chat_format.register_chat_format]** — Chat format of a model family for Instruct models
 
 Additional symbols (not in the navigation): [`load_training_stats`][gradiend.trainer.core.stats.load_training_stats], [`create_model_with_gradiend`][gradiend.trainer.factory.create_model_with_gradiend], [`GradientTrainingDataset`][gradiend.trainer.core.dataset.GradientTrainingDataset], [`TextGradientTrainingDataset`][gradiend.trainer.text.common.dataset.TextGradientTrainingDataset].

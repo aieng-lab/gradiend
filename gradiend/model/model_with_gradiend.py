@@ -882,6 +882,18 @@ class ModelWithGradiend(nn.Module, ABC):
             }
 
 
+    def resolved_training_settings(self) -> Dict[str, Any]:
+        """Training-argument values this model resolved from its own configuration.
+
+        A setting whose default depends on the model (e.g. the date a chat template inserts) is resolved when the
+        model is created. The trainer writes the result into the training arguments that are saved with the trained
+        model, so a later change of the default never changes what the saved model is.
+
+        Returns:
+            ``{TrainingArguments field: resolved value}``; empty for a model with nothing to resolve (the default).
+        """
+        return {}
+
     # ----------------------------
     # Saving (unchanged naming; GRADIEND writes config + training.json itself)
     # ----------------------------
@@ -1042,6 +1054,7 @@ class ModelWithGradiend(nn.Module, ABC):
                 "base_model_device_map", "base_model_max_memory",
                 "prediction_objective",
                 "decoder_sequence_cloze_rhs_window",
+                "instruction_model", "chat_template_date",
                 "source", "target",
             )
             for key in gradiend_keys:

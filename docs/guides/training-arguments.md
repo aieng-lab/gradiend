@@ -102,7 +102,9 @@ for encoder evaluation; neutral data is still drawn from `eval_neutral_data`.
 | **trust_remote_code** | `False` | Pass `trust_remote_code=True` when loading Hugging Face models/tokenizers. |
 | **dataset_trust_remote_code** | `None` | Optional `trust_remote_code` value for `datasets.load_dataset`. `None` means the keyword is not passed. |
 | **model_use_cache** | `False` | Whether decoder models use transformer KV cache during training. Keep `False` for training. |
-| **torch_dtype** | `None` | Model dtype. `None` becomes `torch.float32`. |
+| **torch_dtype** | `None` | Model dtype. `None` becomes `torch.float32`; an unknown dtype name raises. |
+| **instruction_model** | `None` | Whether the input of a decoder-only model is chat-formatted (Instruct model). `None` decides by the model name (the whole word `instruct`, `chat` or `it` in its base name), `True` forces the chat format, `False` reads plain text. The resolved decision (`True`/`False`) is stored with the trained model and kept on reload; a model saved without it is decided by the old rule (`"instruct"` anywhere in the name). See [Instruct models](decoder-only.md#instruct-models). |
+| **chat_template_date** | `None` | Fixed date (ISO `YYYY-MM-DD`) that chat templates which write the current date into the prompt (Llama 3.1 and later, gpt-oss) see instead of the system clock. `None` uses the default `2024-07-26`. Ignored by templates that do not ask for the date. The date actually used is stored with the trained model. See [Instruct models](decoder-only.md#instruct-models). |
 | **base_model_device_map** | `None` | Hugging Face `device_map` for the base model. `False` disables device mapping; strings/dicts are passed through. |
 | **base_model_max_memory** | `None` | Optional Hugging Face `max_memory` map for base-model placement. |
 | **encoder_decoder_same_device** | `False` | Place GRADIEND encoder and decoder on the same GPU where possible, leaving more devices for the base model. |
@@ -131,6 +133,8 @@ Device placement is automatic when these fields are omitted:
 | **decoder_mlm_head_lr** | `1e-4` | Learning rate for auxiliary decoder MLM-head training. |
 | **decoder_mlm_head_max_size** | `None` | Optional per-label cap for auxiliary decoder MLM-head training data. |
 | **decoder_sequence_cloze_rhs_window** | `-1` | Right-context token window for `clm_sequence_cloze` and `seq2seq_decoder_sequence_cloze`. `-1` uses the full RHS. |
+| **label_token_protocol** | `"first_differing_token"` | Which token a decoder-only (`clm_next_token`) training row supervises: `"first_differing_token"` (the first token where factual and alternative differ; shared tokens become context) or `"no_leading_space"` (the rule of gradiend 0.2.5 and earlier, `vocab[label]`). A loaded model keeps the rule it was trained with. See [Decoder-only models](decoder-only.md#label-token-protocol). |
+| **clm_unalignable_rows** | `"error"` | What to do with decoder-only rows whose factual and alternative cannot be aligned (one is a token prefix of the other, or both tokenize identically): `"error"` fails before training with an aggregated [`ClmAlignmentError`][gradiend.trainer.text.prediction.clm_alignment.ClmAlignmentError], `"drop"` drops them and logs the counts per class. See [Decoder-only models](decoder-only.md#unalignable-targets-and-pre-training-audit). |
 
 Supported objectives are `auto`, `mlm_mask_token`, `clm_next_token`,
 `clm_mlm_head`, `clm_sequence_cloze`, `seq2seq_decoder`,

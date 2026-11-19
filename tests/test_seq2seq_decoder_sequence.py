@@ -160,7 +160,7 @@ def test_dataset_routes_encoder_mlm_and_sequence_cloze():
         tok,
         batch_size=1,
         is_seq2seq_model=True,
-        prediction_objective=SEQ2SEQ_ENCODER_MLM,
+        prediction_objective=SEQ2SEQ_ENCODER_MLM, label_token_protocol="no_leading_space"
     )
     mlm_item = mlm_ds._create_item("The chef <extra_id_0> the soup.", "tasted")
     assert mlm_item["labels"].ndim == 1
@@ -173,7 +173,7 @@ def test_dataset_routes_encoder_mlm_and_sequence_cloze():
         batch_size=1,
         is_seq2seq_model=True,
         prediction_objective=SEQ2SEQ_DECODER_SEQUENCE_CLOZE,
-        rhs_window=-1,
+        rhs_window=-1, label_token_protocol="no_leading_space"
     )
     seq_item = seq_ds._create_item("The chef [MASK] the soup.", "tasted")
     assert seq_item["labels"].ndim == 1

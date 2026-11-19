@@ -15,6 +15,7 @@ import torch
 import torch.nn.functional as F
 from gradiend.util.metrics import f1_score, precision_score, recall_score
 
+from gradiend.trainer.text.common.chat_format import chat_user_text_start, uses_chat_format
 from gradiend.trainer.text.common.loading import InstructTokenizerWrapper
 from gradiend.util.logging import get_logger
 from gradiend.model.utils import is_decoder_only_model, is_seq2seq_model
@@ -96,30 +97,19 @@ def _select_clm_instruction_target_positions(
     batch_size: int,
     tokenizer: InstructTokenizerWrapper,
 ) -> List[Optional[int]]:
-    """Select target positions for CLM instruction evaluation."""
-    end_header_token_id = tokenizer.tokenizer.convert_tokens_to_ids(
-        tokenizer.tokenizer.END
-    )
+    """Select target positions for CLM instruction evaluation.
+
+    The positions are chosen among the second half of the real tokens that follow the chat prompt's system prompt
+    and user header (the length of that frame comes from the tokenizer's chat format, so it is right for every
+    model family and for either padding side).
+    """
+    user_text_start = chat_user_text_start(tokenizer)
     target_positions = []
     for i in range(batch_size):
         token_positions = torch.where(attention_mask[i] != 0)[0].tolist()
-        ids = input_ids[i].tolist()
-        matches = [j for j, token_id in enumerate(ids) if token_id == end_header_token_id]
-        if len(matches) >= 2:
-            second_last_index = matches[-2]
-            start_of_user_prompt = second_last_index + 1
-        else:
-            start_of_user_prompt = 0
-        remaining_token_count = len(token_positions) - start_of_user_prompt
-        if remaining_token_count > 1:
-            chosen_pos = (
-                random.choice(
-                    token_positions[
-                        start_of_user_prompt + remaining_token_count // 2 :
-                    ]
-                )
-                - 1
-            )
+        user_positions = token_positions[user_text_start:]
+        if len(user_positions) > 1:
+            chosen_pos = random.choice(user_positions[len(user_positions) // 2 :]) - 1
             target_positions.append(chosen_pos)
         else:
             target_positions.append(None)
@@ -184,8 +174,8 @@ def _process_batch_for_clm(
             predicted_token = tokenizer.decode(
                 [predictions[i, target_pos]], skip_special_tokens=True
             )
-            # For instruction tokenizer, true token is at target_pos + 1
-            true_pos = target_pos + 1 if isinstance(tokenizer, InstructTokenizerWrapper) else target_pos
+            # For a chat tokenizer, true token is at target_pos + 1
+            true_pos = target_pos + 1 if uses_chat_format(tokenizer) else target_pos
             true_token = tokenizer.decode(
                 [input_ids[i, true_pos]], skip_special_tokens=True
             )
@@ -516,7 +506,7 @@ def evaluate_clm(
     batch_size: int = 128,
 ) -> Tuple[Dict[str, float], pd.DataFrame]:
     """Evaluate CLM next-token accuracy/precision/recall/F1. Returns (result dict, stats DataFrame)."""
-    if isinstance(tokenizer, InstructTokenizerWrapper):
+    if uses_chat_format(tokenizer):
         return evaluate_clm_instruction(
             model, tokenizer, text_data, file=file, batch_size=32
         )

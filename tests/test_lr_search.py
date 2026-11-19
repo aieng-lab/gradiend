@@ -813,6 +813,101 @@ def test_encoder_that_actually_moved_is_still_classified_by_its_correlation():
     assert classify_probe(r) is RunState.DEGRADING
 
 
+class TestAntiAlignedEncoder:
+    """The sign of a correlation is arbitrary (convergence is |correlation| >= threshold): judge a probe in the orientation it learned in."""
+
+    @staticmethod
+    def _stats(scores, pos, neg):
+        steps = [0, 25, 50, 75, 100, 125, 150][: len(scores)]
+        return {
+            "scores": {str(s): v for s, v in zip(steps, scores)},
+            "mean_by_class": {str(s): {"1.0": p, "-1.0": n} for s, p, n in zip(steps, pos, neg)},
+        }
+
+    def test_qwen_gender_probe_at_1e5_is_slow_not_degrading(self):
+        # Qwen2.5-1.5B gender, lr 1e-5, 150 steps (feature-map pilot, 2026-11-12): the signed score falls from -0.12 to -0.36
+        # and the pole gap (+1 minus -1) from -0.004 to -0.013, i.e. |correlation| and the gap both GROW.
+        stats = self._stats(
+            [-0.1694, -0.1165, -0.1546, -0.1909, -0.2314, -0.3019, -0.3613],
+            [0.0018, 0.0005, 0.0004, 0.0004, 0.0004, -0.0010, -0.0016],
+            [0.0074, 0.0043, 0.0055, 0.0068, 0.0083, 0.0097, 0.0117],
+        )
+        r = ProbeResult.from_training_stats(stats)
+        assert r.orientation == -1
+        assert r.scores[-1] == pytest.approx(0.3613) and max(r.scores) == pytest.approx(0.3613)
+        assert r.mean_by_class[-1]["1.0"] == pytest.approx(0.0016) and r.mean_by_class[-1]["-1.0"] == pytest.approx(-0.0117)
+        assert classify_probe(r) is RunState.SLOW
+
+    def test_an_anti_aligned_probe_that_really_degrades_is_still_degrading(self):
+        r = ProbeResult.from_training_stats(self._stats(
+            [-0.10, -0.85, -0.30], [-0.01, -0.90, -0.30], [0.01, 0.80, 0.25]))
+        assert r.orientation == -1
+        assert classify_probe(r) is RunState.DEGRADING
+
+    def test_an_anti_aligned_probe_that_converges_is_converged(self):
+        r = ProbeResult.from_training_stats(
+            self._stats([-0.1, -0.6, -0.95], [-0.1, -0.5, -0.9], [0.1, 0.5, 0.9]), converged=True)
+        assert classify_probe(r) is RunState.CONVERGED
+
+    def test_positive_probes_are_untouched(self):
+        stats = self._stats([0.1, 0.6, 0.95], [0.1, 0.5, 0.9], [-0.1, -0.5, -0.9])
+        r = ProbeResult.from_training_stats(stats)
+        assert r.orientation == 1 and r.scores == [0.1, 0.6, 0.95]
+        assert r.mean_by_class[2] == {"1.0": 0.9, "-1.0": -0.9}
+
+    def test_a_probe_that_flips_to_the_positive_side_keeps_its_sign(self):
+        # Qwen-2B GRADIEND validation: correlation -0.59 -> +0.98 is learning, not degrading.
+        r = ProbeResult.from_training_stats(self._stats([-0.59, 0.1, 0.98], [-0.2, 0.2, 0.9], [0.2, -0.2, -0.9]))
+        assert r.orientation == 1
+
+    def test_non_finite_and_empty_histories_default_to_positive(self):
+        assert ProbeResult.from_training_stats({}).orientation == 1
+        assert ProbeResult.from_training_stats(self._stats([float("nan"), float("-inf")], [0.0, 0.0], [0.0, 0.0])).orientation == 1
+        assert classify_probe(ProbeResult.from_training_stats(self._stats([float("nan")], [0.0], [0.0]))) is RunState.DIVERGED
+
+    def test_probe_records_the_orientation_in_the_trace(self):
+        probe = Probe(lr=1e-5, state=RunState.SLOW, final_score=0.36, best_score=0.36, orientation=-1)
+        assert probe.to_dict()["orientation"] == -1
+        restored = LRSearchResult.from_dict({"status": "no_convergent_lr", "best_lr": None, "probes": [probe.to_dict()]})
+        assert restored.probes[0].orientation == -1
+        old = probe.to_dict()
+        del old["orientation"]
+        assert LRSearchResult.from_dict({"status": "converged", "best_lr": 1e-5, "probes": [old]}).probes[0].orientation == 1
+
+
+class TestOrientationOfRerunProbes:
+    """A probe is reported in the orientation of the run whose scores it carries: the confirmation or the full-length re-run."""
+
+    SLOW_RISING = TestRefineAndFullLengthSlow.SLOW_RISING
+    DEGRADING = TestRefineAndFullLengthSlow.DEGRADING
+
+    @staticmethod
+    def _anti_aligned(result):
+        result.orientation = -1
+        return result
+
+    def test_failed_confirmation_run_replaces_the_orientation_of_the_probe(self):
+        res = LRSearch(
+            lambda lr: _result(*GOOD, converged=True),
+            1e-6,
+            confirm=lambda lr: self._anti_aligned(_result(*self.SLOW_RISING)),
+            max_probes=1,
+        ).search()
+        first = res.probes[0]
+        assert first.confirmed is False and "confirmation run was slow" in first.note
+        assert first.orientation == -1
+
+    def test_full_length_rerun_of_a_slow_probe_replaces_its_orientation(self):
+        def run(lr):
+            return _result(*(self.SLOW_RISING if lr <= 1e-6 else self.DEGRADING))
+
+        res = LRSearch(run, 1e-6, confirm=lambda lr: self._anti_aligned(_result(*self.SLOW_RISING))).search()
+        slow = next(p for p in res.probes if p.lr == pytest.approx(1e-6))
+        assert "full budget: slow" in slow.note
+        assert slow.orientation == -1
+        assert all(p.orientation == 1 for p in res.probes if p is not slow)
+
+
 class TestProbeLogging:
     @staticmethod
     def _logging_fake(tmp_path):

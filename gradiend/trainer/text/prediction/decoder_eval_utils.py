@@ -22,6 +22,9 @@ from gradiend.trainer.text.prediction.seq2seq import (
     seq2seq_mlm_probs_at_mask,
 )
 from gradiend.util.logging import get_logger
+from gradiend.trainer.text.common.chat_format import require_first_differing_token_for_chat, uses_chat_format
+from gradiend.trainer.text.prediction.clm_alignment import align_clm_divergence, clm_context_ids, ClmAlignmentError
+from gradiend.util.positions import last_real_token_positions
 
 from gradiend.trainer.text.common.lm_eval import compute_lms
 
@@ -229,9 +232,16 @@ def compute_probability_shift_score_row_wise(
     dataset_class_col: str = DEFAULT_DATASET_CLASS_COL,
     other_class_col: str = DEFAULT_OTHER_CLASS_COL,
     return_per_row_df: bool = False,
+    clm_unalignable_rows: str = "error",
+    label_token_protocol: str = "first_differing_token",
 ) -> Union[Dict[str, Dict[str, float]], Tuple[Dict[str, Dict[str, float]], pd.DataFrame]]:
     """
     Row-wise decoder eval: for each row, P(dataset_class) = P(factual), P(other_class) = P(alternative).
+
+    For decoder-only ``clm_next_token`` scoring, ``label_token_protocol="first_differing_token"`` scores rows whose
+    targets share k > 0 leading tokens at the first differing token (shared tokens as context) and applies
+    ``clm_unalignable_rows`` to rows that cannot be aligned; k == 0 rows are scored as before.
+    ``"no_leading_space"`` never aligns.
 
     DataFrame must have: key_text (masked), factual_col, alternative_col, dataset_class_col (e.g. factual_id),
     other_class_col (e.g. alternative_id). Returns same shape as static eval: {dataset_class: {class_name: mean_prob}}.
@@ -259,20 +269,75 @@ def compute_probability_shift_score_row_wise(
     with torch.no_grad():
         for start in range(0, len(rows), batch_size):
             batch = rows[start : start + batch_size]
+            divergence_probs: Dict[int, Tuple[float, float]] = {}
             if eval_kind == "clm_next_token":
                 prefixes = [r[key_text].split("[MASK]")[0] for r in batch]
                 valid = [(i, p) for i, p in enumerate(prefixes) if p and p.strip()]
+                # Divergence-point scoring: a row whose factual and alternative continuations share k > 0
+                # leading tokens is scored at the first differing token with the shared tokens as context.
+                # Rows without a shared prefix (k == 0) keep the unchanged next-token scoring below.
+                # ``label_token_protocol="no_leading_space"`` skips the alignment entirely (as before it existed),
+                # which a chat tokenizer (Instruct model) does not support.
+                require_first_differing_token_for_chat(tokenizer, label_token_protocol)
+                divergence_rows: Dict[int, Tuple[List[int], int, int]] = {}
+                kept = []
+                for i, raw_prefix in valid:
+                    r = batch[i]
+                    if label_token_protocol != "first_differing_token":
+                        kept.append((i, raw_prefix))
+                        continue
+                    try:
+                        # ``tokenizer`` (not the raw one): a chat tokenizer aligns the answer words as the first
+                        # thing the assistant says, exactly as the training item does.
+                        div = align_clm_divergence(
+                            tokenizer, raw_prefix, str(r.get(factual_col)), str(r.get(alternative_col))
+                        )
+                    except ClmAlignmentError:
+                        if clm_unalignable_rows == "drop":
+                            continue
+                        raise
+                    kept.append((i, raw_prefix))
+                    if div.k > 0 or uses_chat_format(tokenizer):
+                        # no lone whitespace token between the context and the appended shared tokens
+                        # same context encoding as the training item (special tokens such as BOS included;
+                        # the chat prompt for an Instruct model). Every row of a chat tokenizer takes this path,
+                        # k == 0 included: its prompt and answer ids are the training row, not a tokenization of
+                        # the raw prefix.
+                        row_ids = clm_context_ids(tokenizer, raw_prefix) + list(div.shared_ids)
+                        divergence_rows[i] = (row_ids, div.factual_id, div.alternative_id)
+                valid = kept
                 if not valid:
                     continue
-                idxs, prefix_texts = zip(*valid)
-                inputs = tokenizer(
-                    list(prefix_texts), return_tensors="pt", padding=True, truncation=True, max_length=512
-                )
-                inputs = {k: v.to(device) for k, v in inputs.items()}
-                outputs = model(**inputs)
-                logits = outputs.logits[:, -1, :]
-                probs = torch.softmax(logits, dim=-1)
-                example_probs = {i: probs[j] for j, i in enumerate(idxs)}
+                plain = [(i, p) for i, p in valid if i not in divergence_rows]
+                example_probs = {}
+                if plain:
+                    idxs, prefix_texts = zip(*plain)
+                    inputs = tokenizer(
+                        list(prefix_texts), return_tensors="pt", padding=True, truncation=True, max_length=512
+                    )
+                    inputs = {k: v.to(device) for k, v in inputs.items()}
+                    outputs = model(**inputs)
+                    # last REAL position (``[:, -1]`` is a pad token under right padding)
+                    last = last_real_token_positions(inputs["attention_mask"])
+                    logits = outputs.logits[torch.arange(len(idxs), device=outputs.logits.device), last.to(outputs.logits.device), :]
+                    probs = torch.softmax(logits, dim=-1)
+                    example_probs = {i: probs[j] for j, i in enumerate(idxs)}
+                if divergence_rows:
+                    d_idxs = list(divergence_rows)
+                    inputs = _tokenizer.pad(
+                        {"input_ids": [torch.tensor(divergence_rows[i][0]) for i in d_idxs]},
+                        padding=True,
+                        return_tensors="pt",
+                    )
+                    inputs = {k: v.to(device) for k, v in inputs.items()}
+                    d_logits = model(**inputs).logits
+                    d_positions = last_real_token_positions(inputs["attention_mask"]).to(d_logits.device)
+                    # softmax over the one position that is read, not over the whole B x L x V logits
+                    d_probs = torch.softmax(d_logits[torch.arange(len(d_idxs), device=d_logits.device), d_positions, :], dim=-1)
+                    for j, b_idx in enumerate(d_idxs):
+                        row_probs = d_probs[j]
+                        _, f_id, a_id = divergence_rows[b_idx]
+                        divergence_probs[b_idx] = (float(row_probs[f_id].item()), float(row_probs[a_id].item()))
             elif eval_kind == "seq2seq_encoder_mlm":
                 texts = [str(r[key_text]) for r in batch]
                 probs = seq2seq_mlm_probs_at_mask(model, _tokenizer, texts, device)
@@ -297,19 +362,23 @@ def compute_probability_shift_score_row_wise(
                     example_probs[b_idx] = probs[b_idx, pos, :]
 
             for b_idx, row in enumerate(batch):
-                if b_idx not in example_probs:
+                is_divergence_row = b_idx in divergence_probs
+                if b_idx not in example_probs and not is_divergence_row:
                     continue
-                p = example_probs[b_idx]
                 ds_class = row.get(dataset_class_col)
                 other_class = row.get(other_class_col)
                 if ds_class is None or other_class is None:
                     continue
-                fid = _token_to_single_id(_tokenizer, row.get(factual_col), vocab_norm_map)
-                aid = _token_to_single_id(_tokenizer, row.get(alternative_col), vocab_norm_map)
-                if fid is None or aid is None:
-                    continue
-                p_f = float(p[fid].item() if hasattr(p[fid], "item") else p[fid])
-                p_a = float(p[aid].item() if hasattr(p[aid], "item") else p[aid])
+                if is_divergence_row:
+                    p_f, p_a = divergence_probs[b_idx]
+                else:
+                    p = example_probs[b_idx]
+                    fid = _token_to_single_id(_tokenizer, row.get(factual_col), vocab_norm_map)
+                    aid = _token_to_single_id(_tokenizer, row.get(alternative_col), vocab_norm_map)
+                    if fid is None or aid is None:
+                        continue
+                    p_f = float(p[fid].item() if hasattr(p[fid], "item") else p[fid])
+                    p_a = float(p[aid].item() if hasattr(p[aid], "item") else p[aid])
                 probs_by_dataset[ds_class][ds_class].append(p_f)
                 probs_by_dataset[ds_class][other_class].append(p_a)
                 if return_per_row_df:
@@ -866,6 +935,8 @@ def evaluate_probability_shift_score(
     return_per_row_df: bool = False,
     objective: str = "auto",
     rhs_window: int = -1,
+    clm_unalignable_rows: str = "error",
+    label_token_protocol: str = "first_differing_token",
 ) -> Union[Dict[str, Dict[str, float]], Tuple[Dict[str, Dict[str, float]], pd.DataFrame], Tuple[Dict[str, Dict[str, float]], Dict[str, Dict[str, float]]]]:
     """
     Compute probabilities for all classes on all datasets.
@@ -879,6 +950,11 @@ def evaluate_probability_shift_score(
         dataset_class_col: Column name identifying dataset class (ignored if use_row_wise=True)
         use_row_wise: If True, compute P(factual) and P(alternative) per row by dataset class.
         return_per_row_df: If True and use_row_wise, return (result_dict, per_row_DataFrame) for CSV export.
+        clm_unalignable_rows: Row-wise decoder-only ``clm_next_token`` scoring only: ``"error"`` raises for a row
+            whose factual and alternative cannot be aligned, ``"drop"`` skips it.
+        label_token_protocol: Row-wise decoder-only ``clm_next_token`` scoring only:
+            ``"first_differing_token"`` scores rows with a shared token prefix at the first differing token,
+            ``"no_leading_space"`` never aligns.
 
     Returns:
         Dict or (Dict, DataFrame): {dataset_class: {class_name: prob, ...}}. If return_per_row_df and use_row_wise,
@@ -948,6 +1024,8 @@ def evaluate_probability_shift_score(
             dataset_class_col=DEFAULT_DATASET_CLASS_COL,
             other_class_col=DEFAULT_OTHER_CLASS_COL,
             return_per_row_df=return_per_row_df,
+            clm_unalignable_rows=clm_unalignable_rows,
+            label_token_protocol=label_token_protocol,
         )
         return out
     return compute_probability_shift_score_mlm(

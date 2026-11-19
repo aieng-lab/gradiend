@@ -49,7 +49,7 @@ def _dataset(tokenizer):
         "feature_pole": ["pos"],
     })
     return TextTrainingDataset(
-        data=data, tokenizer=tokenizer, batch_size=1, is_decoder_only_model=True
+        data=data, tokenizer=tokenizer, batch_size=1, is_decoder_only_model=True, label_token_protocol="no_leading_space"
     )
 
 

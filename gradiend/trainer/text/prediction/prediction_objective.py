@@ -167,6 +167,10 @@ class PredictionObjective:
             return_per_row_df=return_per_row_df,
             objective=self.name,
             rhs_window=getattr(getattr(trainer, "_training_args", None), "decoder_sequence_cloze_rhs_window", -1),
+            clm_unalignable_rows=getattr(getattr(trainer, "_training_args", None), "clm_unalignable_rows", "error"),
+            label_token_protocol=getattr(
+                getattr(trainer, "_training_args", None), "label_token_protocol", "first_differing_token"
+            ),
         )
 
     def compute_lms(

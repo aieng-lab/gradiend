@@ -21,6 +21,12 @@ from transformers import (
 
 from gradiend.util import get_logger
 from gradiend.util.util import set_requires_grad_true
+from gradiend.trainer.text.common.chat_format import (
+    chat_format_for_tokenizer,
+    find_chat_format,
+    instruction_name_marker,
+    rebase_offsets_to_user_text,
+)
 from gradiend.trainer.text.prediction.decoder_only_mlm import DecoderModelWithMLMHead
 
 try:
@@ -306,9 +312,18 @@ class AutoModelForLM(nn.Module):
 
 
 class InstructTokenizerWrapper:
-    """
-    Wrapper for instruction-tuned model tokenizers.
-    Adds system prompts and proper formatting for instruction-tuned models like Llama-Instruct.
+    """Wrapper for instruction-tuned model tokenizers.
+
+    Every text the wrapper tokenizes becomes a chat prompt: a system prompt, the text as the user turn, and the
+    generation prompt that opens the assistant turn. The layout is the one of the model's own family, chosen by
+    :func:`~gradiend.trainer.text.common.chat_format.chat_format_for_tokenizer` (the tokenizer's ``chat_template``:
+    Llama, Qwen, Mistral, Gemma and others). Calls with ``add_special_tokens=False`` tokenize the text as it is;
+    the wrapper never adds special tokens of its own to a call.
+
+    Attributes:
+        tokenizer: The wrapped Hugging Face tokenizer (plain text, no chat formatting).
+        chat_format: The :class:`~gradiend.trainer.text.common.chat_format.ChatFormat` of the model family.
+        system_prompt: System prompt of the chat prompt.
     """
 
     system_prompt_mlm = """
@@ -322,14 +337,27 @@ class InstructTokenizerWrapper:
     """
 
 
-    def __init__(self, tokenizer, user_prompt_header="user", assistant_prompt_header="assistant"):
+    def __init__(self, tokenizer, chat_format=None, chat_template_date=None):
+        """Wrap ``tokenizer`` so that its input is chat-formatted.
+
+        Args:
+            tokenizer: Hugging Face tokenizer of an instruction-tuned model.
+            chat_format: Chat format to use; by default the one of ``tokenizer``'s model family.
+            chat_template_date: Fixed date (ISO ``YYYY-MM-DD``) for a chat template that writes the current date;
+                without it the template gets ``DEFAULT_CHAT_TEMPLATE_DATE`` (see
+                :class:`~gradiend.trainer.text.common.chat_format.TemplateChatFormat`). The date can also be set
+                later with ``wrapper.chat_format.configure(date)``.
+
+        Raises:
+            ValueError: If no chat format is known for ``tokenizer`` (see ``chat_format_for_tokenizer``), or
+                ``chat_template_date`` is not an ISO date.
+        """
         self.tokenizer = tokenizer
-        self.user_prompt_header = user_prompt_header
-        self.assistant_prompt_header = assistant_prompt_header
-        self.BEGIN = "<|begin_of_text|>"
-        self.START = "<|start_header_id|>"
-        self.END = "<|end_header_id|>"
-        self.EOT = "<|eot_id|>"
+        if chat_format is None:
+            chat_format = chat_format_for_tokenizer(tokenizer)
+        self.chat_format = chat_format
+        if chat_template_date is not None:
+            self.chat_format.configure(chat_template_date)
 
     def _wrap_prompt(self, user_text):
         if isinstance(user_text, str):
@@ -338,23 +366,36 @@ class InstructTokenizerWrapper:
             user_texts = user_text
         else:
             raise TypeError("user_text must be a string or a list of strings")
-        prompts = []
-        for text in user_texts:
-            parts = [self.BEGIN]
-            if self.system_prompt:
-                parts.append(f"{self.START}system{self.END}\n{self.system_prompt}\n{self.EOT}")
-            parts.append(f"{self.START}{self.user_prompt_header}{self.END}\n{text}\n{self.EOT}")
-            parts.append(f"{self.START}{self.assistant_prompt_header}{self.END}\n")
-            prompts.append(''.join(parts))
+        prompts = [self.chat_format.render(self.system_prompt, text) for text in user_texts]
         return prompts if len(prompts) > 1 else prompts[0]
 
     def __call__(self, text, **kwargs):
-        if 'add_special_tokens' in kwargs and not kwargs['add_special_tokens']:
-            wrapped = text
-        else:
-            wrapped = self._wrap_prompt(text)
+        chat_formatted = not ('add_special_tokens' in kwargs and not kwargs['add_special_tokens'])
+        wrapped = self._wrap_prompt(text) if chat_formatted else text
         kwargs['add_special_tokens'] = False
-        return self.tokenizer(wrapped, **kwargs)
+        encoded = self.tokenizer(wrapped, **kwargs)
+        if chat_formatted and kwargs.get('return_offsets_mapping'):
+            self._rebase_offsets_to_user_text(encoded, text)
+        return encoded
+
+    def _rebase_offsets_to_user_text(self, encoded, text):
+        """Rewrite ``encoded["offset_mapping"]`` from chat-prompt characters to characters of ``text``."""
+        offsets = encoded.get("offset_mapping")
+        if offsets is None:
+            return
+        is_tensor = hasattr(offsets, "tolist")
+        nested = offsets.tolist() if is_tensor else offsets
+        # A list of offset pairs belongs to one text; a list of such lists (or a 3-d tensor) to a batch.
+        batched = bool(nested) and isinstance(nested[0], (list, tuple)) and bool(nested[0]) and isinstance(nested[0][0], (list, tuple))
+        sequences = nested if batched else [nested]
+        texts = [text] if isinstance(text, str) else list(text)
+        prefix_length = len(self.chat_format.frame(self.system_prompt)[0])
+        rebased = [
+            rebase_offsets_to_user_text(sequence, prefix_length, len(user_text))
+            for sequence, user_text in zip(sequences, texts)
+        ]
+        result = rebased if batched else rebased[0]
+        encoded["offset_mapping"] = torch.tensor(result, dtype=offsets.dtype) if is_tensor else result
 
     def tokenize(self, text, **kwargs):
         wrapped = self._wrap_prompt(text)
@@ -373,20 +414,66 @@ class InstructTokenizerWrapper:
         return getattr(self.tokenizer, name)
 
     def __setattr__(self, key, value):
-        if key in ['tokenizer', 'system_prompt']:
+        if key in ['tokenizer', 'system_prompt', 'chat_format']:
             super().__setattr__(key, value)
         else:
             setattr(self.tokenizer, key, value)
 
 
 class AutoTokenizerForLM(AutoTokenizer):
-    """Tokenizer loader that automatically wraps instruction-tuned model tokenizers."""
+    """Tokenizer loader that automatically wraps instruction-tuned model tokenizers.
+
+    An instruction-tuned model gets an :class:`InstructTokenizerWrapper` with the chat format of its own family; a
+    family without a known chat format raises a ``ValueError`` that names the model. Which models count as
+    instruction-tuned is decided by the name (:func:`~gradiend.trainer.text.common.chat_format.instruction_name_marker`)
+    unless ``instruction_model`` says otherwise; the name only counts if the tokenizer has a chat format (otherwise
+    the model is read as plain text and a warning says so).
+    """
 
     @classmethod
-    def from_pretrained(cls, name, *args, trust_remote_code=False, **kwargs):
+    def from_pretrained(cls, name, *args, trust_remote_code=False, instruction_model=None, **kwargs):
+        """Load the tokenizer of ``name``, chat-wrapped if the model is an instruction model.
+
+        Args:
+            name: Hub id or local path of the model.
+            trust_remote_code: Passed to the Hugging Face loader.
+            instruction_model: ``None`` decides by the model name (a matching name chat-formats the model only if
+                its tokenizer has a chat format; else plain text and a warning), ``True`` chat-formats the model
+                whatever its name (``ValueError`` if there is no chat format), ``False`` reads plain text even if
+                the name matches.
+
+        Returns:
+            The plain tokenizer, or an :class:`InstructTokenizerWrapper` of it.
+        """
         tokenizer = AutoTokenizer.from_pretrained(
             name, token=HF_TOKEN, trust_remote_code=trust_remote_code, *args, **kwargs
         )
-        if "instruct" in name.lower():
-            return InstructTokenizerWrapper(tokenizer)
-        return tokenizer
+        if instruction_model is None:
+            marker = instruction_name_marker(name)
+            if marker is None:
+                return tokenizer
+            # The name is only a hint: a model whose tokenizer has no chat format (an encoder or seq2seq model such
+            # as ``opus-mt-en-it``, or a base model named ``...-it``) is read as plain text.
+            chat_format = find_chat_format(tokenizer)
+            if chat_format is None:
+                logger.warning(
+                    "The word %r in the model name %r suggests an instruction-tuned model, but its tokenizer has no "
+                    "chat format (no chat_template), so it is read as plain text. Set "
+                    "TrainingArguments(instruction_model=False) to silence this, or instruction_model=True to demand "
+                    "the chat format (that raises while no chat_template or registered format exists).",
+                    marker, name,
+                )
+                return tokenizer
+            reason = f"the word {marker!r} in the model name"
+        else:
+            if not instruction_model:
+                return tokenizer
+            chat_format = None  # chosen by the wrapper; raises a ValueError naming the model if there is none
+            reason = f"forced by instruction_model={instruction_model}"
+        wrapper = InstructTokenizerWrapper(tokenizer, chat_format=chat_format)
+        logger.info(
+            "Tokenizer of %r is chat-formatted (%s; chat format %s). "
+            "Set TrainingArguments(instruction_model=False) to read plain text instead, or True to force the chat format.",
+            name, reason, type(wrapper.chat_format).__name__,
+        )
+        return wrapper

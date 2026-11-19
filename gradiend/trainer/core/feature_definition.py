@@ -409,7 +409,18 @@ class FeatureLearningDefinition(DataProvider, ABC):
                 f"{type(self).__name__}.create_model_with_gradiend() requires a model_with_gradiend_cls "
                 "argument or a default_model_with_gradiend_cls property on the definition."
             )
-        return cls.from_pretrained(load_directory, **kwargs)
+        model = cls.from_pretrained(load_directory, **kwargs)
+        self._configure_model(model)
+        return model
+
+    def _configure_model(self, model: ModelWithGradiend) -> None:
+        """Hook: stamp run-level configuration on every model this definition hands out.
+
+        Models reach callers through :meth:`create_model_with_gradiend` (``get_model``, ``load_model``);
+        the training loop builds its own model and calls this hook on it, so configuration that
+        single-row code paths need but the model cannot derive itself is set here once. Modalities
+        override this; the default is a no-op.
+        """
 
     def resolve_split_for_role(self, role: str) -> str:
         """

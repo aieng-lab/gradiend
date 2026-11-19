@@ -6,9 +6,9 @@ authors:
   - family-names: Herbold
     given-names: Steffen
 title: 'GRADIEND: Feature Learning within Neural Networks Exemplified through Biases'
-version: 0.2.0
+version: 0.3.0
 url: https://arxiv.org/abs/2502.01406
-date-released: '2025-02-04'
+date-released: '2026-11-19'
 preferred-citation:
   authors:
     - family-names: Drechsel

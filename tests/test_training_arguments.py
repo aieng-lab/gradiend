@@ -246,3 +246,34 @@ class TestTrainingArguments:
         # Test use_cache
         args.use_cache = True
         assert args.use_cache is True
+
+
+class TestTorchDtypeRoundTrip:
+    """``torch_dtype`` must survive ``to_dict()`` and ``from_dict()``.
+
+    ``to_dict()`` used to write ``str(torch.bfloat16)`` = ``"torch.bfloat16"`` and ``from_dict()`` read it back with
+    ``getattr(torch, name, torch.float32)``, which finds no such attribute. Every copy of the arguments that went
+    through the two methods therefore trained in float32, whatever ``torch_dtype`` was configured.
+    """
+
+    @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16, torch.float32, torch.float64])
+    def test_dtype_survives_round_trip(self, dtype):
+        args = TrainingArguments(torch_dtype=dtype)
+        assert TrainingArguments.from_dict(args.to_dict()).torch_dtype == dtype
+
+    def test_to_dict_writes_the_bare_dtype_name(self):
+        assert TrainingArguments(torch_dtype=torch.bfloat16).to_dict()["torch_dtype"] == "bfloat16"
+
+    def test_from_dict_accepts_the_prefixed_name_written_by_earlier_releases(self):
+        args = TrainingArguments.from_dict({"torch_dtype": "torch.bfloat16"})
+        assert args.torch_dtype == torch.bfloat16
+
+    def test_from_dict_raises_on_an_unknown_dtype_name(self):
+        # No fall back to float32: that silent default is what hid the loss.
+        with pytest.raises(ValueError, match="Unknown torch dtype"):
+            TrainingArguments.from_dict({"torch_dtype": "not_a_dtype"})
+
+    def test_dtype_round_trips_through_json(self):
+        args = TrainingArguments(torch_dtype=torch.bfloat16)
+        restored = TrainingArguments.from_dict(json.loads(json.dumps(args.to_dict())))
+        assert restored.torch_dtype == torch.bfloat16

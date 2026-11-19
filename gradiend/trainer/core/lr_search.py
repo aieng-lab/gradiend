@@ -110,6 +110,8 @@ class ProbeResult:
     mean_by_class: List[Dict[str, float]] = field(default_factory=list)  # per eval, {"-1.0": m, "1.0": m}
     losses: List[float] = field(default_factory=list)
     class_mean_threshold: Optional[float] = None  # each class mean must reach this magnitude to converge
+    orientation: int = 1
+    """-1 when ``scores`` and ``mean_by_class`` were multiplied by -1 (the probe learned an anti-aligned encoder)."""
 
     @classmethod
     def from_training_stats(
@@ -131,17 +133,24 @@ class ProbeResult:
             int(k): v for k, v in (stats.get("mean_by_class") or {}).items()
         }
         steps = sorted(scores_by_step)
+        # The sign of a correlation is arbitrary: the package's own convergence check is |correlation| >= threshold
+        # (component_seed), so a probe is judged in the orientation it learned in. Without this, an encoder that
+        # separates the classes the anti-aligned way looks like "degrading" (its signed score falls, its pole gap
+        # "shrinks") and the search is sent DOWN although |correlation| is rising (Qwen2.5-1.5B gender: signed
+        # score -0.12 -> -0.36 at lr 1e-5, called degrading; the search never tried a higher LR).
+        orientation = _dominant_sign([scores_by_step[s] for s in steps])
         return cls(
             steps=steps,
-            scores=[scores_by_step[s] for s in steps],
+            scores=[orientation * scores_by_step[s] for s in steps],
             converged=converged,
             threshold=threshold,
             metric=metric,
             mean_by_class=[
-                {str(k): float(v) for k, v in (means_by_step.get(s) or {}).items()} for s in steps
+                {str(k): orientation * float(v) for k, v in (means_by_step.get(s) or {}).items()} for s in steps
             ],
             losses=[float(x) for x in (losses or [])],
             class_mean_threshold=class_mean_threshold,
+            orientation=orientation,
         )
 
     @classmethod
@@ -157,6 +166,14 @@ class ProbeResult:
             losses=data.get("losses"),
             class_mean_threshold=info.get("convergent_mean_by_class_threshold"),
         )
+
+
+def _dominant_sign(scores: Sequence[float]) -> int:
+    """-1 when the score of largest magnitude is negative, else +1 (non-finite scores are ignored)."""
+    finite = [x for x in scores if math.isfinite(x)]
+    if not finite:
+        return 1
+    return -1 if max(finite, key=abs) < 0 else 1
 
 
 def _signed_pole_means(means: Mapping[str, float]) -> Tuple[Optional[float], Optional[float]]:
@@ -370,6 +387,7 @@ class Probe:
     threshold: Optional[float] = None  # ``best_score`` must reach this to converge
     min_class_mean: Optional[float] = None  # weaker class mean (magnitude) at the best evaluation
     class_mean_threshold: Optional[float] = None  # ... and this must reach ``class_mean_threshold``
+    orientation: int = 1  # -1: the scores above are the negated correlations (anti-aligned encoder, see ProbeResult)
 
     def to_dict(self) -> Dict[str, Any]:
         d = asdict(self)
@@ -402,7 +420,7 @@ class LRSearchResult:
                 lr=p["lr"], state=RunState(p["state"]), final_score=p.get("final_score"), best_score=p.get("best_score"),
                 confirmed=p.get("confirmed"), steps_run=p.get("steps_run"), note=p.get("note", ""),
                 metric=p.get("metric"), threshold=p.get("threshold"), min_class_mean=p.get("min_class_mean"),
-                class_mean_threshold=p.get("class_mean_threshold"),
+                class_mean_threshold=p.get("class_mean_threshold"), orientation=p.get("orientation", 1),
             )
             for p in d.get("probes", [])
         ]
@@ -633,7 +651,7 @@ class LRSearch:
         best = max(result.scores) if result.scores else None
         final = result.scores[-1] if result.scores else None
         probe = Probe(
-            lr=lr, state=state, final_score=final, best_score=best,
+            lr=lr, state=state, final_score=final, best_score=best, orientation=result.orientation,
             steps_run=result.steps[-1] if result.steps else None, **_probe_evidence(result),
         )
         if state is RunState.CONVERGED and self.confirm is not None:
@@ -645,11 +663,13 @@ class LRSearch:
                 probe.note = f"probe converged but the confirmation run was {cstate.value}"
                 probe.final_score = confirmed.scores[-1] if confirmed.scores else None
                 probe.best_score = max(confirmed.scores) if confirmed.scores else None
+                probe.orientation = confirmed.orientation
                 for name, value in _probe_evidence(confirmed).items():
                     setattr(probe, name, value)
         logger.info(
-            "lr_search: lr=%g -> %s (final=%s best=%s)%s",
+            "lr_search: lr=%g -> %s (final=%s best=%s)%s%s",
             lr, probe.state.value, probe.final_score, probe.best_score,
+            " [scores negated: the encoder learned the anti-aligned sign]" if probe.orientation < 0 else "",
             f" [{probe.note}]" if probe.note else "",
         )
         return probe
@@ -737,6 +757,7 @@ class LRSearch:
                 slow.note = f"slow probe re-run at the full budget: {cstate.value}"
                 slow.final_score = confirmed.scores[-1] if confirmed.scores else slow.final_score
                 slow.best_score = max(confirmed.scores) if confirmed.scores else slow.best_score
+                slow.orientation = confirmed.orientation
                 logger.info("lr_search: lr=%g at the full budget -> %s", slow.lr, cstate.value)
                 if slow.confirmed:
                     slow.state = RunState.CONVERGED

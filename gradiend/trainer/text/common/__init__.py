@@ -1,7 +1,7 @@
 """
 Common text utilities shared by prediction and classification.
 
-Exports: TextModelWithGradiend (base), TextBatchedDatasetBase, loading, lm_eval, dual_head_model.
+Exports: TextModelWithGradiend (base), TextBatchedDatasetBase, loading, chat formats, lm_eval, dual_head_model.
 """
 
 from gradiend.trainer.text.common.model_base import TextModelWithGradiend
@@ -10,6 +10,14 @@ from gradiend.trainer.text.common.loading import (
     AutoModelForLM,
     AutoTokenizerForLM,
     InstructTokenizerWrapper,
+)
+from gradiend.trainer.text.common.chat_format import (
+    ChatFormat,
+    TemplateChatFormat,
+    chat_format_for_tokenizer,
+    instruction_name_marker,
+    register_chat_format,
+    uses_chat_format,
 )
 from gradiend.trainer.text.common.dual_head_model import (
     attach_lm_head_to_classification_model,
@@ -23,6 +31,12 @@ __all__ = [
     "AutoModelForLM",
     "AutoTokenizerForLM",
     "InstructTokenizerWrapper",
+    "ChatFormat",
+    "TemplateChatFormat",
+    "chat_format_for_tokenizer",
+    "instruction_name_marker",
+    "register_chat_format",
+    "uses_chat_format",
     "attach_lm_head_to_classification_model",
     "build_dual_head_sequence_model",
     "try_build_dual_head_from_base_path",

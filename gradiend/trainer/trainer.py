@@ -655,11 +655,13 @@ class Trainer(TrainerAnnotationMixin, FeatureLearningDefinition):
         }
         if base_model is not None:
             create_kwargs["base_model"] = base_model
-        return create_model_with_gradiend(
+        model = create_model_with_gradiend(
             load_path,
             model_class=model_cls,
             **create_kwargs,
         )
+        self._configure_model(model)
+        return model
 
     def get_seed_report_path(self) -> Optional[str]:
         candidates: List[str] = []
@@ -1007,6 +1009,19 @@ class Trainer(TrainerAnnotationMixin, FeatureLearningDefinition):
         + see_implementation("gradiend.visualizer.convergence.plot_training_convergence")
     )
 
+    @staticmethod
+    def _record_resolved_model_settings(model: Any, training_args: Any) -> None:
+        """Write the settings ``model`` resolved itself into ``training_args``, which are saved with the trained model.
+
+        See :meth:`ModelWithGradiend.resolved_training_settings`. This runs after the model exists and before the
+        arguments are serialized, so the record holds the value in effect (e.g. the chat-template date when the
+        user left it unset), not the unset default.
+        """
+        if not isinstance(model, ModelWithGradiend):
+            return
+        for name, value in model.resolved_training_settings().items():
+            setattr(training_args, name, value)
+
     def _train(
         self,
         output_dir: str,
@@ -1077,6 +1092,7 @@ class Trainer(TrainerAnnotationMixin, FeatureLearningDefinition):
                 training_args=config,
                 trust_remote_code=getattr(config, "trust_remote_code", False),
             )
+            self._configure_model(model_with_gradiend)
             if runtime_monitor is not None:
                 runtime_monitor.mark(
                     "trainer:create_model_with_gradiend:done",
@@ -1093,6 +1109,7 @@ class Trainer(TrainerAnnotationMixin, FeatureLearningDefinition):
             config,
             allow_overwrite=not from_gradiend_checkpoint,
         )
+        self._record_resolved_model_settings(model_with_gradiend, config)
 
         # Store model instance so get_model() returns the training model during training
         self._model_instance = model_with_gradiend
@@ -1317,6 +1334,15 @@ class Trainer(TrainerAnnotationMixin, FeatureLearningDefinition):
             args.learning_rate = self._tuned_learning_rate
             args.metadata = {**args.metadata, "learning_rate_tuned": True}
 
+    def _resolve_training_args(self, overrides: Dict[str, Any]) -> TrainingArguments:
+        """The arguments one ``train`` call uses: the stored ones (else the defaults) with ``overrides`` on top.
+
+        The one place where stored arguments and keyword overrides are merged (also for ``TextPredictionTrainer.train``
+        and the learning-rate probes), so a field that is neither stored nor overridden always has its current default.
+        """
+        base = self._training_args if self._training_args is not None else TrainingArguments()
+        return base._with_overrides(overrides)
+
     def train(
         self,
         output_dir: Optional[str] = None,
@@ -1390,14 +1416,7 @@ class Trainer(TrainerAnnotationMixin, FeatureLearningDefinition):
         if model_with_gradiend_cls is None:
             model_with_gradiend_cls = self.model_with_gradiend_cls or self.default_model_with_gradiend_cls
 
-        # Merge TrainingArguments: start with stored args, then apply overrides
-        args: Optional[TrainingArguments] = self._training_args
-        if args is not None:
-            args = TrainingArguments.from_dict({**args.to_dict(), **training_args_overrides})
-        elif training_args_overrides:
-            args = TrainingArguments.from_dict(training_args_overrides)
-        else:
-            args = TrainingArguments()
+        args = self._resolve_training_args(training_args_overrides)
         args.__post_init__()  # validate e.g. not both supervised_encoder and supervised_decoder
 
         # Apply seed early so data loading, model init, and training are deterministic when seed is set
@@ -1720,6 +1739,7 @@ class Trainer(TrainerAnnotationMixin, FeatureLearningDefinition):
                                         training_args=args,
                                         trust_remote_code=getattr(args, "trust_remote_code", False),
                                     )
+                                    self._configure_model(model_instance)
                                     runtime_monitor.mark(
                                         "trainer:seed:create_model_with_gradiend:done",
                                         seed=seed_value,

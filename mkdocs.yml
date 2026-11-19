@@ -131,6 +131,8 @@ nav:
             - TrainerConfig: api/training/TrainerConfig.md
             - TransitionSpec: api/training/TransitionSpec.md
             - set_seed: api/training/set_seed.md
+            - audit_clm_alignment: api/training/audit_clm_alignment.md
+            - register_chat_format: api/training/register_chat_format.md
             - Learning-rate search: api/training/lr_search.md
         - Evaluation:
             - Overview: api/evaluation/index.md

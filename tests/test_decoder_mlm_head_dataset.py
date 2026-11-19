@@ -112,7 +112,7 @@ def test_neutral_training_masked_dataset_uses_clm_next_token_without_mlm_head_la
         is_decoder_only_model=True,
         prediction_objective=TextPredictionTrainer._neutral_encoder_prediction_objective("clm_mlm_head"),
         target_key="label",
-        balance_column="feature_class_id",
+        balance_column="feature_class_id", label_token_protocol="no_leading_space"
     )
     assert dataset.prediction_objective == "clm_next_token"
     assert dataset.mlm_head_target_labels is None
