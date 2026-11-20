@@ -25,10 +25,12 @@ The module has no dependency on the model or dataset code, so those can import i
 
 from __future__ import annotations
 
+import contextlib
 import datetime
 import re
+import threading
 from abc import ABC, abstractmethod
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Tuple
 
 from gradiend.trainer.core.arguments import parse_chat_template_date
 from gradiend.util.logging import get_logger, suppress_tokenizer_length_warning
@@ -89,6 +91,9 @@ DEFAULT_CHAT_TEMPLATE_DATE = "2024-07-26"
 It is the date the Llama 3.1 and 3.2 templates themselves fall back to. This is the one place that knows it; a trained
 model stores the date it was trained with, so changing this constant never changes an existing model.
 """
+
+
+_CLOCK_LOCK = threading.Lock()
 
 
 class ChatFormat(ABC):
@@ -190,8 +195,8 @@ class TemplateChatFormat(ChatFormat):
             self._frames[key] = self._render_frame(system)
         return self._frames[key]
 
-    def _strftime_now(self, format: str) -> str:  # noqa: A002 - the name of the template function's argument
-        """``strftime_now`` of the template: the fixed date, formatted as the template asks."""
+    def _clock_read(self) -> datetime.datetime:
+        """The time a template sees when it asks for the current time: midnight of the fixed date."""
         self.inserts_date = True
         date = self._effective_date()
         if self._logged_date != date:
@@ -208,7 +213,39 @@ class TemplateChatFormat(ChatFormat):
                 "rows are reproducible.%s",
                 _tokenizer_name(self._tokenizer), date.isoformat(), source, hint,
             )
-        return datetime.datetime(date.year, date.month, date.day).strftime(format)
+        return datetime.datetime(date.year, date.month, date.day)
+
+    @contextlib.contextmanager
+    def _fixed_clock(self) -> Iterator[None]:
+        """Make the ``strftime_now`` that transformers gives every template read the fixed date.
+
+        transformers defines ``strftime_now`` itself (``datetime.now().strftime(...)`` in its chat-template module).
+        Passing our own function as a keyword argument works on transformers 4 but not on 5, which turns template
+        keyword arguments into strings. So the clock that function reads is swapped for the duration of the
+        rendering instead; this behaves the same on every transformers version that has ``strftime_now``.
+        """
+        from transformers.utils import chat_template_utils
+
+        owner = self
+
+        class _FixedDatetime(datetime.datetime):
+            @classmethod
+            def now(cls, tz=None):  # noqa: D102 - the clock the template reads
+                return owner._clock_read()
+
+        if not hasattr(chat_template_utils, "datetime"):
+            raise RuntimeError(
+                "This transformers version does not expose the clock of its chat-template module, so the date a "
+                "chat template inserts cannot be fixed. Pin the date in the tokenizer's template or use another "
+                "transformers version."
+            )
+        with _CLOCK_LOCK:  # the swap is process-wide, so two renderings must not overlap
+            original = chat_template_utils.datetime
+            chat_template_utils.datetime = _FixedDatetime
+            try:
+                yield
+            finally:
+                chat_template_utils.datetime = original
 
     def _render_frame(self, system: str) -> Tuple[str, str]:
         sentinel = _USER_TEXT_SENTINEL
@@ -222,9 +259,8 @@ class TemplateChatFormat(ChatFormat):
         problems: List[str] = []
         for messages in attempts:
             try:
-                rendered = self._tokenizer.apply_chat_template(
-                    messages, tokenize=False, add_generation_prompt=True, strftime_now=self._strftime_now
-                )
+                with self._fixed_clock():
+                    rendered = self._tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
             except Exception as exc:  # noqa: BLE001 - e.g. a template without a system role
                 problems.append(f"{[m['role'] for m in messages]}: {type(exc).__name__}: {exc}")
                 continue
