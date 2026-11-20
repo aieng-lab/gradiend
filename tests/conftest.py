@@ -46,6 +46,42 @@ def _release_test_memory():
             torch.cuda.empty_cache()
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _cache_hub_tokenizer_loads():
+    """Load each Hub tokenizer once per session and hand out independent copies.
+
+    transformers 5 sends a Hub request (additional_chat_templates) for every
+    ``AutoTokenizer.from_pretrained("<hub id>")``. Unauthenticated, the Hub
+    rate-limits these (HTTP 429, long retries), which made the suite very slow.
+    Local directories are never cached, and every caller gets a deep copy
+    because tests mutate tokenizers (special tokens, pad token, ...).
+    """
+    import copy
+
+    from transformers import AutoTokenizer
+
+    original = AutoTokenizer.__dict__["from_pretrained"].__func__
+    cache = {}
+
+    def cached_from_pretrained(cls, name, *args, **kwargs):
+        key = None
+        if isinstance(name, str) and not os.path.exists(name):
+            try:
+                key = (cls, name, args, tuple(sorted(kwargs.items())))
+                hash(key)
+            except TypeError:
+                key = None
+        if key is None:
+            return original(cls, name, *args, **kwargs)
+        if key not in cache:
+            cache[key] = original(cls, name, *args, **kwargs)
+        return copy.deepcopy(cache[key])
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(AutoTokenizer, "from_pretrained", classmethod(cached_from_pretrained))
+        yield
+
+
 def pytest_configure(config):
     repo_basetemp = Path(__file__).resolve().parents[1] / ".pytest_tmp_local"
     repo_basetemp.mkdir(parents=True, exist_ok=True)
