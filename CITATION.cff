@@ -1,24 +1,50 @@
 cff-version: 1.2.0
-message: If you use this software, please cite both the article from preferred-citation and the software itself.
+message: If you use gradiend, please cite the package paper (preferred-citation). If you use the GRADIEND method itself, please also cite the original method paper listed under references.
+type: software
+title: gradiend
+abstract: An open-source Python package for learning feature directions from factual-counterfactual MLM and CLM gradients in language models (GRADIEND).
 authors:
   - family-names: Drechsel
     given-names: Jonathan
   - family-names: Herbold
     given-names: Steffen
-title: 'GRADIEND: Feature Learning within Neural Networks Exemplified through Biases'
-version: 0.3.0
-url: https://arxiv.org/abs/2502.01406
-date-released: '2026-11-19'
+repository-code: https://github.com/aieng-lab/gradiend
+license: Apache-2.0
 preferred-citation:
+  type: conference-paper
+  title: 'The GRADIEND Python Package: An End-to-End System for Gradient-Based Feature Learning'
   authors:
     - family-names: Drechsel
       given-names: Jonathan
     - family-names: Herbold
       given-names: Steffen
-  title: 'GRADIEND: Feature Learning within Neural Networks Exemplified through Biases'
-  url: https://arxiv.org/abs/2502.01406
-  type: generic
-  year: '2025'
-  conference: {}
-  publisher: {}
-
+  editors:
+    - family-names: Agrawal
+      given-names: Sweta
+    - family-names: Abad
+      given-names: Alberto
+  collection-title: 'Proceedings of the 2026 Conference on Empirical Methods in Natural Language Processing: System Demonstrations'
+  conference:
+    name: '2026 Conference on Empirical Methods in Natural Language Processing (EMNLP): System Demonstrations'
+    city: Budapest
+    country: HU
+  publisher:
+    name: Association for Computational Linguistics
+  year: 2026
+  month: 10
+  start: 189
+  end: 198
+  doi: 10.18653/2026.emnlp-demos.18
+  url: https://aclanthology.org/2026.emnlp-demos.18/
+  isbn: 979-8-89176-461-3
+references:
+  - type: article
+    title: 'GRADIEND: Feature Learning within Neural Networks Exemplified through Biases'
+    authors:
+      - family-names: Drechsel
+        given-names: Jonathan
+      - family-names: Herbold
+        given-names: Steffen
+    year: 2025
+    journal: arXiv preprint arXiv:2502.01406
+    url: https://arxiv.org/abs/2502.01406

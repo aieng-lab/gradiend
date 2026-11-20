@@ -25,11 +25,15 @@ Example use cases ([gradiend/examples](https://github.com/aieng-lab/gradiend/tre
 
 ---
 
+**Try it in Google Colab:** [Quickstart](https://colab.research.google.com/github/aieng-lab/gradiend/blob/main/gradiend/examples/demo/01_quickstart_english_pronouns.ipynb) · [Sentiment](https://colab.research.google.com/github/aieng-lab/gradiend/blob/main/gradiend/examples/demo/02_sentiment.ipynb) · [Compare features](https://colab.research.google.com/github/aieng-lab/gradiend/blob/main/gradiend/examples/demo/03_compare_features.ipynb) · [Learn your own feature](https://colab.research.google.com/github/aieng-lab/gradiend/blob/main/gradiend/examples/demo/04_learn_your_own_feature.ipynb)
+
+---
+
 ## Get started
 
 - **[Installation](installation.md)** — Install the package and optional dependencies.
 - **[Train your first GRADIEND model](start.md)** — A minimal runnable example to train and evaluate in a few steps.
-- **Read the Python package paper**: **[The GRADIEND Python Package: An End-to-End System for Gradient-Based Feature Learning](https://arxiv.org/abs/2602.23993)** — describes the design and implementation of the library.
+- **Read the Python package paper**: **[The GRADIEND Python Package: An End-to-End System for Gradient-Based Feature Learning](https://aclanthology.org/2026.emnlp-demos.18/)** (EMNLP 2026 System Demonstrations) — describes the design and implementation of the library.
 
 ---
 

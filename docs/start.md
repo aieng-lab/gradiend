@@ -2,6 +2,8 @@
 
 This page walks through a **self-contained** workflow: you train and evaluate a GRADIEND model for singular-plural feature based on English third person pronouns.
 
+Prefer your browser? Run it in Google Colab: [Quickstart](https://colab.research.google.com/github/aieng-lab/gradiend/blob/main/gradiend/examples/demo/01_quickstart_english_pronouns.ipynb) · [Sentiment](https://colab.research.google.com/github/aieng-lab/gradiend/blob/main/gradiend/examples/demo/02_sentiment.ipynb) · [Compare features](https://colab.research.google.com/github/aieng-lab/gradiend/blob/main/gradiend/examples/demo/03_compare_features.ipynb) · [Learn your own feature](https://colab.research.google.com/github/aieng-lab/gradiend/blob/main/gradiend/examples/demo/04_learn_your_own_feature.ipynb)
+
 ## 1. Create data with [`TextPredictionDataCreator`][gradiend.data.text.prediction.creator.TextPredictionDataCreator]
 
 To extract the desired feature *singular-plural*, we extract data where feature-related tokens are masked. We use third-person pronouns in English for that, i.e., *he*/*she*/*it* (3SG) and *they* (3PL). We need some base data to filter from and extract masks (e.g., *he* gets replaced by *[MASK]*); for the sake of this simple example, we use an explicit list of texts (75+ in the runnable script; a short excerpt is shown below):
