@@ -6,12 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-## [0.3.0] - 2026-11-19
+## [0.3.0] - 2026-11-20
 
 Minor release with breaking changes for decoder-only models: the default label rule (`label_token_protocol`), which models count as Instruct models and their chat format, and `torch_dtype` now takes effect. Models trained with 0.2.5 or earlier keep loading and keep the rules they were trained with; retrain to get the new behaviour, or see the entries below to reproduce 0.2.5.
 
 ### Added
 
+- Python 3.12 and 3.13 are supported and tested in CI (Python 3.9 stays supported).
 - Divergence rows (shared token prefix) drop a leading BOS and truncate from the tail, so the label stays on a real token; models with a pre-training cache from 0.2.5 need one run with `use_cache=False`.
 
 - `TrainingArguments.label_token_protocol` (`"first_differing_token"` by default, or `"no_leading_space"`): which token a decoder-only (`clm_next_token`) training row supervises. `first_differing_token` labels the first token where the factual and the alternative target differ and uses the tokens they share as context; a row without an alternative gets the same token variant as a contrast row with the same prefix: the leading-space variant (`▁she`, `Ġshe`) after a prefix that ends in whitespace, the literal token after a glued or empty prefix (`(`, `
