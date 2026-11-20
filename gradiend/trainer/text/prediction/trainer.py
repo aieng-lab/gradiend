@@ -31,6 +31,7 @@ from gradiend.trainer.trainer import Trainer, _apply_seed
 from gradiend.trainer.config import TrainerConfig
 from gradiend.trainer.core.arguments import TrainingArguments
 from gradiend.model import ModelWithGradiend
+from gradiend.model.model_with_gradiend import checkpoint_base_model_id
 from gradiend.trainer.text.prediction.dataset import (
     TextTrainingDataset,
     create_masked_pair_from_text,
@@ -389,14 +390,32 @@ class TextPredictionTrainer(Trainer):
     def _prediction_objective(self, model_or_tokenizer: Any = None):
         return resolve_prediction_objective(self, model_or_tokenizer)
 
+    def _base_model_in_force(self, model: Any = None) -> Any:
+        """The model the CLM audit looks at: the model in force, as the base model it is built on.
+
+        The model in force is ``model``, else the trainer's ``_model_arg``. That is a Hugging Face id or directory
+        before training, but the saved GRADIEND checkpoint after ``train()`` (and for every seed while the seeds are
+        evaluated). A checkpoint directory is not a Hugging Face model directory (no ``model_type``, no tokenizer),
+        so it stands for the base model its ``config.json`` records (see :func:`checkpoint_base_model_id`). A model
+        object is returned as it is. The objective, the tokenizer and the memory of the audit (``_clm_audit``) all
+        read this one answer, so they cannot disagree about which model is trained.
+        """
+        model = model if model is not None else self._model_arg
+        if isinstance(model, (str, os.PathLike)):
+            path = os.fspath(model)
+            base_model = checkpoint_base_model_id(path)
+            return path if base_model is None else base_model
+        return model
+
     def _tokenizer_for_clm_audit(self, model: Any = None) -> Optional[Any]:
         """Tokenizer available before training starts: the model object's, or one loaded from a hub id.
 
         A tokenizer loaded from a hub id goes through the training loader (:class:`AutoTokenizerForLM`) with the
         trainer's ``instruction_model`` and ``chat_template_date``, so the audit aligns the rows of an Instruct model
-        in its chat format, as training will.
+        in its chat format, as training will. For a saved checkpoint the id is that of its base model (see
+        :meth:`_base_model_in_force`).
         """
-        model_arg = model if model is not None else self._model_arg
+        model_arg = self._base_model_in_force(model)
         if hasattr(model_arg, "tokenizer"):
             return model_arg.tokenizer
         if isinstance(model_arg, str):
@@ -423,7 +442,7 @@ class TextPredictionTrainer(Trainer):
         A hub id costs one ``AutoConfig`` read, not a tokenizer or the weights. Returns None if the config cannot be
         read (a warning names the error).
         """
-        loaded = model if model is not None else (getattr(self, "model", None) or getattr(self, "_model_arg", None))
+        loaded = self._base_model_in_force(model)
         if not isinstance(loaded, str):
             return loaded
         from types import SimpleNamespace
@@ -449,9 +468,10 @@ class TextPredictionTrainer(Trainer):
         (see :meth:`_recorded_label_token_protocol`), else the one of ``training_args``.
 
         Decided from cheap facts first (the rule, then the objective from the model config), so a trainer that does
-        not train a decoder-only model under clm_next_token never loads a tokenizer or touches its data. The outcome
-        is remembered together with the data it audited (``_clm_audit``): reloaded or re-split data is audited
-        again, the same data is not.
+        not train a decoder-only model under clm_next_token never loads a tokenizer or touches its data. The model
+        that decides is the base model of the model in force (:meth:`_base_model_in_force`), so a trained checkpoint
+        is audited, or not, exactly as the model it was trained from. The outcome is remembered together with the
+        data it audited (``_clm_audit``): reloaded or re-split data is audited again, the same data is not.
 
         Args:
             training_args: Arguments of the run; default the trainer's own.
@@ -459,10 +479,12 @@ class TextPredictionTrainer(Trainer):
         """
         args = training_args or getattr(self, "_training_args", None)
         model_in_force = model if model is not None else self._model_arg
+        base_model = self._base_model_in_force(model_in_force)
         recorded = self._recorded_label_token_protocol(model_in_force)
         protocol = recorded or getattr(args, "label_token_protocol", None) or self._label_token_protocol()
         policy = getattr(args, "clm_unalignable_rows", "error")
-        scope = (protocol, policy, id(model_in_force), getattr(args, "prediction_objective", None))
+        base_key = base_model if isinstance(base_model, str) else id(base_model)
+        scope = (protocol, policy, base_key, getattr(args, "prediction_objective", None))
         audit = getattr(self, "_clm_audit", None)
         if audit is not None and audit[0] == scope and (audit[1] is None or audit[1] is self._combined_data):
             return
@@ -470,13 +492,13 @@ class TextPredictionTrainer(Trainer):
         def applies() -> bool:
             if protocol != "first_differing_token":
                 return False
-            loaded = self._model_for_clm_objective(model)
+            loaded = self._model_for_clm_objective(base_model)
             return loaded is not None and self._prediction_objective(loaded).name == "clm_next_token"
 
         if not applies():
             self._clm_audit = (scope, None)
             return
-        tokenizer = self._tokenizer_for_clm_audit(model)
+        tokenizer = self._tokenizer_for_clm_audit(base_model)
         if tokenizer is None:
             return
         self._ensure_data()
